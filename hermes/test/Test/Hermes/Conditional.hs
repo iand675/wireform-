@@ -5,14 +5,19 @@ module Test.Hermes.Conditional (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Short as SBS
+import Data.Either (isLeft)
 import Data.List (intercalate)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import qualified Network.HTTP.Headers.DeltaBase as DB
 import qualified Network.HTTP.Headers.ETag as E
 import qualified Network.HTTP.Headers.From as From
+import qualified Network.HTTP.Headers.IfMatch as IM
 import qualified Network.HTTP.Headers.IfNoneMatch as INM
 import qualified Network.HTTP.Headers.IfRange as IR
 import qualified Network.HTTP.Headers.Mason as M
@@ -36,18 +41,10 @@ parseWith p bs = case runParser p bs of
 
 -- Generators ----------------------------------------------------------------
 
-genTagText :: Gen ST.ShortText
-genTagText = ST.fromString <$> Gen.list (Range.linear 0 10) (Gen.element tagChars)
-  where
-    tagChars = ['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9']
-
-
 genEntityTag :: Gen E.EntityTag
-genEntityTag =
-  Gen.choice
-    [ E.StrongETag <$> genTagText
-    , E.WeakETag <$> genTagText
-    ]
+genEntityTag = do
+  wrap <- Gen.element [E.StrongETagBytes, E.WeakETagBytes]
+  wrap . SBS.pack <$> Gen.list (Range.linear 0 20) (Gen.element (0x21 : [0x23 .. 0x7e] <> [0x80 .. 0xff]))
 
 
 genIfNoneMatch :: Gen INM.IfNoneMatch
@@ -111,6 +108,55 @@ prop_inm_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+fieldLines :: Spec
+fieldLines = do
+  it "preserves entity tag order across comma lists and repeated field lines" $ do
+    let tags = E.StrongETag "a,b" :| [E.WeakETag "next", E.StrongETag ""]
+        fields name = headerMapFromList [(name, " , \"a,b\", ,"), (name, " W/\"next\", \"\" \t")]
+    lookupHeader @IM.IfMatch (fields "if-match") `shouldBe` Right (Just (IM.IfMatchEntityTags tags))
+    lookupHeader @INM.IfNoneMatch (fields "if-none-match") `shouldBe` Right (Just (INM.IfNoneMatchTags tags))
+    headerMapToList (setHeader (INM.IfNoneMatchTags tags) (headerMapFromList []))
+      `shouldBe` [("if-none-match", "\"a,b\", W/\"next\", \"\"")]
+  it "distinguishes an empty precondition list from the wildcard and absence" $ do
+    lookupHeader @IM.IfMatch (headerMapFromList [("if-match", " , \t")]) `shouldBe` Right (Just IM.IfMatchNoTags)
+    lookupHeader @INM.IfNoneMatch (headerMapFromList [("if-none-match", ",")]) `shouldBe` Right (Just INM.IfNoneMatchNoTags)
+    lookupHeader @INM.IfNoneMatch (headerMapFromList [("if-none-match", " * \t")]) `shouldBe` Right (Just INM.IfNoneMatchAny)
+    lookupHeader @INM.IfNoneMatch (headerMapFromList []) `shouldBe` Right Nothing
+  it "rejects a wildcard combined with another field line and an invalid later tag" $ do
+    isLeft (lookupHeader @IM.IfMatch (headerMapFromList [("if-match", "*"), ("if-match", "\"other\"")])) `shouldBe` True
+    isLeft (lookupHeader @INM.IfNoneMatch (headerMapFromList [("if-none-match", "\"first\""), ("if-none-match", "bad")])) `shouldBe` True
+  it "accepts field whitespace around ETag and rejects duplicate ETag lines" $ do
+    lookupHeader @E.ETag (headerMapFromList [("etag", "\tW/\"x\" ")]) `shouldBe` Right (Just (E.ETag (E.WeakETag "x")))
+    isLeft (lookupHeader @E.ETag (headerMapFromList [("etag", "\"x\""), ("etag", "\"y\"")])) `shouldBe` True
+  it "accepts and preserves exactly the RFC 9110 entity-tag octets" $
+    mapM_ checkByte [0 .. 255]
+  it "shares the opaque tag codec across match lists, range validators and delta bases" $ do
+    let body = BS.pack [0x5c, 0x2c, 0x80, 0xff]
+        wire = "\"" <> body <> "\""
+        weak = "W/" <> wire
+        strongTag = E.StrongETagBytes (SBS.toShort body)
+        weakTag = E.WeakETagBytes (SBS.toShort body)
+        tags = strongTag :| [weakTag]
+        entries name = headerMapFromList [(name, wire), (name, weak)]
+        singleton name = headerMapFromList [(name, wire)]
+    lookupHeader @IM.IfMatch (entries "if-match") `shouldBe` Right (Just (IM.IfMatchEntityTags tags))
+    lookupHeader @INM.IfNoneMatch (entries "if-none-match") `shouldBe` Right (Just (INM.IfNoneMatchTags tags))
+    lookupHeader @IR.IfRange (singleton "if-range") `shouldBe` Right (Just (IR.IfRangeETag strongTag))
+    lookupHeader @DB.DeltaBase (singleton "delta-base") `shouldBe` Right (Just (DB.DeltaBase strongTag))
+    isLeft (lookupHeader @DB.DeltaBase (entries "delta-base")) `shouldBe` True
+    headerMapToList (setHeader (INM.IfNoneMatchTags tags) (headerMapFromList []))
+      `shouldBe` [("if-none-match", wire <> ", " <> weak)]
+  where
+    checkByte byte = do
+      let wire = BS.pack [0x22, byte, 0x22]
+      case E.parseETag wire of
+        Right (E.ETag tag) -> do
+          (byte == 0x21 || (byte >= 0x23 && byte <= 0x7e) || byte >= 0x80) `shouldBe` True
+          E.entityTagBytes tag `shouldBe` SBS.singleton byte
+          M.toStrictByteString (E.renderEntityTag tag) `shouldBe` wire
+        Left _ -> (byte <= 0x20 || byte == 0x22 || byte == 0x7f) `shouldBe` True
+
+
 -- If-Range ------------------------------------------------------------------
 
 unit_ifrange_tag :: Spec
@@ -162,6 +208,24 @@ unit_from_render =
     in M.toStrictByteString (From.renderFrom v) `shouldBe` "a@b.com"
 
 
+unit_from_field_lines :: Spec
+unit_from_field_lines = it "reads a single mailbox with comments and canonicalizes its spelling" $ do
+  let field value = ("From", value)
+      typed = lookupHeader @From.From . headerMapFromList . map field
+      wire = " (sender) Build (queue (ops\\) note)) Bot <(local) \"ci ops\"(label)@(host)[ 192.0.2.4\t ]> (end) "
+      address = From.From (MB.Mailbox (Just "Build Bot") (MB.AddrSpec "ci ops" (MB.DomainLiteral "192.0.2.4")))
+  typed [wire] `shouldBe` Right (Just address)
+  headerMapToList (setHeader address (headerMapFromList [])) `shouldBe`
+    [("from", "Build Bot <\"ci ops\"@[192.0.2.4]>")]
+  typed ["\t(first) ops+robot (local) @ (domain) example.org (last) "] `shouldBe`
+    Right (Just (From.From (MB.Mailbox Nothing (MB.AddrSpec "ops+robot" (MB.DomainName "example.org")))))
+  typed ["", "a@b.com"] `shouldSatisfy` isLeft
+  typed ["a@b.com", "a@b.com"] `shouldSatisfy` isLeft
+  typed ["a@b.com", "c@d.com"] `shouldSatisfy` isLeft
+  mapM_ (\value -> typed [value] `shouldSatisfy` isLeft)
+    ["", "a@b.com, c@d.com", "Team: a@b.com;", "a@b.com (unclosed", "a@b.com\r\n (folded)"]
+
+
 prop_from_roundtrip :: Property
 prop_from_roundtrip = property $ do
   v <- forAll genFrom
@@ -182,6 +246,7 @@ tests =
             , unit_inm_render
             , it "round-trips" prop_inm_roundtrip
             ]
+      , describe "Entity tag field lines" fieldLines
       , describe "If-Range" $
           sequence_
             [ unit_ifrange_tag
@@ -193,6 +258,7 @@ tests =
           sequence_
             [ unit_from_parse
             , unit_from_render
+            , unit_from_field_lines
             , it "round-trips" prop_from_roundtrip
             ]
       ]

@@ -66,6 +66,8 @@ module Arrow.Column.Buffer (
   bytesToStorable,
   unsafeBytesToStorable,
   copyStorable,
+  swapCopy,
+  swapViewCopy,
   withBytesPtr,
   withStorablePtr,
 ) where
@@ -604,3 +606,55 @@ decimal256ToInteger (Decimal256 w0 w1 w2 w3) =
 decimal256FromInteger :: Integer -> Decimal256
 decimal256FromInteger x =
   Decimal256 (fromInteger x) (fromInteger (x `shiftR` 64)) (fromInteger (x `shiftR` 128)) (fromInteger (x `shiftR` 192))
+
+
+{- | Copy @n@ elements of @w@ bytes, reversing the byte order of each
+group of the pattern within every element. This converts either
+byte-order direction; callers supply complete, checked elements.
+-}
+swapCopy :: [Int] -> Int -> Int -> ByteString -> ByteString
+swapCopy pat w n src = createAligned (n * w) $ \dst -> withBytesPtr src $ \s ->
+  let elemLoop !e
+        | e >= n = pure ()
+        | otherwise = groups (e * w) pat >> elemLoop (e + 1)
+      groups !_ [] = pure ()
+      groups !base (g : gs) = swapGroup (s `plusPtr` base) (dst `plusPtr` base) g >> groups (base + g) gs
+  in elemLoop 0
+
+
+swapGroup :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+swapGroup s d g = go 0
+  where
+    go !k
+      | k >= g = pure ()
+      | otherwise = do
+          b <- peekByteOff s (g - 1 - k) :: IO Word8
+          pokeByteOff d k b
+          go (k + 1)
+
+
+{- | Convert a checked 16-byte view descriptor buffer between little and big
+endian. @sourceBig@ describes the input. Inline string bytes and the
+four-byte long-string prefix stay byte-for-byte unchanged; only length,
+buffer index and offset are numeric. The caller supplies complete views.
+-}
+swapViewCopy :: Bool -> ByteString -> ByteString
+swapViewCopy sourceBig src = createAligned (BS.length src) $ \dst -> withBytesPtr src $ \s -> do
+  copyBytes dst s (BS.length src)
+  let go !base
+        | base >= BS.length src = pure ()
+        | otherwise = do
+            a <- peekByteOff s base :: IO Word8
+            b <- peekByteOff s (base + 1) :: IO Word8
+            c <- peekByteOff s (base + 2) :: IO Word8
+            d <- peekByteOff s (base + 3) :: IO Word8
+            let !len = if sourceBig then word d c b a else word a b c d
+            swapGroup (s `plusPtr` base) (dst `plusPtr` base) 4
+            if len > 12
+              then do
+                swapGroup (s `plusPtr` (base + 8)) (dst `plusPtr` (base + 8)) 4
+                swapGroup (s `plusPtr` (base + 12)) (dst `plusPtr` (base + 12)) 4
+              else pure ()
+            go (base + 16)
+      word a b c d = fromIntegral a .|. (fromIntegral b `shiftL` 8) .|. (fromIntegral c `shiftL` 16) .|. (fromIntegral d `shiftL` 24) :: Word64
+  go 0

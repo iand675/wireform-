@@ -20,14 +20,16 @@ module Network.HTTP.Headers.MaxForwards (
   renderMaxForwards,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hMaxForwards)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 
 
--- | A @Max-Forwards@ value: the remaining forwarding hop count.
+{- | A @Max-Forwards@ value: the remaining forwarding hop count.
+The decoder accepts values through the largest nonnegative 'Int'.
+-}
 newtype MaxForwards = MaxForwards {maxForwards :: Int}
   deriving stock (Eq, Show)
 
@@ -38,17 +40,20 @@ instance KnownHeader MaxForwards where
   type Direction MaxForwards = 'Request
 
 
-  parseFromHeaders _ headers = case runParser maxForwardsParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Max-Forwards header: " <> show rest
-    Fail -> Left "Failed to parse Max-Forwards header"
-    Err e -> Left e
+  parseFromHeaders _ fields = case fields of
+    wire :| [] -> withShortDecimal wire (Right . MaxForwards) fallback
+    _ -> fallback
+    where
+      fallback = parseSingleFieldLine "Max-Forwards" maxForwardsParser fields
+
+
   renderToHeaders _ = M.toStrictByteString . renderMaxForwards
   headerName _ = hMaxForwards
 
 
 maxForwardsParser :: ParserT st String MaxForwards
-maxForwardsParser = MaxForwards <$> anyAsciiDecimalInt
+maxForwardsParser =
+  MaxForwards . fromIntegral <$> boundedDecimalWord (fromIntegral (maxBound :: Int)) (err "Max-Forwards exceeds the supported range")
 
 
 renderMaxForwards :: MaxForwards -> M.Builder

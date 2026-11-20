@@ -1,9 +1,7 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9218 — the HTTP @Priority@ header field, used by clients to signal,
 and by servers to (re)assign, the relative priority of responses on a
-connection. It carries an RFC 8941 Structured Field Dictionary.
+connection. It carries a Structured Fields dictionary.
 
 == Grammar
 
@@ -19,13 +17,8 @@ Two members are defined:
   As a Dictionary member with a Boolean value it may be written bare
   (just @i@), which is equivalent to @i=?1@.
 
-Members other than @u@ and @i@, and any member parameters, are ignored
-for forward compatibility, as required by the specification.
-
-Note: the boolean payload is parsed and rendered directly here (via the
-@?1@/@?0@ literals) rather than through the shared RFC 8941 boolean
-helpers, whose 'Bool' mapping is inverted relative to RFC 9218's wire
-semantics (true = @?1@).
+Receivers ignore unknown members, parameters, and values outside the defined
+type or range. The last member of a repeated key determines its value.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9218.html>
 
@@ -37,13 +30,6 @@ module Network.HTTP.Headers.Priority (
   renderPriority,
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
-import Data.CharSet.Posix.Ascii (digit)
-import Data.List (foldl')
-import qualified Data.List.NonEmpty as NE
-import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPriority)
 import qualified Network.HTTP.Headers.Mason as M
@@ -76,15 +62,7 @@ instance KnownHeader Priority where
   type Direction Priority = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser priorityParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise ->
-          Left ("Unconsumed input after parsing Priority: " <> show leftover)
-    Fail -> Left "Failed to parse Priority header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = fmap fromDictionary . parseStructuredFieldDictionary "Priority"
 
 
   renderToHeaders _ = M.toStrictByteString . renderPriority
@@ -93,75 +71,19 @@ instance KnownHeader Priority where
   headerName _ = hPriority
 
 
--- ---------------------------------------------------------------------------
--- Parser
--- ---------------------------------------------------------------------------
-
--- | One Dictionary member, reduced to whatever this header cares about.
-data Member
-  = MUrgency !Int
-  | MIncremental !Bool
-  | MOther
-
-
 priorityParser :: ParserT st String Priority
-priorityParser = do
-  ows
-  members <- member `sepBy` (ows *> $(char ',') *> ows)
-  ows
-  pure (foldl' applyMember defaultPriority members)
+priorityParser = fromDictionary <$> structuredFieldDictionary
 
 
--- | Apply a member, later members overriding earlier ones (RFC 8941 §3.2).
-applyMember :: Priority -> Member -> Priority
-applyMember p = \case
-  MUrgency n -> p {priorityUrgency = clampUrgency n}
-  MIncremental b -> p {priorityIncremental = b}
-  MOther -> p
-
-
--- | RFC 9218 §4.1: urgency outside @0@–@7@ is treated as the default.
-clampUrgency :: Int -> Int
-clampUrgency n
-  | n >= 0 && n <= 7 = n
-  | otherwise = 3
-
-
-member :: ParserT st String Member
-member = do
-  key <- memberKey
-  case key of
-    "u" -> do
-      $(char '=')
-      n <- rfc8941Integer
-      _ <- rfc8941Parameters
-      pure (MUrgency n)
-    "i" -> do
-      b <- ($(char '=') *> sfBoolean) <|> pure True
-      _ <- rfc8941Parameters
-      pure (MIncremental b)
-    _ -> do
-      _ <- optional ($(char '=') *> rfc8941ItemValue)
-      _ <- rfc8941Parameters
-      pure MOther
-
-
--- | An RFC 8941 Dictionary @member-key@: @(lcalpha \/ "*") *(lcalpha \/ DIGIT \/ "_-.\*")@.
-memberKey :: ParserT st e ST.ShortText
-memberKey =
-  shortASCIIFromParser_
-    ( skipSatisfyAscii (`CharSet.member` firstKeyChar)
-        *> skipMany (skipSatisfyAscii (`CharSet.member` keyChar))
-    )
+fromDictionary :: [StructuredFieldDictionaryEntry] -> Priority
+fromDictionary = foldl' applyMember defaultPriority
   where
-    lcalpha = CharSet.range 'a' 'z'
-    firstKeyChar = lcalpha <> "*"
-    keyChar = lcalpha <> digit <> "_-.*"
-
-
--- | An RFC 8941 @sf-boolean@ payload, with RFC 9218's truth mapping (@?1@ = true).
-sfBoolean :: ParserT st e Bool
-sfBoolean = $(char '?') *> ((True <$ $(char '1')) <|> (False <$ $(char '0')))
+    applyMember priority (StructuredFieldDictionaryEntry key (StructuredItem (StructuredFieldItem value _))) =
+      case (key, value) of
+        ("u", Integer n) | n >= 0 && n <= 7 -> priority {priorityUrgency = n}
+        ("i", Boolean b) -> priority {priorityIncremental = b}
+        _ -> priority
+    applyMember priority _ = priority
 
 
 -- ---------------------------------------------------------------------------
@@ -170,4 +92,8 @@ sfBoolean = $(char '?') *> ((True <$ $(char '1')) <|> (False <$ $(char '0')))
 
 renderPriority :: Priority -> M.Builder
 renderPriority (Priority u inc) =
-  "u=" <> R.rfc8941Integer u <> (if inc then ", i" else mempty)
+  "u=" <> R.rfc8941Integer urgency <> (if inc then ", i" else mempty)
+  where
+    urgency
+      | u >= 0 && u <= 7 = u
+      | otherwise = priorityUrgency defaultPriority

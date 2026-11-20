@@ -5,14 +5,18 @@ module Test.Hermes.WebDavCore (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Short as SBS
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
 import Network.HTTP.Headers.DAV
 import Network.HTTP.Headers.Depth
 import Network.HTTP.Headers.Destination
+import Network.HTTP.Headers.ETag (EntityTag (..))
 import Network.HTTP.Headers.If
 import Network.HTTP.Headers.LockToken
 import qualified Network.HTTP.Headers.Mason as M
@@ -131,6 +135,76 @@ unit_if_render =
       `shouldBe` "(Not <urn:uuid:abc>)"
 
 
+unit_if_typed :: Spec
+unit_if_typed = it "decodes tagged alternatives, negation and opaque entity-tag bytes" $ do
+  let tagBody = BS.snoc (BS.replicate 4096 0xff) 0x5d
+      wire = "</dav/doc?q=%2F> (not[W/\"" <> tagBody <> "\"] <urn:uuid:one>)([\"other\"]) <https://example.org> (<urn:uuid:two>)"
+      fields = headerMapFromList [("If", " \t" <> wire <> " ")]
+      matchTag tag = IfCondition False (IfEntityTag (StrongETagBytes tag))
+      matchToken uri = IfCondition False (IfStateToken uri)
+      expected =
+        IfTagged $
+          IfResource
+            "/dav/doc?q=%2F"
+            ( IfList (IfCondition True (IfEntityTag (WeakETagBytes (SBS.toShort tagBody))) :| [matchToken "urn:uuid:one"])
+                :| [IfList (matchTag "other" :| [])]
+            )
+            :| [IfResource "https://example.org" (IfList (matchToken "urn:uuid:two" :| []) :| [])]
+      canonical = "</dav/doc?q=%2F> (Not [W/\"" <> tagBody <> "\"] <urn:uuid:one>) ([\"other\"]) <https://example.org> (<urn:uuid:two>)"
+      write value = headerMapToList (setHeader @If value (headerMapFromList []))
+  case lookupHeader @If fields of
+    Right (Just value) -> do
+      ifConditionLists value `shouldBe` Right expected
+      ifConditionsBytes value `shouldBe` SBS.toShort wire
+      write value `shouldBe` [("if", wire)]
+      write (fromIfConditionLists expected) `shouldBe` [("if", canonical)]
+      render renderIf (fromIfConditionLists expected) `shouldBe` canonical
+      M.toStrictByteString ("prefix=" <> renderIf (fromIfConditionLists expected) <> ";suffix")
+        `shouldBe` "prefix=" <> canonical <> ";suffix"
+    other -> expectationFailure (show other)
+
+
+unit_if_invalid :: Spec
+unit_if_invalid = it "rejects mixed list modes, empty conditions and invalid operand syntax" $ do
+  let field wire = ("If", wire)
+      readIf = lookupHeader @If . headerMapFromList
+  readIf [field "(<urn:one>)", field "(<urn:two>)"] `shouldSatisfy` isLeft
+  mapM_
+    (\wire -> readIf [field wire] `shouldSatisfy` isLeft)
+    [ ""
+    , "()"
+    , "(/dav/x)"
+    , "([ \"tag\"])"
+    , "([\"tag\" ])"
+    , "([*])"
+    , "(([\"nested\"]))"
+    , "(Not Not <urn:uuid:c>)"
+    , "(<relative>)"
+    , "(</dav/x>)"
+    , "(<urn:uuid:x#fragment>)"
+    , "(/docs <urn:one>)"
+    , "(<urn:one>) </a> (<urn:two>)"
+    , "</a>"
+    , "</a> <https://example.org/a> (<urn:one>)"
+    , "<relative> (<urn:one>)"
+    , "<//example.org> (<urn:one>)"
+    , "</ path> (<urn:one>)"
+    ]
+
+
+prop_if :: Property
+prop_if = property $ do
+  lists <- forAll (Gen.choice [IfUntagged <$> neGen genList, IfTagged <$> neGen genResource])
+  let value = fromIfConditionLists lists
+      fields = setHeader value (headerMapFromList [])
+  fmap (fmap ifConditionLists) (lookupHeader @If fields) === Right (Just (Right lists))
+  where
+    genResource = IfResource <$> Gen.element ["/docs/a?q=1", "https://example.test", "https://[::1]:8443/"] <*> neGen genList
+    genList = IfList <$> neGen (IfCondition <$> Gen.bool <*> genOperand)
+    genOperand = Gen.choice [IfStateToken <$> uriText, IfEntityTag <$> genTag]
+    genTag = Gen.element [StrongETagBytes "", WeakETagBytes "revision", StrongETagBytes (SBS.toShort (BS.pack [0x80, 0xff, 0x5d, 0x5c]))]
+
+
 -- ---------------------------------------------------------------------------
 -- Lock-Token
 -- ---------------------------------------------------------------------------
@@ -150,9 +224,9 @@ unit_locktoken_render =
 
 
 uriText :: Gen ST.ShortText
-uriText = ST.fromString <$> Gen.string (Range.linear 1 20) (Gen.element uriChars)
+uriText = ST.fromString . ("urn:example:" ++) <$> Gen.string (Range.linear 1 20) (Gen.element uriChars)
   where
-    uriChars = ['a' .. 'z'] ++ ['A' .. 'Z'] ++ ['0' .. '9'] ++ ":/?#@.-_~"
+    uriChars = ['a' .. 'z'] ++ ['A' .. 'Z'] ++ ['0' .. '9'] ++ ":/?@.-_~"
 
 
 prop_locktoken :: Property
@@ -251,6 +325,56 @@ prop_timeout = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+typedFields :: Spec
+typedFields = describe "typed field lines" $ do
+  it "validates Destination and Lock-Token URIs and rejects repeated singleton fields" $ do
+    let destination wire = ("Destination", wire)
+        lockToken wire = ("Lock-Token", wire)
+        readDestination = lookupHeader @Destination . headerMapFromList
+        readLockToken = lookupHeader @LockToken . headerMapFromList
+    readDestination [destination "\t/a%20b?q=/ "]
+      `shouldBe` Right (Just (Destination "/a%20b?q=/"))
+    readDestination [destination "https://[2001:db8::1]:443/"]
+      `shouldBe` Right (Just (Destination "https://[2001:db8::1]:443/"))
+    readDestination [destination "/a", destination "/b"] `shouldSatisfy` isLeft
+    mapM_
+      (\wire -> readDestination [destination wire] `shouldSatisfy` isLeft)
+      ["", "relative", "//example.org", "/x#anchor", "/a%0Z", "https://[broken]/", "/space here"]
+    readLockToken [lockToken " <https://lock.example>\t"]
+      `shouldBe` Right (Just (LockToken "https://lock.example"))
+    readLockToken [lockToken "<urn:one>", lockToken "<urn:two>"] `shouldSatisfy` isLeft
+    mapM_
+      (\wire -> readLockToken [lockToken wire] `shouldSatisfy` isLeft)
+      ["<>", "</absolute-path>", "< urn:one>", "<urn:one >", "<urn:one#fragment>", "<urn:a%ZZ>", "<urn:one>garbage"]
+
+  it "combines DAV classes and Timeout choices across field lines" $ do
+    let dav wire = ("DAV", wire)
+        timeout wire = ("Timeout", wire)
+        readDAV = lookupHeader @DAV . headerMapFromList
+        readTimeout = lookupHeader @Timeout . headerMapFromList
+    readDAV [dav " , 1,, ", dav "<https://dav.example>, 3"]
+      `shouldBe` Right (Just (DAV (ComplianceToken "1" :| [ComplianceURL "https://dav.example", ComplianceToken "3"])))
+    readDAV [dav ",,"] `shouldBe` Right (Just DAVEmpty)
+    readDAV [dav "1, </relative>"] `shouldSatisfy` isLeft
+    readTimeout [timeout ",sEcOnD-0004294967295, ", timeout "infinite, Second-0"]
+      `shouldBe` Right (Just (Timeout (TimeSeconds 4294967295 :| [TimeInfinite, TimeSeconds 0])))
+    mapM_
+      (\wire -> readTimeout [timeout wire] `shouldSatisfy` isLeft)
+      ["", ",,", "Second-4294967296", "Second-18446744073709551616", "Second- 1", "Second-+1", "InfiniteX"]
+
+  it "accepts case-insensitive Depth and Overwrite literals with singleton cardinality" $ do
+    let depth wire = ("Depth", wire)
+        overwrite wire = ("Overwrite", wire)
+        readDepth = lookupHeader @Depth . headerMapFromList
+        readOverwrite = lookupHeader @Overwrite . headerMapFromList
+    readDepth [depth " InFInIty\t"] `shouldBe` Right (Just DepthInfinity)
+    readOverwrite [overwrite "\tf "] `shouldBe` Right (Just (Overwrite False))
+    readDepth [depth "0", depth "1"] `shouldSatisfy` isLeft
+    readOverwrite [overwrite "T", overwrite "F"] `shouldSatisfy` isLeft
+    readDepth [depth "infinity0"] `shouldSatisfy` isLeft
+    readOverwrite [overwrite "True"] `shouldSatisfy` isLeft
+
+
 -- ---------------------------------------------------------------------------
 -- Suite
 -- ---------------------------------------------------------------------------
@@ -269,6 +393,9 @@ tests =
       , unit_destination_render
       , unit_if_parse
       , unit_if_render
+      , unit_if_typed
+      , unit_if_invalid
+      , it "typed If conditions round-trip" prop_if
       , unit_locktoken_parse
       , unit_locktoken_render
       , it "Lock-Token round-trips" prop_locktoken
@@ -278,4 +405,5 @@ tests =
       , unit_timeout_parse
       , unit_timeout_render
       , it "Timeout round-trips" prop_timeout
+      , typedFields
       ]

@@ -4,10 +4,13 @@ module Test.Hermes.DefactoSecurity (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
 import qualified Network.HTTP.Headers.DNT as DNT
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
@@ -74,9 +77,12 @@ unit_xxss_render = it "renders disabled and full forms" $ do
 
 
 reportGen :: Gen ST.ShortText
-reportGen = ST.fromString <$> Gen.string (Range.linear 1 16) (Gen.element uriChars)
+reportGen = do
+  prefix <- Gen.element ["/", "../", "https://example.test/", "?event=", "#"]
+  suffix <- ST.fromString <$> Gen.string (Range.linear 1 16) (Gen.element uriChars)
+  pure (prefix <> suffix <> "%2F")
   where
-    uriChars = ['a' .. 'z'] ++ ['A' .. 'Z'] ++ ['0' .. '9'] ++ "/:.-_?=&%"
+    uriChars = ['a' .. 'z'] ++ ['A' .. 'Z'] ++ ['0' .. '9'] ++ "/.-_~"
 
 
 xxssGen :: Gen XX.XXSSProtection
@@ -96,6 +102,34 @@ prop_xxss_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+unit_xxss_typed :: Spec
+unit_xxss_typed = it "checks directive uniqueness and validates the reporting URI-reference" $ do
+  let field values = headerMapFromList (map (\bytes -> ("X-XSS-Protection", bytes)) values)
+      value = XX.XXSSEnabled True (Just "../reports/x%2Fy?value=ok#latest")
+  lookupHeader @XX.XXSSProtection (field ["\t 1 ; REPORT = ../reports/x%2Fy?value=ok#latest ; MoDe=BLOCK ; \t"])
+    `shouldBe` Right (Just value)
+  lookupHeader @XX.XXSSProtection (field ["1;\t "]) `shouldBe` Right (Just (XX.XXSSEnabled False Nothing))
+  lookupRawHeader "X-XSS-Protection" (setHeader value (field []))
+    `shouldBe` Just ("1; mode=block; report=../reports/x%2Fy?value=ok#latest" :| [])
+  mapM_
+    (\bad -> lookupHeader @XX.XXSSProtection (field bad) `shouldSatisfy` isLeft)
+    [ ["0", "1"]
+    , ["1", "1"]
+    , ["0;mode=block"]
+    , ["1; mode=block; MODE=block"]
+    , ["1;report=/a;Report=/b"]
+    , ["1;mode=invalid"]
+    , ["1;report="]
+    , ["1;;"]
+    , ["1;other=ignore"]
+    , ["1;report=/bad%2"]
+    , ["1;report=http://[bad]"]
+    , ["1;report=/x\r"]
+    , ["1;report=\"/x\""]
+    , ["1;report=/file\xff"]
+    ]
+
+
 --------------------------------------------------------------------------------
 -- X-Download-Options
 --------------------------------------------------------------------------------
@@ -111,6 +145,16 @@ unit_xdo_render :: Spec
 unit_xdo_render =
   it "renders noopen" $
     M.toStrictByteString (XDO.renderXDownloadOptions XDO.NoOpen) `shouldBe` "noopen"
+
+
+unit_xdo_typed :: Spec
+unit_xdo_typed = it "requires a single complete noopen token" $ do
+  let field values = headerMapFromList (map (\bytes -> ("X-Download-Options", bytes)) values)
+  lookupHeader @XDO.XDownloadOptions (field [" \tnoopen \t"]) `shouldBe` Right (Just XDO.NoOpen)
+  mapM_
+    (\bad -> lookupHeader @XDO.XDownloadOptions (field bad) `shouldSatisfy` isLeft)
+    [["noopen", "noopen"], ["noopen, noopen"], ["noopen-now"], ["noopen\r"], ["NOOPEN"]]
+  lookupRawHeader "X-Download-Options" (setHeader XDO.NoOpen (field [])) `shouldBe` Just ("noopen" :| [])
 
 
 --------------------------------------------------------------------------------
@@ -146,6 +190,9 @@ pcdpGen =
     , XP.PcdpByContentType
     , XP.PcdpByFtpFilename
     , XP.PcdpAll
+    , XP.PcdpNoneThisResponse
+    , XP.PcdpWithNoneThisResponse XP.MetaPolicyMasterOnly
+    , XP.PcdpWithNoneThisResponse XP.MetaPolicyNone
     ]
 
 
@@ -156,6 +203,21 @@ prop_pcdp_roundtrip = property $ do
   case parseOk XP.xPermittedCrossDomainPoliciesParser bs of
     Right v' -> v === v'
     Left err -> error (err <> " on " <> show bs)
+
+
+unit_pcdp_typed :: Spec
+unit_pcdp_typed = it "combines one meta-policy with the response-only directive" $ do
+  let field values = headerMapFromList (map (\bytes -> ("X-Permitted-Cross-Domain-Policies", bytes)) values)
+      value = XP.PcdpWithNoneThisResponse XP.MetaPolicyMasterOnly
+  lookupHeader @XP.XPermittedCrossDomainPolicies (field ["\t none-this-response\t "]) `shouldBe` Right (Just XP.PcdpNoneThisResponse)
+  mapM_
+    (\wire -> lookupHeader @XP.XPermittedCrossDomainPolicies (field wire) `shouldBe` Right (Just value))
+    [["master-only", "none-this-response"], ["none-this-response", "master-only"], ["master-only; none-this-response"], ["none-this-response, master-only"]]
+  lookupRawHeader "X-Permitted-Cross-Domain-Policies" (setHeader value (field []))
+    `shouldBe` Just ("master-only; none-this-response" :| [])
+  mapM_
+    (\bad -> lookupHeader @XP.XPermittedCrossDomainPolicies (field bad) `shouldSatisfy` isLeft)
+    [["all", "none"], ["all", "all"], ["none-this-response", "none-this-response"], ["none-this"], ["master-only;"], ["none-this-response, master-only, all"]]
 
 
 --------------------------------------------------------------------------------
@@ -178,6 +240,17 @@ unit_xdp_render = it "renders on/off" $ do
   M.toStrictByteString (XDP.renderXDNSPrefetchControl (XDP.XDNSPrefetchControl False)) `shouldBe` "off"
 
 
+unit_xdp_typed :: Spec
+unit_xdp_typed = it "folds ASCII keyword case and rejects repeated lines" $ do
+  let field values = headerMapFromList (map (\bytes -> ("X-DNS-Prefetch-Control", bytes)) values)
+  lookupHeader @XDP.XDNSPrefetchControl (field ["\t On "]) `shouldBe` Right (Just (XDP.XDNSPrefetchControl True))
+  lookupHeader @XDP.XDNSPrefetchControl (field [" OfF \t"]) `shouldBe` Right (Just (XDP.XDNSPrefetchControl False))
+  mapM_
+    (\bad -> lookupHeader @XDP.XDNSPrefetchControl (field bad) `shouldSatisfy` isLeft)
+    [["on", "off"], ["off", "off"], ["off, on"], ["onward"], ["off\r"]]
+  lookupRawHeader "X-DNS-Prefetch-Control" (setHeader (XDP.XDNSPrefetchControl False) (field [])) `shouldBe` Just ("off" :| [])
+
+
 --------------------------------------------------------------------------------
 -- DNT
 --------------------------------------------------------------------------------
@@ -198,6 +271,27 @@ unit_dnt_render = it "renders 0/1" $ do
   M.toStrictByteString (DNT.renderDNT (DNT.DNT False)) `shouldBe` "0"
 
 
+unit_dnt_field_lines :: Spec
+unit_dnt_field_lines = it "retains a valid extension suffix on either preference and enforces one line" $ do
+  let field values = headerMapFromList (map (\wire -> ("DNT", wire)) values)
+      suffix = "abc:/[];!%_~"
+      check preference digit = case DNT.dntWithExtension preference suffix of
+        Nothing -> expectationFailure "valid DNT extension failed validation"
+        Just value -> do
+          DNT.dntDoNotTrack value `shouldBe` preference
+          DNT.dntExtension value `shouldBe` suffix
+          let wire = digit <> ST.toByteString suffix
+          lookupHeader @DNT.DNT (field [" \t" <> wire <> "\t "]) `shouldBe` Right (Just value)
+          lookupRawHeader "DNT" (setHeader value (field [])) `shouldBe` Just (wire :| [])
+  check True "1"
+  check False "0"
+  lookupHeader @DNT.DNT (field []) `shouldBe` Right Nothing
+  mapM_
+    (\bad -> lookupHeader @DNT.DNT (field bad) `shouldSatisfy` isLeft)
+    [["1", "1"], ["1", "0"], [""], ["2abc"], ["1a b"], ["1a\""], ["1a\\"], ["1a,foo"], ["1a\xff"]]
+  mapM_ (\suffixBytes -> DNT.dntWithExtension True suffixBytes `shouldBe` Nothing) ["\t", "\"", "\\", ",", "é"]
+
+
 tests :: Spec
 tests =
   describe "DefactoSecurity" $ do
@@ -208,26 +302,31 @@ tests =
         , unit_xxss_mode_block
         , unit_xxss_full
         , unit_xxss_render
+        , unit_xxss_typed
         , it "round-trips" prop_xxss_roundtrip
         ]
     describe "X-Download-Options" $
       sequence_
         [ unit_xdo_parse
         , unit_xdo_render
+        , unit_xdo_typed
         ]
     describe "X-Permitted-Cross-Domain-Policies" $
       sequence_
         [ unit_pcdp_parse
         , unit_pcdp_render
+        , unit_pcdp_typed
         , it "round-trips" prop_pcdp_roundtrip
         ]
     describe "X-DNS-Prefetch-Control" $
       sequence_
         [ unit_xdp_parse
         , unit_xdp_render
+        , unit_xdp_typed
         ]
     describe "DNT" $
       sequence_
         [ unit_dnt_parse
         , unit_dnt_render
+        , unit_dnt_field_lines
         ]

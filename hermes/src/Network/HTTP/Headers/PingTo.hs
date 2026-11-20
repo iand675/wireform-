@@ -9,15 +9,21 @@ Spec (WHATWG HTML, hyperlink auditing): <https://html.spec.whatwg.org/multipage/
 
 See also: "Network.HTTP.Headers.PingFrom", "Network.HTTP.Headers.Referer", "Network.HTTP.Headers.Origin".
 -}
-module Network.HTTP.Headers.PingTo where
+module Network.HTTP.Headers.PingTo (
+  PingTo (..),
+  pingToParser,
+  renderPingTo,
+) where
 
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Char8 as BSC
+import Network.HTTP.Grammar.URIReference (browserURLBytes)
 import Network.HTTP.Headers (HeaderCardinality (..), HeaderIsRequestOrResponse (..), KnownHeader (..))
 import Network.HTTP.Headers.HeaderFieldName (hPingTo)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 
 
+-- | The serialized URL, with its wire spelling preserved.
 newtype PingTo = PingTo {pingTo :: String}
   deriving stock (Eq, Show)
 
@@ -28,13 +34,7 @@ instance KnownHeader PingTo where
   type Direction PingTo = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser pingToParser header of
-      OK pt "" -> Right pt
-      OK _ rest -> Left $ "Unconsumed input after parsing Ping-To header: " <> show rest
-      Fail -> Left "Failed to parse Ping-To header"
-      Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Ping-To" pingToParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderPingTo
@@ -44,7 +44,7 @@ instance KnownHeader PingTo where
 
 
 pingToParser :: ParserT st String PingTo
-pingToParser = PingTo <$> takeRestString
+pingToParser = PingTo <$> withByteString browserURLBytes (\() bytes -> pure (BSC.unpack bytes))
 
 
 renderPingTo :: PingTo -> M.Builder

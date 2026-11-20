@@ -8,6 +8,7 @@ import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import qualified Network.HTTP.ContentCoding as CC
+import Network.HTTP.Headers (headerMapFromList, lookupHeader)
 import qualified Network.HTTP.Headers.AcceptEncoding as AE
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -75,6 +76,35 @@ unit_render_omits_q1 =
     in render v `shouldBe` "gzip, br;q=0.8"
 
 
+selection :: Spec
+selection = describe "coding selection" $ do
+  let available = [CC.Identity, CC.GZip, CC.Brotli, CC.ZStd]
+      select fields = fmap (\field -> AE.preferredContentCoding field available) $
+        lookupHeader @AE.AcceptEncoding (headerMapFromList (map (\value -> ("Accept-Encoding", value)) fields))
+  it "distinguishes an absent, empty, and wildcard field" $ do
+    AE.preferredContentCoding Nothing [CC.GZip, CC.Identity] `shouldBe` Just CC.GZip
+    select [""] `shouldBe` Right (Just CC.Identity)
+    select ["*;q=0.2"] `shouldBe` Right (Just CC.GZip)
+    select ["*;q=0"] `shouldBe` Right Nothing
+  it "applies the most specific weight to each coding and keeps wire order on ties" $ do
+    select ["*;q=0, gzip;q=0.2", "br;q=0.8, identity;q=0.5"] `shouldBe` Right (Just CC.Brotli)
+    select ["gzip;q=0", "*;q=0.8"] `shouldBe` Right (Just CC.Brotli)
+    select ["BR", "x-gzip;q=1"] `shouldBe` Right (Just CC.Brotli)
+    select ["gzip;q=0, gzip;q=1, *;q=0"] `shouldBe` Right Nothing
+    let authored = AE.AcceptEncoding [AE.WeightedEncoding (AE.NamedEncoding CC.Brotli) 1, AE.WeightedEncoding (AE.NamedEncoding CC.GZip) 2]
+    AE.preferredContentCoding (Just authored) available `shouldBe` Just CC.Brotli
+  it "uses implicit identity as a fallback and ranks an explicit identity by its weight" $ do
+    select ["gzip;q=0.2"] `shouldBe` Right (Just CC.GZip)
+    select ["gzip;q=0.2, identity;q=0.5"] `shouldBe` Right (Just CC.Identity)
+    select ["*;q=0, identity"] `shouldBe` Right (Just CC.Identity)
+    select ["unknown;q=1, identity;q=0"] `shouldBe` Right Nothing
+  it "matches extension coding names without ASCII case sensitivity" $
+    case parseOk "X-CUSTOM;q=0.7, *;q=0" of
+      Right field -> AE.preferredContentCoding (Just field) [CC.Custom "x-custom", CC.Identity]
+        `shouldBe` Just (CC.Custom "x-custom")
+      other -> expectationFailure (show other)
+
+
 -- ---------------------------------------------------------------------------
 -- Property: render → parse round-trip
 -- ---------------------------------------------------------------------------
@@ -119,5 +149,6 @@ tests =
       , unit_q1_followed_by_more
       , unit_multi_with_q
       , unit_render_omits_q1
+      , selection
       , it "round-trip" prop_roundtrip
       ]

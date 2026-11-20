@@ -1,6 +1,8 @@
 module Test.MsgPack (msgPackTests) where
 
+import Control.Exception (ErrorCall, evaluate, try)
 import Data.ByteString qualified as BS
+import Data.Either (isLeft)
 import Data.Int (Int64)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -10,7 +12,9 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import MsgPack.Decode (decode)
 import MsgPack.Encode (encode)
+import MsgPack.Encoding qualified as Encoding
 import MsgPack.JSON (fromJSON, toJSON)
+import MsgPack.Stream qualified as Stream
 import MsgPack.Value qualified as MV
 import Test.Syd
 import Test.Syd.Hedgehog ()
@@ -336,6 +340,44 @@ unitTimestampRoundtrip =
       , it "timestamp96 (large negative)" $ do
           let v = MV.Timestamp (-1000000) 123456
           decode (encode v) `shouldBe` Right v
+      , it "matches canonical timestamp64 and timestamp96 bytes at the nanosecond limit" $ do
+          let check seconds bytes = do
+                let value = MV.Timestamp seconds 999999999
+                    wire = BS.pack bytes
+                encode value `shouldBe` wire
+                Encoding.encodingToByteString (Encoding.timestamp seconds 999999999) `shouldBe` wire
+                decode wire `shouldBe` Right value
+                case Stream.feedMore (Stream.streamDecode (BS.init wire)) (BS.singleton (BS.last wire)) of
+                  Stream.Done actual rest -> do
+                    actual `shouldBe` value
+                    rest `shouldBe` BS.empty
+                  step -> expectationFailure ("expected timestamp, got " ++ show step)
+          check 0 [0xd7, 0xff, 0xee, 0x6b, 0x27, 0xfc, 0, 0, 0, 0]
+          check (-1) ([0xc7, 12, 0xff, 0x3b, 0x9a, 0xc9, 0xff] ++ replicate 8 0xff)
+      , it "rejects malformed timestamp64 and timestamp96 in direct and streaming decodes" $ do
+          let check bytes = do
+                let wire = BS.pack bytes
+                isLeft (decode wire) `shouldBe` True
+                case Stream.feedMore
+                  (Stream.streamDecode (BS.cons 0x91 (BS.init wire)))
+                  (BS.singleton (BS.last wire)) of
+                  Stream.Fail _ -> pure ()
+                  step -> expectationFailure ("expected invalid timestamp to fail, got " ++ show step)
+          check [0xd7, 0xff, 0xee, 0x6b, 0x28, 0, 0, 0, 0, 0]
+          check ([0xc7, 12, 0xff, 0x3b, 0x9a, 0xca, 0] ++ replicate 8 0xff)
+      , it "rejects encoding an out-of-range timestamp, including extension type -1" $ do
+          let reject bytes = do
+                result <- try (evaluate (BS.length bytes)) :: IO (Either ErrorCall Int)
+                isLeft result `shouldBe` True
+              payload = BS.pack [0xee, 0x6b, 0x28, 0, 0, 0, 0, 0]
+          mapM_
+            ( \seconds -> do
+                reject (encode (MV.Timestamp seconds 1000000000))
+                reject (Encoding.encodingToByteString (Encoding.timestamp seconds 1000000000))
+            )
+            [0, -1]
+          reject (encode (MV.Ext (-1) payload))
+          reject (Encoding.encodingToByteString (Encoding.ext (-1) payload))
       ]
 
 

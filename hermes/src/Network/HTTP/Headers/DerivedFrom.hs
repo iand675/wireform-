@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 {- |
 @Derived-From@ — obsolete HTTP entity-header (RFC 2068 §19.6.2.3) indicating
 the version tag of the resource an enclosed entity was derived from before the
@@ -10,32 +12,48 @@ a @Content-Version@.
 Derived-From = \"Derived-From\" \":\" quoted-string
 @
 
-As with @Content-Version@ the tag is opaque (e.g. @\"2.1.1\"@); its decoded
-contents are captured as 'ST.ShortText' and re-emitted as an RFC 9110 §5.6.4
-quoted-string (DQUOTE / backslash escaped).
+As with @Content-Version@, the RFC 9110 quoted-string codec preserves the
+decoded tag octets.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc2068#section-19.6.2.3>
 
 See also: "Network.HTTP.Headers.ContentVersion", "Network.HTTP.Headers.ETag", "Network.HTTP.Headers.IfMatch".
 -}
 module Network.HTTP.Headers.DerivedFrom (
-  DerivedFrom (..),
+  DerivedFrom (DerivedFrom, DerivedFromBytes, derivedFromTag, derivedFromTagBytes),
   derivedFromParser,
   renderDerivedFrom,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Short as SBS
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Rendering (encodeHttpQuotedBytes)
 import Network.HTTP.Headers
+import Network.HTTP.Headers.ContentVersion (ContentVersion (ContentVersion, ContentVersionBytes), contentVersionParser, renderContentVersion)
 import Network.HTTP.Headers.HeaderFieldName (hDerivedFrom)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import qualified Network.HTTP.Headers.Rendering.Util as R
 
 
--- | @Derived-From@ value: the decoded version tag from the quoted-string.
-newtype DerivedFrom = DerivedFrom {derivedFromTag :: ST.ShortText}
+-- | @Derived-From@ value carrying the same opaque tag as @Content-Version@.
+newtype DerivedFrom = DerivedFromVersion ContentVersion
   deriving stock (Eq, Show)
+
+
+-- | The original text interface. The constructor encodes its tag as UTF-8.
+pattern DerivedFrom :: ST.ShortText -> DerivedFrom
+pattern DerivedFrom {derivedFromTag} = DerivedFromVersion (ContentVersion derivedFromTag)
+
+
+-- | The decoded tag octets. Use this when copying a received tag verbatim.
+pattern DerivedFromBytes :: SBS.ShortByteString -> DerivedFrom
+pattern DerivedFromBytes {derivedFromTagBytes} = DerivedFromVersion (ContentVersionBytes derivedFromTagBytes)
+
+
+{-# COMPLETE DerivedFrom #-}
+
+
+{-# COMPLETE DerivedFromBytes #-}
 
 
 instance KnownHeader DerivedFrom where
@@ -44,22 +62,18 @@ instance KnownHeader DerivedFrom where
   type Direction DerivedFrom = 'Request
 
 
-  parseFromHeaders _ headers = case runParser derivedFromParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Derived-From header: " <> show rest
-    Fail -> Left "Failed to parse Derived-From header"
-    Err e -> Left e
+  parseFromHeaders _ = parseQuotedFieldLine "Derived-From" (DerivedFromBytes . SBS.toShort)
 
 
-  renderToHeaders _ = M.toStrictByteString . renderDerivedFrom
+  renderToHeaders _ = encodeHttpQuotedBytes . derivedFromTagBytes
 
 
   headerName _ = hDerivedFrom
 
 
 derivedFromParser :: ParserT st String DerivedFrom
-derivedFromParser = ows *> (DerivedFrom . unsafeToRFC8941String <$> rfc8941String)
+derivedFromParser = DerivedFromVersion <$> contentVersionParser
 
 
 renderDerivedFrom :: DerivedFrom -> M.Builder
-renderDerivedFrom (DerivedFrom tag) = R.rfc8941String (RFC8941String tag)
+renderDerivedFrom (DerivedFromVersion version) = renderContentVersion version

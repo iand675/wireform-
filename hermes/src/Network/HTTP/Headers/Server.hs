@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- | The @Server@ response header (RFC 9110 §10.2.4).
 
 @Server@ advertises the software the origin server used to handle the
@@ -13,9 +11,8 @@ This mirrors the @User-Agent@ request header, which shares the grammar. A
 'Server' is modelled as a leading 'Product' plus the remaining
 whitespace-separated elements, each either a 'Comment' or a 'Product'.
 
-Comment bodies are parsed as RFC 9110 §5.6.5 @ctext@ (the 'commentCharSet')
-— unescaped comment text, without nested comments or quoted-pairs. This is
-sufficient for the values seen in practice and round-trips byte-for-byte.
+Comments use the RFC 9110 §5.6.5 grammar, including nested comments and
+quoted pairs. The renderer quotes literal delimiters in the opaque text.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-10.2.4>
 
@@ -28,16 +25,12 @@ module Network.HTTP.Headers.Server (
   renderServer,
 ) where
 
-import Control.Monad.Combinators (between)
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
-import qualified Data.Text as Text
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hServer)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (renderProductSequence, renderProductToken)
 
 
 data Server = Server
@@ -60,11 +53,7 @@ instance KnownHeader Server where
   type Direction Server = 'Response
 
 
-  parseFromHeaders _ headers = case runParser serverParser $ NE.head headers of
-    OK server "" -> Right server
-    OK _ rest -> Left $ "Unconsumed input after parsing Server header: " <> show rest
-    Fail -> Left "Failed to parse Server header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Server" serverParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderServer
@@ -74,26 +63,10 @@ instance KnownHeader Server where
 
 
 serverParser :: ParserT st String Server
-serverParser =
-  Server
-    <$> productParser
-    <*> many (rws *> ((Right <$> productParser) <|> (Left <$> commentParser)))
-  where
-    productParser = Product <$> rfc9110Token <*> optional ($(char '/') *> rfc9110Token)
-    commentParser = Comment <$> commentBody
-    commentBody =
-      between
-        $(char '(')
-        $(char ')')
-        (Text.pack <$> many (satisfyAscii (`CharSet.member` commentCharSet)))
+serverParser = productSequence Product Server
 
 
 renderServer :: Server -> M.Builder
-renderServer (Server fp rest) =
-  renderProduct fp
-    <> foldMap (\e -> " " <> either renderComment renderProduct e) rest
+renderServer (Server first rest) = renderProductSequence renderProduct first rest
   where
-    renderProduct (Product n mv) = case mv of
-      Nothing -> shortText n
-      Just v -> shortText n <> "/" <> shortText v
-    renderComment (Comment c) = "(" <> M.textUtf8 c <> ")"
+    renderProduct (Product name version) = renderProductToken name version

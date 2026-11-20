@@ -44,7 +44,6 @@ module MsgPack.Encoding (
   mapList,
 ) where
 
-import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
@@ -56,6 +55,7 @@ import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
+import MsgPack.Timestamp (checkExtension, invalidNanoseconds, timestamp64Word, validNanoseconds)
 import Wireform.Builder qualified as BB
 
 
@@ -194,8 +194,11 @@ binHeader !len
   | otherwise = BB.word8 0xc6 <> BB.word32BE (fromIntegral len)
 
 
+{- | Encode an extension. Type -1 is reserved for timestamps and requires
+a valid timestamp payload.
+-}
 ext :: Int8 -> ByteString -> Encoding
-ext ty !bs = case len of
+ext ty !bs = checkExtension ty bs $ case len of
   1 -> Encoding (BB.word8 0xd4 <> BB.int8 ty <> BB.byteString bs)
   2 -> Encoding (BB.word8 0xd5 <> BB.int8 ty <> BB.byteString bs)
   4 -> Encoding (BB.word8 0xd6 <> BB.int8 ty <> BB.byteString bs)
@@ -209,17 +212,14 @@ ext ty !bs = case len of
     !len = BS.length bs
 
 
--- | Timestamp encoding, mirroring 'MsgPack.Encode.writeTimestamp'.
+-- | Encode a timestamp. Raises an error if nanoseconds exceed 999999999.
 timestamp :: Int64 -> Word32 -> Encoding
 timestamp s ns
+  | not (validNanoseconds ns) = error invalidNanoseconds
   | ns == 0 && s >= 0 && s <= 0xFFFFFFFF =
       Encoding (BB.word8 0xd6 <> BB.word8 0xff <> BB.word32BE (fromIntegral s))
   | s >= 0 && s <= 0x3FFFFFFFF =
-      let !secHi = (fromIntegral s `quot` 0x100000000) .&. 0x3 :: Word64
-          !secLo = fromIntegral s .&. 0xFFFFFFFF :: Word64
-          !w64upper = ((fromIntegral ns :: Word64) .&. 0x3FFFFFFF) * 4 + secHi
-          !w64 = w64upper * 0x100000000 + secLo
-      in Encoding (BB.word8 0xd7 <> BB.word8 0xff <> BB.word64BE w64)
+      Encoding (BB.word8 0xd7 <> BB.word8 0xff <> BB.word64BE (timestamp64Word s ns))
   | otherwise =
       Encoding
         ( BB.word8 0xc7

@@ -1,3 +1,6 @@
+{-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
+
 {- |
 @X-Frame-Options@ — a legacy response header controlling whether a
 browser may render the page inside a @\<frame>@, @\<iframe>@,
@@ -12,9 +15,9 @@ X-Frame-Options = "DENY"
 @
 
 @DENY@ and @SAMEORIGIN@ are the only forms honoured by current
-browsers; the obsolete @ALLOW-FROM <origin>@ directive (RFC 7034
-§2.1) is still parsed and preserved verbatim for fidelity. The
-keywords are matched case-insensitively.
+browsers. The codec accepts the RFC 7034 @ALLOW-FROM@ form, including
+the slash-led URI suffix in its example. 'xFrameOptionsOrigin' gives the
+origin used by this legacy form. Directive keywords are case-insensitive.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc7034>
 
@@ -22,14 +25,16 @@ See also: "Network.HTTP.Headers.ContentSecurityPolicy", "Network.HTTP.Headers.XC
 -}
 module Network.HTTP.Headers.XFrameOptions (
   XFrameOptions (..),
+  xFrameOptionsOrigin,
   xFrameOptionsParser,
   renderXFrameOptions,
 ) where
 
 import qualified Data.ByteString as B
-import Data.Char (toLower)
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Authority (SerializedOrigin (..), serializedOriginParser)
+import Network.HTTP.Grammar.URIReference (uriPathSuffixBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXFrameOptions)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,7 +48,7 @@ data XFrameOptions
     Deny
   | -- | @SAMEORIGIN@ — permit framing only by same-origin documents.
     SameOrigin
-  | -- | Obsolete @ALLOW-FROM <serialized-origin>@; the origin is preserved verbatim.
+  | -- | Obsolete @ALLOW-FROM@. The address retains its original spelling.
     AllowFrom !ST.ShortText
   deriving stock (Eq, Show)
 
@@ -54,34 +59,50 @@ instance KnownHeader XFrameOptions where
   type Direction XFrameOptions = 'Response
 
 
-  parseFromHeaders _ headers = case runParser xFrameOptionsParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise ->
-          Left ("Unconsumed input after parsing X-Frame-Options: " <> show leftover)
-    Fail -> Left "Failed to parse X-Frame-Options header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ ("DENY" :| []) = Right Deny
+  parseFromHeaders _ ("SAMEORIGIN" :| []) = Right SameOrigin
+  parseFromHeaders _ fields = parseSingleFieldLine "X-Frame-Options" xFrameOptionsParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderXFrameOptions
+  renderToHeaders _ Deny = "DENY"
+  renderToHeaders _ SameOrigin = "SAMEORIGIN"
+  renderToHeaders _ field = M.toStrictByteString (renderXFrameOptions field)
 
 
   headerName _ = hXFrameOptions
 
 
 xFrameOptionsParser :: ParserT st String XFrameOptions
-xFrameOptionsParser = do
+xFrameOptionsParser =
   ows
-  tok <- rfc9110Token
-  case map toLower (ST.toString tok) of
-    "deny" -> Deny <$ ows
-    "sameorigin" -> SameOrigin <$ ows
-    "allow-from" -> do
-      rws
-      AllowFrom <$> takeRestShortText
-    _ -> failed
+    *> $( switchAsciiCI
+            [|
+              case _ of
+                "deny" -> pure Deny
+                "sameorigin" -> pure SameOrigin
+                "allow-from" -> rws *> (AllowFrom <$> shortASCIIFromParser_ allowFromAddress)
+              |]
+        )
+    <* notFollowedBy (skipSatisfyAscii isTokenChar)
+    <* ows
+
+
+allowFromAddress :: ParserT st String SerializedOrigin
+allowFromAddress = do
+  origin <- serializedOriginParser
+  let host = ST.toByteString (serializedHost origin)
+  if B.elem 44 host || B.elem 42 host
+    then failed
+    else origin <$ optional_ uriPathSuffixBytes
+{-# NOINLINE allowFromAddress #-}
+
+
+-- | The validated origin of a legacy @ALLOW-FROM@ address.
+xFrameOptionsOrigin :: XFrameOptions -> Maybe SerializedOrigin
+xFrameOptionsOrigin (AllowFrom address) = case runParser (allowFromAddress <* eof) (ST.toByteString address) of
+  OK origin _ -> Just origin
+  _ -> Nothing
+xFrameOptionsOrigin _ = Nothing
 
 
 renderXFrameOptions :: XFrameOptions -> M.Builder

@@ -16,14 +16,19 @@ import Control.Exception (bracket, finally)
 import Data.ByteString qualified as BS
 import Data.IORef
 import Network.HTTP1.Client
+import Network.HTTP1.Client.Pool (defaultPoolConfig, destroyPool, newPool, withPooledRequest)
 import Network.HTTP1.Encode qualified as Enc
 import Network.HTTP1.Method
+import Network.HTTP1.Parser (ParseError (ParseMessageTooLong, ParseUnexpectedEof))
 import Network.HTTP1.Server
 import Network.HTTP1.Status
 import Network.HTTP1.Types
 import Network.HTTP1.Version
 import Network.Socket qualified as NS
+import Network.Socket.ByteString qualified as NSB
 import System.Directory (removeFile)
+import System.IO.Error (tryIOError)
+import System.Timeout (timeout)
 import Test.Syd
 
 
@@ -32,10 +37,17 @@ tests =
   describe "Integration" $
     sequence_
       [ helloWorldTest
+      , hostAuthorityTest
+      , clientSocketOwnershipTest
       , echoBodyTest
       , chunkedRequestTest
       , chunkedResponseTest
+      , retainedTrailersTest
+      , boundedTrailersTest
+      , closeDelimitedPoolTest
+      , truncatedContentLengthTest
       , keepAlivePipelineTest
+      , repeatedConnectionOptionsTests
       , preEncodedGetTest
       , preEncodedHeadTest
       , sendFileGetTest
@@ -53,6 +65,29 @@ helloWorldTest = it "GET hello world" $
     Right r <- sendRequest (clientCfg port) req
     responseStatus r `shouldBe` OK
     bodyOf r >>= (`shouldBe` "Hello, world!\n")
+
+
+clientSocketOwnershipTest :: Spec
+clientSocketOwnershipTest = it "closes the owned TCP socket when the client connection is released" $
+  withServer (\_ -> pure (resp200 "ok")) $ \port -> do
+    Just socket <- withClientConnection (clientCfg port) (pure . clientConnectionSocket)
+    result <- tryIOError (NS.getPeerName socket)
+    case result of
+      Left _ -> pure ()
+      Right peer -> expectationFailure ("socket still connected to " <> show peer)
+
+
+hostAuthorityTest :: Spec
+hostAuthorityTest = it "validates Host before handing the request to the server" $
+  withServer echoHost $ \port -> do
+    let request host = (mkReq GET "/" port BodyEmpty []) {requestHeaders = [("Host", host)]}
+    Right good <- sendRequest (clientCfg port) (request "[2001:db8::1]:8080")
+    responseStatus good `shouldBe` OK
+    bodyOf good >>= (`shouldBe` "[2001:db8::1]:8080")
+    Right bad <- sendRequest (clientCfg port) (request "example.test:port")
+    responseStatus bad `shouldBe` BadRequest
+  where
+    echoHost = pure . resp200 . maybe "" id . findHost . requestHeaders
 
 
 echoBodyTest :: Spec
@@ -111,6 +146,59 @@ chunkedResponseTest = it "streaming chunked response" $
         (h : t) -> do writeIORef ref t; pure (Just h)
 
 
+retainedTrailersTest :: Spec
+retainedTrailersTest = it "retains ordered trailers beyond the receive buffer's lifetime" $ do
+  let first = BS.replicate 8182 0x61
+      second = BS.replicate 6000 0x62
+      headers = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Result\r\n\r\n"
+      wire = "4\r\nbody\r\n0\r\nX-Result: " <> first <> "\r\nX-Result:\t" <> second <> " \t\r\n\r\n"
+  withServer (\_ -> pure (wireResponse headers wire)) $ \port -> do
+    let request = mkReq GET "/" port BodyEmpty [("TE", "trailers"), ("Connection", "TE")]
+    Right response <- sendRequest (clientCfg port) request
+    bodyOf response `shouldReturn` "body"
+    responseTrailers response `shouldReturn` [("X-Result", first), ("X-Result", second)]
+
+
+boundedTrailersTest :: Spec
+boundedTrailersTest = it "bounds the full trailer section across individually small fields" $ do
+  let headers = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Result\r\n\r\n"
+      line = "X-Result: " <> BS.replicate 7000 0x61 <> "\r\n"
+      wire = "0\r\n" <> mconcat (replicate 5 line) <> "\r\n"
+  withServer (\_ -> pure (wireResponse headers wire)) $ \port -> do
+    let request = mkReq GET "/" port BodyEmpty [("TE", "trailers"), ("Connection", "TE")]
+    result <- sendRequest (clientCfg port) request
+    fmap responseStatus result `shouldBe` Left ParseMessageTooLong
+
+
+closeDelimitedPoolTest :: Spec
+closeDelimitedPoolTest = it "reads a close-delimited response and opens a fresh pooled connection" $
+  withServer handler $ \port ->
+    bracket (newPool defaultPoolConfig) destroyPool $ \pool -> do
+      let request = mkReq GET "/" port BodyEmpty []
+          readResponse (Right response) = do
+            responseStatus response `shouldBe` OK
+            bodyOf response `shouldReturn` "body before EOF"
+          readResponse (Left e) = expectationFailure (show e)
+      withPooledRequest pool (clientCfg port) request readResponse
+      withPooledRequest pool (clientCfg port) request readResponse
+  where
+    handler _ = pure (wireResponse "HTTP/1.1 200 OK\r\n\r\n" "body before EOF")
+
+
+truncatedContentLengthTest :: Spec
+truncatedContentLengthTest = it "reports EOF before the declared body length" $
+  withServer handler $ \port -> do
+    result <- sendRequest (clientCfg port) (mkReq GET "/" port BodyEmpty [])
+    fmap responseStatus result `shouldBe` Left ParseUnexpectedEof
+  where
+    handler _ = pure (wireResponse "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n" "short body")
+
+
+wireResponse :: BS.ByteString -> BS.ByteString -> Response
+wireResponse headBytes body =
+  Response OK HTTP_1_1 [("Connection", "close")] (BodyPreEncoded (PreEncoded (headBytes <> body) (BS.length headBytes))) (pure [])
+
+
 keepAlivePipelineTest :: Spec
 keepAlivePipelineTest = it "keep-alive: two requests on one connection" $
   withServer (\_ -> pure (resp200 "ok")) $ \port -> do
@@ -121,6 +209,59 @@ keepAlivePipelineTest = it "keep-alive: two requests on one connection" $
       _ <- bodyOf r2
       responseStatus r1 `shouldBe` OK
       responseStatus r2 `shouldBe` OK
+
+
+repeatedConnectionOptionsTests :: Spec
+repeatedConnectionOptionsTests = describe "Connection options across field lines" $ do
+  it "honors close on a later request field and advertises it beside other response options" $
+    withServer (respond [("Connection", "X-Hop")]) $ \port -> do
+      wire <- rawExchange port (request "GET" "/seen-first" "1.1" "Connection: keep-alive\r\nconnection: cLoSe\r\n" <> second)
+      wire `shouldSatisfy` BS.isInfixOf "Connection: X-Hop\r\nConnection: close\r\n"
+      wire `shouldSatisfy` BS.isSuffixOf "\r\n\r\n/seen-first"
+  it "honors an existing close on a later response field" $
+    withServer (respond [("Connection", "X-Hop"), ("connection", "ClOsE")]) $ \port -> do
+      wire <- rawExchange port (request "GET" "/seen-first" "1.1" "" <> second)
+      wire `shouldSatisfy` BS.isInfixOf "Connection: X-Hop\r\nconnection: ClOsE\r\n"
+      wire `shouldSatisfy` BS.isSuffixOf "\r\n\r\n/seen-first"
+  it "uses later keep-alive on HTTP/1.0 and gives later close precedence" $
+    withServer (\req -> pure ((resp200 (requestTarget req)) {responseVersion = HTTP_1_0})) $ \port -> do
+      let keep = request "GET" "/seen-first" "1.0" "Close: close\r\nConnection: X-Hop\r\nconnection: Keep-Alive\r\n"
+          close = request "GET" "/seen-second" "1.0" "Connection: keep-alive\r\nconnection: close\r\n"
+      wire <- rawExchange port (keep <> close <> second)
+      wire `shouldSatisfy` BS.isInfixOf "Connection: keep-alive\r\n"
+      wire `shouldSatisfy` BS.isInfixOf "\r\n\r\n/seen-firstHTTP/1.0 200"
+      wire `shouldSatisfy` BS.isInfixOf "Connection: close\r\n"
+      wire `shouldSatisfy` BS.isSuffixOf "\r\n\r\n/seen-second"
+  it "adds close to a pre-encoded head for GET and HEAD" $
+    withServer (\_ -> pure (Enc.precomputeResponse (resp200 "pre-encoded"))) $ \port -> do
+      let exchange method = rawExchange port (request method "/seen-first" "1.1" "Connection: close\r\n" <> second)
+      get <- exchange "GET"
+      headOnly <- exchange "HEAD"
+      get `shouldSatisfy` BS.isInfixOf "Connection: close\r\n"
+      get `shouldSatisfy` BS.isSuffixOf "\r\n\r\npre-encoded"
+      headOnly `shouldSatisfy` BS.isInfixOf "Connection: close\r\n"
+      headOnly `shouldSatisfy` BS.isSuffixOf "\r\n\r\n"
+  where
+    request method path version fields =
+      method <> " " <> path <> " HTTP/" <> version <> "\r\nHost: localhost\r\n" <> fields <> "\r\n"
+    second = request "GET" "/must-not-run" "1.1" "Connection: close\r\n"
+    respond fields req = pure ((resp200 (requestTarget req)) {responseHeaders = fields})
+
+
+rawExchange :: String -> BS.ByteString -> IO BS.ByteString
+rawExchange port wire = do
+  let hints = NS.defaultHints {NS.addrSocketType = NS.Stream}
+  (address : _) <- NS.getAddrInfo (Just hints) (Just "127.0.0.1") (Just port)
+  bracket (NS.openSocket address) NS.close $ \sock -> do
+    NS.connect sock (NS.addrAddress address)
+    NSB.sendAll sock wire
+    NS.shutdown sock NS.ShutdownSend
+    result <- timeout 3_000_000 (readAll sock [])
+    maybe (expectationFailure "server did not close the connection" >> pure "") pure result
+  where
+    readAll sock chunks = do
+      bytes <- NSB.recv sock 4096
+      if BS.null bytes then pure (BS.concat (reverse chunks)) else readAll sock (bytes : chunks)
 
 
 ------------------------------------------------------------------------

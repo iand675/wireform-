@@ -2,8 +2,8 @@
 collapse (replace) previously stored, undelivered push messages that share the
 same topic, so the user agent ultimately receives only the most recent one. Its
 value is at most 32 characters drawn from the URL- and filename-safe Base64
-alphabet (RFC 4648 §5): @ALPHA \/ DIGIT \/ "-" \/ "_"@. Parsing is lenient
-about the 32-character upper bound; the value is preserved verbatim.
+alphabet (RFC 4648 §5): @ALPHA \/ DIGIT \/ "-" \/ "_"@. The value is an
+opaque, case-sensitive token with its original spelling preserved.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc8030#section-5.4>
 
@@ -15,11 +15,9 @@ module Network.HTTP.Headers.Topic (
   renderTopic,
 ) where
 
-import Data.CharSet (CharSet)
-import qualified Data.CharSet as CharSet
-import Data.CharSet.Posix.Ascii (alnum)
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString as BS
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTopic)
 import qualified Network.HTTP.Headers.Mason as M
@@ -38,28 +36,25 @@ instance KnownHeader Topic where
   type Direction Topic = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser topicParser header of
-      OK topic "" -> Right topic
-      OK _ rest -> Left $ "Unconsumed input after parsing Topic header: " <> show rest
-      Fail -> Left "Failed to parse Topic header"
-      Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Topic" topicParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderTopic
+  renderToHeaders _ = ST.toByteString . topicValue
 
 
   headerName _ = hTopic
 
 
--- | The URL- and filename-safe Base64 alphabet (RFC 4648 §5).
-topicCharSet :: CharSet
-topicCharSet = alnum <> CharSet.fromList "-_"
-
-
 topicParser :: ParserT st String Topic
-topicParser = Topic <$> shortASCIIFromParser_ (some (satisfyAscii (`CharSet.member` topicCharSet)))
+topicParser =
+  withByteString base64UrlBytes $ \() wire ->
+    if BS.length wire <= topicLengthLimit
+      then pure (Topic (STU.fromByteStringUnsafe wire))
+      else err "Topic exceeds 32 characters"
+
+
+topicLengthLimit :: Int
+topicLengthLimit = 32
 
 
 renderTopic :: Topic -> M.Builder

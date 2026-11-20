@@ -42,7 +42,6 @@ module Network.HTTP.Headers.Range (
 ) where
 
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
@@ -60,9 +59,10 @@ import qualified Network.HTTP.Headers.Rendering.Util as R
 
 -- | A single byte-range spec.
 data ByteRange
-  = -- | @first-pos \"-\" [last-pos]@. @ByteRangeInt 0 (Just 499)@
-    --     means \"bytes 0\u2013499 inclusive\"; @ByteRangeInt 500
-    --     Nothing@ means \"from byte 500 to end\".
+  = {- | @first-pos \"-\" [last-pos]@. @ByteRangeInt 0 (Just 499)@
+    means \"bytes 0\u2013499 inclusive\"; @ByteRangeInt 500
+    Nothing@ means \"from byte 500 to end\".
+    -}
     ByteRangeInt !Word64 !(Maybe Word64)
   | -- | @\"-\" suffix-length@. \"The last N bytes\".
     ByteRangeSuffix !Word64
@@ -93,15 +93,7 @@ instance KnownHeader Range where
   type Direction Range = 'Request
 
 
-  parseFromHeaders _ headers = case runParser rangeParser (NE.head headers) of
-    OK r leftover
-      | B.null (dropOws leftover) -> Right r
-      | otherwise ->
-          Left ("Unconsumed input after parsing Range: " <> show leftover)
-    Fail -> Left "Failed to parse Range header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = parseSingleFieldLine "Range" rangeParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderRange
@@ -116,14 +108,10 @@ instance KnownHeader Range where
 
 -- | Parser for the full @Range@ value.
 rangeParser :: ParserT st String Range
-rangeParser = do
-  ows
-  unit <- rfc9110Token
-  $(char '=')
-  ows
-  if ST.toString unit == "bytes"
-    then ByteRanges <$> byteRangesParser
-    else OtherRanges unit <$> otherRangesParser
+rangeParser = ows *> branch bytesUnit (ByteRanges <$> byteRangesParser) extension
+  where
+    bytesUnit = $(switchAsciiCI [|case _ of "bytes=" -> pure ()|])
+    extension = OtherRanges <$> (rfc9110Token <* $(char '=')) <*> otherRangesParser
 
 
 {- | The @bytes-unit@ range-set. Exposed so callers can reuse
@@ -132,15 +120,16 @@ it after stripping the leading @bytes=@ themselves.
 byteRangesParser :: ParserT st String (NonEmpty ByteRange)
 byteRangesParser = rangesetSepBy byteRange
   where
-    byteRange =
-      (ByteRangeSuffix . fromIntegral <$> ($(char '-') *> anyAsciiDecimalWord))
-        <|> intRange
+    byteRange = branch $(char '-') (ByteRangeSuffix <$> position) intRange
+    position = boundedDecimalWord64 (err "Byte range offset or length exceeds Word64")
 
     intRange = do
-      a <- anyAsciiDecimalWord
+      a <- position
       $(char '-')
-      mb <- optional anyAsciiDecimalWord
-      pure (ByteRangeInt (fromIntegral a) (fmap fromIntegral mb))
+      b <- optional position
+      case b of
+        Just end | end < a -> err "Byte range ends before it starts"
+        _ -> pure (ByteRangeInt a b)
 
 
 otherRangesParser :: ParserT st String (NonEmpty RawRange)
@@ -162,11 +151,10 @@ otherRangesParser = rangesetSepBy raw
 -- | A non-empty 1#element list with OWS-around-comma separators.
 rangesetSepBy :: ParserT st String a -> ParserT st String (NonEmpty a)
 rangesetSepBy p = do
-  ows
-  x <- p
-  xs <- many (ows *> $(char ',') *> ows *> p)
-  ows
-  pure (x :| xs)
+  ranges <- httpList p
+  case ranges of
+    [] -> err "Range requires at least one member"
+    first : rest -> pure (first :| rest)
 
 
 -- ---------------------------------------------------------------------------
@@ -193,8 +181,8 @@ renderByteRanges rs =
 renderByteRange :: ByteRange -> M.Builder
 renderByteRange = \case
   ByteRangeInt a Nothing ->
-    M.wordDec (fromIntegral a) <> M.char7 '-'
+    M.word64Dec a <> M.char7 '-'
   ByteRangeInt a (Just b) ->
-    M.wordDec (fromIntegral a) <> M.char7 '-' <> M.wordDec (fromIntegral b)
+    M.word64Dec a <> M.char7 '-' <> M.word64Dec b
   ByteRangeSuffix n ->
-    M.char7 '-' <> M.wordDec (fromIntegral n)
+    M.char7 '-' <> M.word64Dec n

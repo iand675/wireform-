@@ -1,49 +1,46 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
-RFC 2227 @Meter@ — HTTP metering directives exchanged between a proxy cache
-and an origin server to report, and place limits on, reuse of a cached
-response.
+RFC 2227 @Meter@ — a list of hit-metering and usage-limiting directives.
+Full and abbreviated spellings may be mixed. Known directives use the
+request, report, and response grammars from the RFC. Unknown tokens
+remain available as opaque extensions for callers that forward them.
 
-== Grammar
+A present empty list remains a distinct value at the header API.
+The RFC assigns it different defaults in requests and responses.
 
-@
-Meter           = \"Meter\" \":\" #meter-directive
-meter-directive = meter-name [ \"=\" ( token | quoted-string ) ]
-meter-name      = token
-@
+Spec: <https://www.rfc-editor.org/rfc/rfc2227.html#section-5>
 
-The registered @meter-name@s include @do-report@\\/@d@,
-@will-report-and-limit@\\/@w@, @wont-report@\\/@x@, @wont-limit@\\/@y@,
-@wont-ask@\\/@!@, @count@\\/@c@, @max-uses@\\/@u@ and @max-refuses@\\/@r@.
-Rather than enumerate the (rarely deployed) registry, every directive is
-surfaced as a flat name with an optional value. A value is rendered as a
-bare token when it is token-safe and as a quoted-string (escaping @\"@ and
-@\\@) otherwise.
-
-Spec: <https://www.rfc-editor.org/rfc/rfc2227>
-
-See also: "Network.HTTP.Headers.CacheControl", "Network.HTTP.Headers.Age", "Network.HTTP.Headers.Pragma", "Network.HTTP.Headers.Warning".
+See also: "Network.HTTP.Headers.CacheControl", "Network.HTTP.Headers.Age".
 -}
 module Network.HTTP.Headers.Meter (
   Meter (..),
   MeterDirective (..),
+  MeterDirectiveKind (..),
+  MeterUsageCounts (..),
+  meterDirectiveKind,
+  meterDirectiveFromKind,
   meterParser,
   renderMeter,
 ) where
 
-import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
+import Data.Bits ((.|.))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Unsafe as BSU
+import Data.Char (toLower)
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Network.HTTP.Grammar.Parser
+import Network.HTTP.Grammar.Rendering (renderHttpQuotedString, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hMeter)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import qualified Network.HTTP.Headers.Rendering.Util as R
+import Numeric.Natural (Natural)
 
 
--- | A single meter-directive: a token name, optionally with a value.
 data MeterDirective = MeterDirective
   { meterName :: !ST.ShortText
   , meterValue :: !(Maybe ST.ShortText)
@@ -51,9 +48,37 @@ data MeterDirective = MeterDirective
   deriving stock (Eq, Show)
 
 
--- | The comma-separated list of directives carried by a @Meter@ header.
 newtype Meter = Meter {meterDirectives :: [MeterDirective]}
   deriving stock (Eq, Show)
+
+
+data MeterUsageCounts = MeterUsageCounts
+  { meterUses :: !Natural
+  , meterReuses :: !Natural
+  }
+  deriving stock (Eq, Show)
+
+
+data MeterDirectiveKind
+  = MeterWillReportAndLimit
+  | MeterWontReport
+  | MeterWontLimit
+  | MeterCount !MeterUsageCounts
+  | MeterMaxUses !Natural
+  | MeterMaxReuses !Natural
+  | MeterDoReport
+  | MeterDontReport
+  | MeterTimeoutMinutes !Natural
+  | MeterWontAsk
+  | MeterExtension !ST.ShortText !(Maybe ST.ShortText)
+  deriving stock (Eq, Show)
+
+
+data DirectiveGrammar
+  = Flag !HeaderMessage !MeterDirectiveKind
+  | Count
+  | DecimalArgument !(Natural -> MeterDirectiveKind)
+  | Extension
 
 
 instance KnownHeader Meter where
@@ -62,14 +87,7 @@ instance KnownHeader Meter where
   type Direction Meter = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser meterParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise -> Left ("Unconsumed input after parsing Meter: " <> show leftover)
-    Fail -> Left "Failed to parse Meter header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders settings fields = Meter <$> parseListFieldLines "Meter" (meterList (headerMessage settings)) fields
 
 
   renderToHeaders _ = M.toStrictByteString . renderMeter
@@ -79,37 +97,122 @@ instance KnownHeader Meter where
 
 
 meterParser :: ParserT st String Meter
-meterParser = Meter <$> (ows *> directives)
+meterParser = Meter <$> meterList Nothing
+
+
+meterList :: Maybe HeaderMessage -> ParserT st String [MeterDirective]
+meterList direction = httpList $ do
+  bytes <- rfc9110TokenBS
+  ows
+  let name = STU.fromByteStringUnsafe bytes
+  value <- case directiveGrammar bytes of
+    Flag expected _ -> Nothing <$ checkDirection expected
+    Count -> checkDirection HeaderRequest *> (Just <$> (equals *> shortASCIIFromParser_ (digits *> $(char '/') *> digits)))
+    DecimalArgument _ -> checkDirection HeaderResponse *> (Just <$> (equals *> shortASCIIFromParser_ digits))
+    Extension -> withOption equals (const (Just <$> (rfc9110Token <|> (ST.fromText <$> httpQuotedString)))) (pure Nothing)
+  pure (MeterDirective name value)
   where
-    directives = nonEmpty <|> pure []
-    nonEmpty = do
-      d <- directive
-      ds <- many (ows *> $(char ',') *> ows *> directive)
-      pure (d : ds)
-    directive = do
-      name <- rfc9110Token
-      val <- optional ($(char '=') *> (rfc9110Token <|> quotedString))
-      pure (MeterDirective name val)
+    equals = $(char '=') *> ows
+    digits = skipSome (skipSatisfyAscii isDigit)
+    checkDirection expected
+      | maybe True (== expected) direction = pure ()
+      | otherwise = err "Meter directive is invalid in this message direction"
+
+
+directiveGrammar :: ByteString -> DirectiveGrammar
+directiveGrammar bytes
+  | BS.length bytes == 1 =
+      case BSU.unsafeHead bytes .|. 32 of
+        119 -> Flag HeaderRequest MeterWillReportAndLimit -- w
+        120 -> Flag HeaderRequest MeterWontReport -- x
+        121 -> Flag HeaderRequest MeterWontLimit -- y
+        99 -> Count -- c
+        117 -> DecimalArgument MeterMaxUses -- u
+        114 -> DecimalArgument MeterMaxReuses -- r
+        100 -> Flag HeaderResponse MeterDoReport -- d
+        101 -> Flag HeaderResponse MeterDontReport -- e
+        116 -> DecimalArgument MeterTimeoutMinutes -- t
+        110 -> Flag HeaderResponse MeterWontAsk -- n
+        _ -> Extension
+directiveGrammar bytes = case lower of
+  "will-report-and-limit" -> request MeterWillReportAndLimit
+  "wont-report" -> request MeterWontReport
+  "wont-limit" -> request MeterWontLimit
+  "count" -> Count
+  "max-uses" -> DecimalArgument MeterMaxUses
+  "max-reuses" -> DecimalArgument MeterMaxReuses
+  "do-report" -> response MeterDoReport
+  "dont-report" -> response MeterDontReport
+  "timeout" -> DecimalArgument MeterTimeoutMinutes
+  "wont-ask" -> response MeterWontAsk
+  _ -> Extension
+  where
+    lower
+      | BSC.any (\c -> c >= 'A' && c <= 'Z') bytes = BSC.map toLower bytes
+      | otherwise = bytes
+    request = Flag HeaderRequest
+    response = Flag HeaderResponse
+
+
+{- | Interpret either spelling of a recognized directive. Invalid arguments
+supplied through the raw constructor yield 'Nothing'.
+-}
+meterDirectiveKind :: MeterDirective -> Maybe MeterDirectiveKind
+meterDirectiveKind (MeterDirective name value) =
+  case directiveGrammar (ST.toByteString name) of
+    Flag _ kind | Nothing <- value -> Just kind
+    Count -> do
+      (uses, suffix) <- BSC.readNatural =<< (ST.toByteString <$> value)
+      ('/', rest) <- BSC.uncons suffix
+      reuses <- wholeNatural rest
+      pure (MeterCount (MeterUsageCounts uses reuses))
+    DecimalArgument wrap -> wrap <$> (wholeNatural =<< (ST.toByteString <$> value))
+    Extension -> Just (MeterExtension name value)
+    _ -> Nothing
+  where
+    wholeNatural bytes = do
+      (number, rest) <- BSC.readNatural bytes
+      if BS.null rest then Just number else Nothing
+
+
+-- | Construct a directive using the abbreviated RFC spelling.
+meterDirectiveFromKind :: MeterDirectiveKind -> MeterDirective
+meterDirectiveFromKind = \case
+  MeterWillReportAndLimit -> flag "w"
+  MeterWontReport -> flag "x"
+  MeterWontLimit -> flag "y"
+  MeterCount (MeterUsageCounts uses reuses) -> valued "c" (decimal uses <> M.char7 '/' <> decimal reuses)
+  MeterMaxUses n -> valued "u" (decimal n)
+  MeterMaxReuses n -> valued "r" (decimal n)
+  MeterDoReport -> flag "d"
+  MeterDontReport -> flag "e"
+  MeterTimeoutMinutes n -> valued "t" (decimal n)
+  MeterWontAsk -> flag "n"
+  MeterExtension name value -> MeterDirective name value
+  where
+    flag name = MeterDirective name Nothing
+    valued name = MeterDirective name . Just . STU.fromByteStringUnsafe . M.toStrictByteString
+    decimal = M.integerDec . toInteger
 
 
 renderMeter :: Meter -> M.Builder
-renderMeter (Meter ds) = M.intersperse ", " (map renderDirective ds)
-  where
-    renderDirective (MeterDirective name Nothing) = R.shortText name
-    renderDirective (MeterDirective name (Just v)) =
-      R.shortText name <> M.char7 '=' <> renderTokenOrQuoted v
+renderMeter (Meter directives) = case directives of
+  [] -> mempty
+  first : rest -> renderDirective first <> foldMap ((", " <>) . renderDirective) rest
+{-# INLINE renderMeter #-}
 
 
-{- | Render a value as a bare token when it is token-safe, otherwise as a
-quoted-string with the mandatory escaping of @\"@ and @\\@.
--}
-renderTokenOrQuoted :: ST.ShortText -> M.Builder
-renderTokenOrQuoted t
-  | isToken s = R.shortText t
-  | otherwise = M.char8 '"' <> foldr esc mempty s <> M.char8 '"'
+renderDirective :: MeterDirective -> M.Builder
+renderDirective (MeterDirective name Nothing) = shortText name
+renderDirective (MeterDirective name (Just value)) = shortText name <> M.char7 '=' <> argument
   where
-    s = ST.toString t
-    isToken cs = not (null cs) && all (`CharSet.member` tokenCharSet) cs
-    esc c acc
-      | c == '"' || c == '\\' = M.char8 '\\' <> M.char8 c <> acc
-      | otherwise = M.char8 c <> acc
+    bytes = ST.toShortByteString value
+    argument
+      | not (SBS.null bytes) && SBS.all (isTokenChar . toEnum . fromIntegral) bytes = M.shortByteString bytes
+      | Count <- directiveGrammar (ST.toByteString name)
+      , SBS.all (\b -> (b >= 48 && b <= 57) || b == 47) bytes =
+          M.shortByteString bytes
+      | SBS.all (\b -> b == 9 || (b >= 32 && b < 127 && b /= 34 && b /= 92)) bytes =
+          M.char7 '"' <> M.shortByteString bytes <> M.char7 '"'
+      | otherwise = renderHttpQuotedString (ST.toText value)
+{-# INLINE renderDirective #-}

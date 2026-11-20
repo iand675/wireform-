@@ -61,6 +61,7 @@ jobs:
             liblz4-dev \
             libzstd-dev \
             libbrotli-dev \
+            libre2-dev pkg-config \
             librdkafka-dev \
             protobuf-compiler
 

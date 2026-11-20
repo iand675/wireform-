@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 The @Host@ request header carries the target URI's authority — the host and
 optional port the request is addressed to — letting a single server (or
@@ -21,14 +19,13 @@ module Network.HTTP.Headers.Host (
   renderHost,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Data.Word (Word16)
+import Network.HTTP.Grammar.Authority (hostAndPort, renderHostAndPort)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hHost)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
 -- | Host header value representing a hostname and optional port
@@ -47,13 +44,7 @@ instance KnownHeader Host where
   type Direction Host = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser hostParser header of
-      OK host "" -> Right host
-      OK _ rest -> Left $ "Unconsumed input after parsing Host header: " <> show rest
-      Fail -> Left "Failed to parse Host header"
-      Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Host" hostParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderHost
@@ -63,14 +54,8 @@ instance KnownHeader Host where
 
 
 hostParser :: ParserT st String Host
-hostParser = do
-  hostname <- rfc9110Token
-  port <- optional $ do
-    $(char ':')
-    anyAsciiDecimalWord
-  pure $ Host hostname (fromIntegral <$> port)
+hostParser = hostAndPort Host <|> (Host "" Nothing <$ eof)
 
 
 renderHost :: Host -> M.Builder
-renderHost (Host hostname mPort) =
-  shortText hostname <> maybe mempty (\port -> M.char7 ':' <> M.word16Dec port) mPort
+renderHost (Host hostname mPort) = renderHostAndPort hostname mPort

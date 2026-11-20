@@ -1,3 +1,5 @@
+{-# LANGUAGE DeriveLift #-}
+
 {- | Runtime and compile-time errors produced by the CEL implementation.
 
 The CEL language definition formally names two runtime errors,
@@ -25,6 +27,7 @@ module CEL.Error (
 import Control.DeepSeq (NFData)
 import Data.Text (Text)
 import GHC.Generics (Generic)
+import Language.Haskell.TH.Syntax (Lift)
 
 
 -- | A coarse classification of errors.
@@ -39,7 +42,7 @@ data ErrKind
   | ErrInvalid
   | ErrUnsupported
   | ErrParse
-  deriving stock (Eq, Show, Generic)
+  deriving stock (Eq, Show, Generic, Lift)
 
 
 instance NFData ErrKind

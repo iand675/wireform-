@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 {- |
 RFC 4918 §10.7 @Timeout@ request header — used with @LOCK@ to suggest
@@ -23,12 +24,12 @@ module Network.HTTP.Headers.Timeout (
   renderTimeout,
 ) where
 
-import qualified Control.Monad.Combinators.NonEmpty as NEC
 import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTimeout)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Network.HTTP.Headers.Rendering.Util (sepByCommas1)
 
 
 -- | A single requested timeout value.
@@ -51,11 +52,8 @@ instance KnownHeader Timeout where
   type Direction Timeout = 'Request
 
 
-  parseFromHeaders _ headers = case runParser timeoutParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Timeout header: " <> show rest
-    Fail -> Left "Failed to parse Timeout header"
-    Err e -> Left e
+  parseFromHeaders _ fields =
+    Timeout <$> (parseListFieldLines "Timeout" (httpList timeTypeParser) fields >>= requireNonEmptyList "Timeout")
 
 
   renderToHeaders _ = M.toStrictByteString . renderTimeout
@@ -66,17 +64,23 @@ instance KnownHeader Timeout where
 
 timeTypeParser :: ParserT st String TimeType
 timeTypeParser =
-  (TimeInfinite <$ $(string "Infinite"))
-    <|> (TimeSeconds <$> ($(string "Second-") *> anyAsciiDecimalWord))
+  $( switchAsciiCI
+       [|
+         case _ of
+           "infinite" -> pure TimeInfinite
+           "second-" -> TimeSeconds <$> boundedDecimalWord 4_294_967_295 (err "Timeout exceeds 2^32-1 seconds")
+         |]
+   )
 
 
 timeoutParser :: ParserT st String Timeout
-timeoutParser = Timeout <$> (timeTypeParser `NEC.sepBy1` (ows *> $(char ',') *> ows))
+timeoutParser =
+  Timeout <$> (httpList timeTypeParser >>= maybe failed pure . NE.nonEmpty)
 
 
 renderTimeout :: Timeout -> M.Builder
 renderTimeout (Timeout vs) =
-  M.intersperse ", " (map renderTimeType (NE.toList vs))
+  sepByCommas1 (fmap renderTimeType vs)
   where
     renderTimeType (TimeSeconds n) = "Second-" <> M.wordDec n
     renderTimeType TimeInfinite = "Infinite"

@@ -41,9 +41,8 @@ challenge. The scheme-aware splitter lives in hermes as
 projection over its output into the case-insensitive 'ByteString'
 vocabulary the rest of the client uses.
 
-Multiple header lines are still concatenated per RFC 9110 §5.3:
-@parseAuthChallenges@ runs the hermes parser on each header value
-and joins the resulting challenge lists.
+The middleware combines repeated field lines in their original order
+before parsing them, as required by RFC 9110 §5.3.
 -}
 module Network.HTTP.Client.AuthChallenge (
   -- * Challenges
@@ -65,19 +64,16 @@ module Network.HTTP.Client.AuthChallenge (
 ) where
 
 import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
 import Data.ByteString.Base64 qualified as B64
 import Data.CaseInsensitive (CI)
 import Data.CaseInsensitive qualified as CI
-import Data.Text.Encoding qualified as TE
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text.Short qualified as ST
 import Network.HTTP.Client.BodyStream (BodyStream, drainPopper)
 import Network.HTTP.Client.Request qualified as WReq
 import Network.HTTP.Client.Response qualified as Resp
 import Network.HTTP.Client.Transport
 import Network.HTTP.Headers.Authorization qualified as HAuth
-import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
-import Network.HTTP.Headers.Parsing.Util qualified as Hermes
 import Network.HTTP.Headers.WWWAuthenticate qualified as HWA
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Status qualified as S
@@ -118,14 +114,14 @@ intra-challenge auth-param commas by
 Returns @[]@ if the value doesn't parse.
 -}
 parseAuthChallenges :: ByteString -> [AuthChallenge]
-parseAuthChallenges raw =
-  case runParser HWA.challengesParser raw of
-    OK cs leftover
-      | BS.null (BS.dropWhile isWS leftover) ->
-          map fromHermesChallenge cs
-    _ -> []
-  where
-    isWS w = w == 0x20 || w == 0x09
+parseAuthChallenges raw = parseAuthChallengeFields [raw]
+
+
+parseAuthChallengeFields :: [ByteString] -> [AuthChallenge]
+parseAuthChallengeFields [] = []
+parseAuthChallengeFields (first : rest) =
+  either (const []) (map fromHermesChallenge) $
+    HWA.parseChallengeFieldLines "Authentication challenge" (first :| rest)
 
 
 {- | Project hermes's structured 'HWA.AuthChallenge' onto the
@@ -138,7 +134,7 @@ fromHermesChallenge ch =
     { acScheme = CI.mk (schemeBytes (HWA.challengeScheme ch))
     , acParams = case HWA.challengeContents ch of
         HWA.ChallengeParams ps ->
-          [(CI.mk (shortToBytes k), paramValueBytes v) | (k, v) <- ps]
+          [(CI.mk (shortToBytes k), HAuth.credentialParamBytes v) | (k, v) <- ps]
         _ -> []
     , acToken68 = case HWA.challengeContents ch of
         HWA.ChallengeToken68 bs -> Just bs
@@ -146,11 +142,7 @@ fromHermesChallenge ch =
     }
   where
     schemeBytes (HAuth.AuthScheme s) = shortToBytes s
-    paramValueBytes = \case
-      HAuth.CredentialParamToken t -> shortToBytes t
-      HAuth.CredentialParamString s ->
-        shortToBytes (Hermes.unsafeToRFC8941String s)
-    shortToBytes = TE.encodeUtf8 . ST.toText
+    shortToBytes = ST.toByteString
 
 
 -- ---------------------------------------------------------------------------
@@ -194,9 +186,7 @@ challengeAuth triggerCode authHdr challengeHdr responder inner = Transport $ \re
     then pure raw
     else do
       let challenges =
-            concatMap
-              parseAuthChallenges
-              (H.lookupHeaders challengeHdr (Resp.headers raw))
+            parseAuthChallengeFields (H.lookupHeaders challengeHdr (Resp.headers raw))
       case challenges of
         [] -> pure raw
         cs -> do
@@ -250,9 +240,7 @@ withRequestChallengeAuth responder inner = Transport $ \req -> do
     then pure raw
     else do
       let challenges =
-            concatMap
-              parseAuthChallenges
-              (H.lookupHeaders H.hWWWAuthenticate (Resp.headers raw))
+            parseAuthChallengeFields (H.lookupHeaders H.hWWWAuthenticate (Resp.headers raw))
       case challenges of
         [] -> pure raw
         cs -> do

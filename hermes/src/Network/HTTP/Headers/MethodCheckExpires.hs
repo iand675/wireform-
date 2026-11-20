@@ -1,31 +1,83 @@
-{- |
-@Method-Check-Expires@ — obsolete response header from an early draft of
-cross-site access control (the precursor to CORS), used to bound the lifetime
-of a @Method-Check@ result. The draft never shipped, so the value is preserved
-verbatim as an opaque string rather than committing to a dead grammar.
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
-Spec: abandoned early draft of cross-site access control, superseded by CORS — <https://www.w3.org/TR/cors/ Cross-Origin Resource Sharing>.
+{- | @Method-Check-Expires@ is an HTTP-date from the original W3C cross-site
+access draft.
 
-See also: "Network.HTTP.Headers.MethodCheck", "Network.HTTP.Headers.AccessControlMaxAge".
+Spec: <https://www.w3.org/TR/2007/WD-access-control-20071126/>
 -}
 module Network.HTTP.Headers.MethodCheckExpires (
-  MethodCheckExpires (..),
+  MethodCheckExpires (MethodCheckExpires, methodCheckExpiresValue),
+  methodCheckExpiresTime,
+  methodCheckExpiresFromTime,
   methodCheckExpiresParser,
   renderMethodCheckExpires,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Data.Time.Clock (UTCTime (..), secondsToDiffTime)
+import Network.HTTP.Grammar.Parser
+import Network.HTTP.Grammar.Rendering (shortText)
 import Network.HTTP.Headers
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
 import Network.HTTP.Headers.HeaderFieldName (hMethodCheckExpires)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | Opaque, raw-preserving @Method-Check-Expires@ value.
-newtype MethodCheckExpires = MethodCheckExpires {methodCheckExpiresValue :: ST.ShortText}
-  deriving stock (Eq, Show)
+data MethodCheckExpires
+  = RawMethodCheckExpires !ST.ShortText
+  | ParsedMethodCheckExpires !ByteString !UTCTime
+
+
+{- | The legacy date spelling. Use 'methodCheckExpiresFromTime' to author an
+IMF-fixdate from a timestamp.
+-}
+pattern MethodCheckExpires :: ST.ShortText -> MethodCheckExpires
+pattern MethodCheckExpires {methodCheckExpiresValue} <- (legacyText -> methodCheckExpiresValue)
+  where
+    MethodCheckExpires raw = RawMethodCheckExpires raw
+
+
+{-# COMPLETE MethodCheckExpires #-}
+
+
+instance Eq MethodCheckExpires where
+  left == right = wireBytes left == wireBytes right
+
+
+instance Show MethodCheckExpires where
+  showsPrec precedence (MethodCheckExpires value) =
+    showParen (precedence > 10) $ showString "MethodCheckExpires {methodCheckExpiresValue = " . shows value . showChar '}'
+
+
+legacyText :: MethodCheckExpires -> ST.ShortText
+legacyText (RawMethodCheckExpires text) = text
+legacyText (ParsedMethodCheckExpires wire _) = STU.fromByteStringUnsafe wire
+
+
+wireBytes :: MethodCheckExpires -> ByteString
+wireBytes (RawMethodCheckExpires text) = ST.toByteString text
+wireBytes (ParsedMethodCheckExpires wire _) = wire
+
+
+{- | The timestamp validated during typed lookup. Legacy text is interpreted
+using the same date settings as 'methodCheckExpiresParser'.
+-}
+methodCheckExpiresTime :: MethodCheckExpires -> Either String UTCTime
+methodCheckExpiresTime (RawMethodCheckExpires raw) =
+  parseSingleFieldLine "Method-Check-Expires" dateParser (ST.toByteString raw :| [])
+methodCheckExpiresTime (ParsedMethodCheckExpires _ time) = Right time
+
+
+-- | Construct an IMF-fixdate, truncating to whole seconds.
+methodCheckExpiresFromTime :: UTCTime -> MethodCheckExpires
+methodCheckExpiresFromTime (UTCTime day seconds) =
+  ParsedMethodCheckExpires (M.toStrictByteString (renderDate time)) time
+  where
+    time = UTCTime day (secondsToDiffTime (floor seconds))
 
 
 instance KnownHeader MethodCheckExpires where
@@ -34,22 +86,22 @@ instance KnownHeader MethodCheckExpires where
   type Direction MethodCheckExpires = 'Response
 
 
-  parseFromHeaders _ headers = case runParser methodCheckExpiresParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Method-Check-Expires header: " <> show rest
-    Fail -> Left "Failed to parse Method-Check-Expires header"
-    Err e -> Left e
+  parseFromHeaders settings fields@(wire :| []) =
+    ParsedMethodCheckExpires wire <$> parseSingleFieldLine "Method-Check-Expires" (dateParserWith settings) fields
+  parseFromHeaders _ _ = Left "Multiple Method-Check-Expires field lines"
 
 
-  renderToHeaders _ = M.toStrictByteString . renderMethodCheckExpires
+  renderToHeaders _ = wireBytes
 
 
   headerName _ = hMethodCheckExpires
 
 
 methodCheckExpiresParser :: ParserT st String MethodCheckExpires
-methodCheckExpiresParser = MethodCheckExpires <$> takeRestShortText
+methodCheckExpiresParser = withByteString (ows *> dateParser <* ows) $ \time wire ->
+  pure (ParsedMethodCheckExpires wire time)
 
 
 renderMethodCheckExpires :: MethodCheckExpires -> M.Builder
-renderMethodCheckExpires = shortText . methodCheckExpiresValue
+renderMethodCheckExpires (RawMethodCheckExpires raw) = shortText raw
+renderMethodCheckExpires (ParsedMethodCheckExpires wire _) = M.byteString wire

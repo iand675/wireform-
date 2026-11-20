@@ -1,7 +1,9 @@
 module Test.WellKnown (wellKnownTests) where
 
+import Control.Exception (ErrorCall, evaluate)
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
+import Data.Either (isLeft)
 import Data.Hashable (hash, hashWithSalt)
 import Data.Proxy (Proxy (..))
 import Data.Vector qualified as V
@@ -19,6 +21,7 @@ import Proto.Google.Protobuf.SourceContext
 import Proto.Google.Protobuf.Struct
 import Proto.Google.Protobuf.Timestamp
 import Proto.Google.Protobuf.Wrappers
+import Proto.Internal.JSON.WellKnown (durationFromJSON, durationToJSON, timestampFromJSON, timestampToJSON)
 import Proto.Registry (TypeRegistry, emptyRegistry, lookupCodec, lookupDecoder, registerMessage)
 import Test.Syd
 import Test.Syd.Hedgehog ()
@@ -50,9 +53,32 @@ wellKnownTests =
             , it "JSON with nanos" $ do
                 let msg = defaultTimestamp {timestampSeconds = 0, timestampNanos = 123456789}
                 Aeson.toJSON msg `shouldBe` Aeson.String "1970-01-01T00:00:00.123456789Z"
-            , it "JSON nanos trailing zeros trimmed" $ do
+            , it "JSON nanos use canonical fractional precision" $ do
                 let msg = defaultTimestamp {timestampSeconds = 0, timestampNanos = 100000000}
-                Aeson.toJSON msg `shouldBe` Aeson.String "1970-01-01T00:00:00.1Z"
+                Aeson.toJSON msg `shouldBe` Aeson.String "1970-01-01T00:00:00.100Z"
+            , it "ProtoJSON roundtrips pre-epoch instants and normalizes offsets" $ do
+                let msg = defaultTimestamp {timestampSeconds = -1, timestampNanos = 100000000}
+                    canonical = Aeson.String "1969-12-31T23:59:59.100Z"
+                    offset = Aeson.String "1970-01-01T00:59:59.1+01:00"
+                timestampToJSON msg `shouldBe` canonical
+                timestampFromJSON offset `shouldBe` Right msg
+                Aeson.toJSON msg `shouldBe` canonical
+                Aeson.fromJSON offset `shouldBe` Aeson.Success msg
+            , it "ProtoJSON rejects invalid calendar dates, times, fractions and offsets" $
+                mapM_ (\input -> do
+                  let value = Aeson.String input
+                  isLeft (timestampFromJSON value) `shouldBe` True
+                  case Aeson.fromJSON @Timestamp value of
+                    Aeson.Error _ -> pure ()
+                    Aeson.Success _ -> expectationFailure ("Accepted " <> show input))
+                  [ "2023-02-29T00:00:00Z"
+                  , "2024-04-31T00:00:00Z"
+                  , "2026-11-10T24:00:00Z"
+                  , "2026-11-10T00:00:00.1junkZ"
+                  , "2026-11-10T00:00:00+00:99"
+                  , "0001-01-01T00:00:00+00:01"
+                  , "9999-12-31T23:59:59-00:01"
+                  ]
             ]
       , describe
           "Duration"
@@ -68,10 +94,37 @@ wellKnownTests =
                 Aeson.toJSON msg `shouldBe` Aeson.String "3600s"
             , it "JSON with nanos" $ do
                 let msg = defaultDuration {durationSeconds = 1, durationNanos = 500000000}
-                Aeson.toJSON msg `shouldBe` Aeson.String "1.5s"
+                Aeson.toJSON msg `shouldBe` Aeson.String "1.500s"
             , it "JSON negative" $ do
                 let msg = defaultDuration {durationSeconds = -1, durationNanos = -500000000}
-                Aeson.toJSON msg `shouldBe` Aeson.String "-1.5s"
+                Aeson.toJSON msg `shouldBe` Aeson.String "-1.500s"
+            , it "both Duration JSON paths preserve valid extreme values" $
+                mapM_ (\(input, expected) -> do
+                  let value = Aeson.String input
+                  durationFromJSON value `shouldBe` Right expected
+                  Aeson.fromJSON value `shouldBe` Aeson.Success expected
+                  Aeson.toJSON expected `shouldBe` value
+                  durationToJSON expected `shouldBe` value)
+                  [ ("315576000000.999999999s", defaultDuration {durationSeconds = 315576000000, durationNanos = 999999999})
+                  , ("-315576000000.999999999s", defaultDuration {durationSeconds = -315576000000, durationNanos = -999999999})
+                  , ("-0.250s", defaultDuration {durationNanos = -250000000})
+                  ]
+            , it "both Duration JSON paths reject malformed and overflowing input" $
+                mapM_ (\input -> do
+                  let value = Aeson.String input
+                  isLeft (durationFromJSON value) `shouldBe` True
+                  case Aeson.fromJSON @Duration value of
+                    Aeson.Error _ -> pure ()
+                    Aeson.Success _ -> expectationFailure ("Accepted " <> show input))
+                  ["garbage", "1.25garbages", "18446744073709551616s", "1.s", "1.1234567890s", "315576000001s"]
+            , it "both Duration JSON paths reject invalid wire components on serialization" $
+                mapM_ (\dur -> do
+                  evaluate (durationToJSON dur) `shouldThrow` (\(_ :: ErrorCall) -> True)
+                  evaluate (Aeson.toJSON dur) `shouldThrow` (\(_ :: ErrorCall) -> True))
+                  [ defaultDuration {durationSeconds = 1, durationNanos = -1}
+                  , defaultDuration {durationNanos = 1000000000}
+                  , defaultDuration {durationSeconds = 315576000001}
+                  ]
             ]
       , describe
           "Any"

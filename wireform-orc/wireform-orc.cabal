@@ -81,8 +81,8 @@ library
     vector >= 0.13 && < 0.14,
     containers >= 0.6 && < 0.9,
     zlib >= 0.6 && < 0.8,
-    crypton >= 1.0 && < 1.1,
-    memory >= 0.18 && < 0.19,
+    crypton >= 2.2.6 && < 2.3,
+    ram >= 0.20.1 && < 0.23,
     deepseq >= 1.4 && < 1.6,
     template-haskell >= 2.18 && < 2.25
 

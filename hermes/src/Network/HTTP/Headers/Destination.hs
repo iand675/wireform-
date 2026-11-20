@@ -9,7 +9,7 @@ Destination = Simple-ref
 Simple-ref  = absolute-URI | ( path-absolute [ "?" query ] )
 @
 
-The value is an opaque URI reference; it is preserved verbatim.
+The parser validates the reference syntax and preserves its spelling.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc4918#section-10.3>
 
@@ -21,8 +21,8 @@ module Network.HTTP.Headers.Destination (
   renderDestination,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (absolutePathReference, absoluteURI)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hDestination)
 import qualified Network.HTTP.Headers.Mason as M
@@ -41,11 +41,7 @@ instance KnownHeader Destination where
   type Direction Destination = 'Request
 
 
-  parseFromHeaders _ headers = case runParser destinationParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Destination header: " <> show rest
-    Fail -> Left "Failed to parse Destination header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Destination" destinationParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderDestination
@@ -55,7 +51,7 @@ instance KnownHeader Destination where
 
 
 destinationParser :: ParserT st String Destination
-destinationParser = Destination <$> takeRestShortText
+destinationParser = Destination <$> (absoluteURI <|> absolutePathReference)
 
 
 renderDestination :: Destination -> M.Builder

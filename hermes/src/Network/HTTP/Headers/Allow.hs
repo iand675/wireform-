@@ -18,8 +18,7 @@ module Network.HTTP.Headers.Allow (
   renderAllow,
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.List.NonEmpty as NE
+import qualified Data.CharSet as CharSet
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAllow)
@@ -55,13 +54,7 @@ instance KnownHeader Allow where
   type Direction Allow = 'Response
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser allowParser header of
-      OK allow "" -> Right allow
-      OK _ rest -> Left $ "Unconsumed input after parsing Allow header: " <> show rest
-      Fail -> Left "Failed to parse Allow header"
-      Err err -> Left err
+  parseFromHeaders _ = fmap Allow . parseListFieldLines "Allow" (httpList httpMethodParser)
 
 
   renderToHeaders _ = M.toStrictByteString . renderAllow
@@ -71,26 +64,28 @@ instance KnownHeader Allow where
 
 
 httpMethodParser :: ParserT st e HttpMethod
-httpMethodParser =
-  $( switch
-      [|
-        case _ of
-          "GET" -> pure GET
-          "HEAD" -> pure HEAD
-          "POST" -> pure POST
-          "PUT" -> pure PUT
-          "DELETE" -> pure DELETE
-          "CONNECT" -> pure CONNECT
-          "OPTIONS" -> pure OPTIONS
-          "TRACE" -> pure TRACE
-          "PATCH" -> pure PATCH
-          _ -> CustomMethod <$> rfc9110Token
-        |]
-   )
+httpMethodParser = standardMethod <|> (CustomMethod <$> rfc9110Token)
+  where
+    standardMethod =
+      $( switch
+           [|
+             case _ of
+               "GET" -> whole GET
+               "HEAD" -> whole HEAD
+               "POST" -> whole POST
+               "PUT" -> whole PUT
+               "DELETE" -> whole DELETE
+               "CONNECT" -> whole CONNECT
+               "OPTIONS" -> whole OPTIONS
+               "TRACE" -> whole TRACE
+               "PATCH" -> whole PATCH
+             |]
+       )
+    whole method = method <$ notFollowedBy (skipSatisfyAscii (`CharSet.member` tokenCharSet))
 
 
 allowParser :: ParserT st String Allow
-allowParser = Allow <$> (httpMethodParser `sepBy` (ows *> $(char ',') *> ows))
+allowParser = Allow <$> httpList httpMethodParser
 
 
 renderHttpMethod :: HttpMethod -> M.Builder

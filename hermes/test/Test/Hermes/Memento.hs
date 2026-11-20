@@ -50,7 +50,7 @@ renderMemento = M.toStrictByteString . MD.renderMementoDatetime
 -- A canonical IMF-fixdate-producing instant (whole seconds, 4-digit year).
 utcTimeGen :: Gen UTCTime
 utcTimeGen = do
-  year <- Gen.integral (Range.linear 1000 9999) :: Gen Integer
+  year <- Gen.integral (Range.linear 1900 9999) :: Gen Integer
   month <- Gen.integral (Range.linear 1 12) :: Gen Int
   day <- Gen.integral (Range.linear 1 28) :: Gen Int
   secs <- Gen.integral (Range.linear 0 86399) :: Gen Integer

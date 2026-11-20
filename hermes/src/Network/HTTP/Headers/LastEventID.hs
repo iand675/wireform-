@@ -2,8 +2,8 @@
 The @Last-Event-ID@ request header lets a Server-Sent Events client resume a
 stream after the connection drops: on reconnection the browser replays the
 @id@ of the last event it received so the server can pick up where it left
-off. The value is an opaque, server-defined string with no further internal
-structure, so it is preserved verbatim.
+off. The field preserves UTF-8 event identifiers verbatim. NUL, LF and CR
+are excluded from the value.
 
 Spec (WHATWG HTML, Server-sent events): <https://html.spec.whatwg.org/multipage/server-sent-events.html#the-last-event-id-header>
 
@@ -15,13 +15,17 @@ module Network.HTTP.Headers.LastEventID (
   renderLastEventID,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hLastEventID)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Parser (err, takeRest)
 
 
 -- | The opaque identifier of the last event a Server-Sent Events client saw.
@@ -35,23 +39,32 @@ instance KnownHeader LastEventID where
   type Direction LastEventID = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser lastEventIDParser header of
-      OK v "" -> Right v
-      OK _ rest -> Left $ "Unconsumed input after parsing Last-Event-ID header: " <> show rest
-      Fail -> Left "Failed to parse Last-Event-ID header"
-      Err e -> Left e
+  parseFromHeaders _ (wire :| []) = decodeLastEventID wire
+  parseFromHeaders _ _ = Left "Multiple Last-Event-ID field lines"
 
 
-  renderToHeaders _ = M.toStrictByteString . renderLastEventID
+  renderToHeaders _ = ST.toByteString . lastEventID
 
 
   headerName _ = hLastEventID
 
 
 lastEventIDParser :: ParserT st String LastEventID
-lastEventIDParser = LastEventID <$> takeRestShortText
+lastEventIDParser = takeRest >>= either err pure . decodeLastEventID
+
+
+decodeLastEventID :: ByteString -> Either String LastEventID
+decodeLastEventID wire
+  | BS.any isSpecial wire =
+      if BS.elem 0 wire || BS.elem 10 wire || BS.elem 13 wire
+        then Left "Forbidden byte in Last-Event-ID header"
+        else case ST.fromByteString wire of
+          Nothing -> Left "Invalid UTF-8 in Last-Event-ID header"
+          Just value -> Right $! LastEventID value
+  | otherwise = Right $! LastEventID (STU.fromByteStringUnsafe wire)
+  where
+    isSpecial byte = byte >= 128 || byte == 0 || byte == 10 || byte == 13
+{-# INLINE decodeLastEventID #-}
 
 
 renderLastEventID :: LastEventID -> M.Builder

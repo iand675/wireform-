@@ -1,3 +1,6 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 {- |
 @X-Trace-ID@ request and response header — an opaque identifier for a
 distributed trace, propagated across services so that logs, metrics, and spans
@@ -6,9 +9,8 @@ the standardised @traceparent@ (W3C Trace Context) or vendor headers (B3,
 Datadog, AWS X-Ray) but uses the conventional @X-@ name many gateways and meshes
 emit and forward.
 
-This is a __de-facto__ header with __no IANA registration__ and no formal
-grammar — the value is an opaque string. We preserve it verbatim as a
-'ST.ShortText'.
+Deployments define the payload. The codec checks HTTP field octets and
+preserves the original bytes.
 
 Spec: de-facto, unregistered; see
 <https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/observability/tracing>.
@@ -17,25 +19,50 @@ See also: "Network.HTTP.Headers.Traceparent", "Network.HTTP.Headers.Tracestate",
 "Network.HTTP.Headers.XCorrelationID", "Network.HTTP.Headers.XRequestID".
 -}
 module Network.HTTP.Headers.XTraceID (
-  XTraceID (..),
+  XTraceID (XTraceID, xTraceID),
+  xTraceIDBytes,
+  xTraceIDFromBytes,
   xTraceIDParser,
   renderXTraceID,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXTraceID)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.OpaqueField
 
 
-{- | An @X-Trace-ID@ value: an opaque distributed-trace identifier, preserved
-verbatim.
--}
-newtype XTraceID = XTraceID {xTraceID :: ST.ShortText}
-  deriving stock (Eq, Show)
+-- | An opaque distributed trace identifier.
+newtype XTraceID = XTraceIDBytes ByteString
+  deriving stock (Eq)
+
+
+-- | Legacy text view. Use 'xTraceIDBytes' for the original bytes.
+pattern XTraceID :: ST.ShortText -> XTraceID
+pattern XTraceID {xTraceID} <- (opaqueFieldText . xTraceIDBytes -> xTraceID)
+  where
+    XTraceID text = XTraceIDBytes (ST.toByteString text)
+
+
+{-# COMPLETE XTraceID #-}
+
+
+instance Show XTraceID where
+  showsPrec precedence (XTraceID text) =
+    showParen (precedence > 10) $ showString "XTraceID {xTraceID = " . shows text . showChar '}'
+
+
+-- | The original field bytes, including any received optional whitespace.
+xTraceIDBytes :: XTraceID -> ByteString
+xTraceIDBytes (XTraceIDBytes wire) = wire
+
+
+-- | Check field-value octets and keep the payload unchanged.
+xTraceIDFromBytes :: ByteString -> Either String XTraceID
+xTraceIDFromBytes = checkOpaqueField "X-Trace-ID" XTraceIDBytes
 
 
 instance KnownHeader XTraceID where
@@ -44,24 +71,18 @@ instance KnownHeader XTraceID where
   type Direction XTraceID = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser xTraceIDParser header of
-      OK v "" -> Right v
-      OK _ rest -> Left $ "Unconsumed input after parsing X-Trace-ID header: " <> show rest
-      Fail -> Left "Failed to parse X-Trace-ID header"
-      Err e -> Left e
+  parseFromHeaders _ = parseOpaqueFieldLine "X-Trace-ID" XTraceIDBytes
 
 
-  renderToHeaders _ = M.toStrictByteString . renderXTraceID
+  renderToHeaders _ = xTraceIDBytes
 
 
   headerName _ = hXTraceID
 
 
 xTraceIDParser :: ParserT st String XTraceID
-xTraceIDParser = XTraceID <$> takeRestShortText
+xTraceIDParser = opaqueFieldParser "X-Trace-ID" XTraceIDBytes
 
 
 renderXTraceID :: XTraceID -> M.Builder
-renderXTraceID (XTraceID tok) = shortText tok
+renderXTraceID = M.byteString . xTraceIDBytes

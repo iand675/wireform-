@@ -16,7 +16,11 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.CaseInsensitive qualified as CI
 import Data.IORef
+import Data.Text qualified as T
 import Network.HTTP
+import Network.HTTP.Client qualified as Client
+import Network.HTTP.Client.Cache qualified as Cache
+import Network.HTTP.Client.Response qualified as Raw
 import Network.HTTP.Connection
 import Network.HTTP.Server
 import Network.HTTP.Types.Status qualified as S
@@ -37,6 +41,7 @@ tests =
       , manyHeaders
       , keepAliveSequentialRequests
       , streamingLargeBody
+      , cacheChunkedResponse
       , binaryBodyContent
       , requestWithQueryString
       , oversizedHeaderBlockRejected
@@ -195,6 +200,43 @@ streamingLargeBody = it "streaming 5-chunk response body" $
           , responseH2StreamId = 0
           , responseCancel = pure ()
           , responsePushPromises = pure []
+          }
+
+
+cacheChunkedResponse :: Spec
+cacheChunkedResponse = it "replays a chunked response from cache with its end-to-end headers" $ do
+  calls <- newIORef (0 :: Int)
+  withTestServer http1Only (handler calls) $ \port -> do
+    cache <- Cache.newCache Cache.defaultCacheConfig
+    let uri = Client.staticURI (T.pack ("http://127.0.0.1:" <> port <> "/"))
+        req = Client.request (methodFromBytes "GET") uri ()
+        transport = Cache.withCache cache (Client.baseTransport http1Only)
+    Client.withResponse transport req [] $ \response -> do
+      lookup "Transfer-Encoding" (Raw.headers response) `shouldBe` Just "chunked"
+      lookup "X-Hop" (Raw.headers response) `shouldBe` Just "local"
+      Client.rawResponseBytes response `shouldReturn` "firstsecond"
+    Client.withResponse transport req [] $ \response -> do
+      mapM_ (\name -> lookup name (Raw.headers response) `shouldBe` Nothing)
+        ["Connection", "Transfer-Encoding", "X-Hop"]
+      lookup "X-Representation" (Raw.headers response) `shouldBe` Just "stored"
+      Client.rawResponseBytes response `shouldReturn` "firstsecond"
+    readIORef calls `shouldReturn` 1
+  where
+    handler calls _ = do
+      atomicModifyIORef' calls (\count -> (count + 1, ()))
+      chunks <- newIORef ["first", "second"]
+      let next = atomicModifyIORef' chunks $ \xs -> case xs of
+            [] -> ([], Nothing)
+            x : rest -> (rest, Just x)
+      pure
+        (resp S.status200 "")
+          { responseHeaders =
+              [ ("Cache-Control", "max-age=60")
+              , ("Connection", "close, X-Hop")
+              , ("X-Hop", "local")
+              , ("X-Representation", "stored")
+              ]
+          , responseBody = BodyStream next
           }
 
 

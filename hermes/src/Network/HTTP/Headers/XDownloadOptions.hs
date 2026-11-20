@@ -25,7 +25,9 @@ module Network.HTTP.Headers.XDownloadOptions (
   renderXDownloadOptions,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Unsafe as BSU
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXDownloadOptions)
 import qualified Network.HTTP.Headers.Mason as M
@@ -45,14 +47,20 @@ instance KnownHeader XDownloadOptions where
   type Direction XDownloadOptions = 'Response
 
 
-  parseFromHeaders _ headers = case runParser xDownloadOptionsParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing X-Download-Options header: " <> show rest
-    Fail -> Left "Failed to parse X-Download-Options header"
-    Err e -> Left e
+  parseFromHeaders _ (wire :| [])
+    | BS.length wire == 6
+    , BSU.unsafeIndex wire 0 == 0x6e
+    , BSU.unsafeIndex wire 1 == 0x6f
+    , BSU.unsafeIndex wire 2 == 0x6f
+    , BSU.unsafeIndex wire 3 == 0x70
+    , BSU.unsafeIndex wire 4 == 0x65
+    , BSU.unsafeIndex wire 5 == 0x6e =
+        Right NoOpen
+  parseFromHeaders _ fields = parseSingleFieldLine "X-Download-Options" xDownloadOptionsParser fields
+  {-# INLINE parseFromHeaders #-}
 
 
-  renderToHeaders _ = M.toStrictByteString . renderXDownloadOptions
+  renderToHeaders _ NoOpen = "noopen"
 
 
   headerName _ = hXDownloadOptions

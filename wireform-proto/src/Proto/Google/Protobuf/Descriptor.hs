@@ -31,6 +31,7 @@ module Proto.Google.Protobuf.Descriptor where
 import Control.DeepSeq (NFData)
 import Data.ByteString (ByteString)
 import Data.Int (Int32, Int64)
+import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Vector as V
 import Data.Word (Word64)
@@ -38,7 +39,7 @@ import GHC.Generics (Generic)
 
 import Proto.Decode
 import Proto.Encode
-import Proto.Internal.Wire (Tag (..))
+import Proto.Internal.Wire (Tag (..), WireType (..))
 
 ----------------------------------------------------------------------
 -- FileDescriptorSet
@@ -107,7 +108,7 @@ instance MessageEncode FileDescriptorProto where
       <> encMsg 8 (fdpOptions m)
       <> encMsg 9 (fdpSourceCodeInfo m)
       <> encStr 12 (fdpSyntax m)
-      <> encStr 14 (fdpEdition m)
+      <> maybe (encStr 14 (fdpEdition m)) (encodeFieldVarint 14) (editionWireNumber (fdpEdition m))
       <> encodeUnknownFields (fdpUnknownFields m)
 
 instance MessageDecode FileDescriptorProto where
@@ -128,8 +129,27 @@ instance MessageDecode FileDescriptorProto where
             8 -> do v <- decodeFieldMessage; loop m {fdpOptions = Just v}
             9 -> do v <- decodeFieldMessage; loop m {fdpSourceCodeInfo = Just v}
             12 -> do v <- decodeFieldString; loop m {fdpSyntax = v}
-            14 -> do v <- decodeFieldString; loop m {fdpEdition = v}
+            14 | wt == WireVarint -> do
+              v <- decodeFieldVarint
+              case fst <$> find ((== v) . snd) editionNumbers of
+                Just name -> loop m {fdpEdition = name}
+                Nothing -> loop m {fdpUnknownFields = UnknownVarint 14 v : fdpUnknownFields m}
+            -- Older Wireform-generated descriptors used the edition name.
+            14 | wt == WireLengthDelimited -> do v <- decodeFieldString; loop m {fdpEdition = v}
             _ -> do uf <- captureUnknownField n wt; loop m {fdpUnknownFields = uf : fdpUnknownFields m}
+
+
+editionWireNumber :: Text -> Maybe Word64
+editionWireNumber name = lookup name editionNumbers
+
+
+editionNumbers :: [(Text, Word64)]
+editionNumbers = [("2023", edition2023WireNumber), ("2024", edition2024WireNumber)]
+
+
+edition2023WireNumber, edition2024WireNumber :: Word64
+edition2023WireNumber = 1000
+edition2024WireNumber = 1001
 
 ----------------------------------------------------------------------
 -- DescriptorProto (+ ExtensionRange, ReservedRange)
@@ -278,13 +298,15 @@ data FieldDescriptorProto = FieldDescriptorProto
   , fdpFieldJsonName :: !Text
   , fdpFieldProto3Optional :: !Bool
   , fdpFieldUnknownFields :: ![UnknownField]
+  , fdpFieldHasEmptyDefault :: !Bool
+  , fdpFieldHasEmptyJsonName :: !Bool
   }
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
 
 defaultFieldDescriptorProto :: FieldDescriptorProto
 defaultFieldDescriptorProto =
-  FieldDescriptorProto "" "" 0 0 0 "" "" Nothing (-1) "" False []
+  FieldDescriptorProto "" "" 0 0 0 "" "" Nothing (-1) "" False [] False False
 
 instance MessageEncode FieldDescriptorProto where
   buildMessage m =
@@ -294,10 +316,10 @@ instance MessageEncode FieldDescriptorProto where
       <> encI32 4 (fdpFieldLabel m)
       <> encI32 5 (fdpFieldType m)
       <> encStr 6 (fdpFieldTypeName m)
-      <> encStr 7 (fdpFieldDefault m)
+      <> (if fdpFieldHasEmptyDefault m then encodeFieldString 7 else encStr 7) (fdpFieldDefault m)
       <> encMsg 8 (fdpFieldOptions m)
       <> (if fdpFieldOneofIdx m < 0 then mempty else encodeFieldVarint 9 (fromIntegral (fdpFieldOneofIdx m)))
-      <> encStr 10 (fdpFieldJsonName m)
+      <> (if fdpFieldHasEmptyJsonName m then encodeFieldString 10 else encStr 10) (fdpFieldJsonName m)
       <> (if fdpFieldProto3Optional m then encodeFieldBool 17 True else mempty)
       <> encodeUnknownFields (fdpFieldUnknownFields m)
 
@@ -315,10 +337,10 @@ instance MessageDecode FieldDescriptorProto where
             4 -> do v <- decodeFieldVarint; loop m {fdpFieldLabel = fromIntegral v}
             5 -> do v <- decodeFieldVarint; loop m {fdpFieldType = fromIntegral v}
             6 -> do v <- decodeFieldString; loop m {fdpFieldTypeName = v}
-            7 -> do v <- decodeFieldString; loop m {fdpFieldDefault = v}
+            7 -> do v <- decodeFieldString; loop m {fdpFieldDefault = v, fdpFieldHasEmptyDefault = v == ""}
             8 -> do v <- decodeFieldMessage; loop m {fdpFieldOptions = Just v}
             9 -> do v <- decodeFieldVarint; loop m {fdpFieldOneofIdx = fromIntegral v}
-            10 -> do v <- decodeFieldString; loop m {fdpFieldJsonName = v}
+            10 -> do v <- decodeFieldString; loop m {fdpFieldJsonName = v, fdpFieldHasEmptyJsonName = v == ""}
             17 -> do v <- decodeFieldBool; loop m {fdpFieldProto3Optional = v}
             _ -> do uf <- captureUnknownField n wt; loop m {fdpFieldUnknownFields = uf : fdpFieldUnknownFields m}
 

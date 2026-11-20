@@ -50,14 +50,13 @@ module Network.HTTP.Client.Conditional (
 ) where
 
 import Data.ByteString (ByteString)
+import Data.ByteString.Short qualified as SBS
 import Data.List.NonEmpty qualified as NE
-import Data.Text.Encoding qualified as TE
-import Data.Text.Encoding.Error qualified as TE
-import Data.Text.Short qualified as ST
 import Data.Time (UTCTime)
 import Network.HTTP.Client.Request (Request, setHeader)
-import Network.HTTP.Headers.ETag (EntityTag (..))
+import Network.HTTP.Headers.ETag (EntityTag (..), strongMatch, weakMatch)
 import Network.HTTP.Headers.ETag qualified as Hermes
+import Network.HTTP.Headers.IfRange qualified as HermesIfRange
 import Network.HTTP.Headers.Mason qualified as M
 import Network.HTTP.HttpDate (formatHttpDate)
 import Network.HTTP.Types.Header qualified as H
@@ -72,12 +71,12 @@ surrounding double quotes). Bytes that aren't valid @etagc@ will
 be rejected on parse round-trip.
 -}
 strongETag :: ByteString -> EntityTag
-strongETag = StrongETag . shortFromBytes
+strongETag = StrongETagBytes . SBS.toShort
 
 
 -- | Build a weak entity tag (will render with the @W\/@ prefix).
 weakETag :: ByteString -> EntityTag
-weakETag = WeakETag . shortFromBytes
+weakETag = WeakETagBytes . SBS.toShort
 
 
 -- | Render an entity tag to its on-the-wire form.
@@ -92,41 +91,6 @@ parseETag :: ByteString -> Maybe EntityTag
 parseETag bs = case Hermes.parseETag bs of
   Right etag -> Just (Hermes.etag etag)
   Left _ -> Nothing
-
-
-shortFromBytes :: ByteString -> ST.ShortText
-shortFromBytes bs = case ST.fromByteString bs of
-  Just t -> t
-  Nothing -> ST.fromText (TE.decodeUtf8With TE.lenientDecode bs)
-
-
--- ---------------------------------------------------------------------------
--- Validator comparison (RFC 9110 §8.8.3)
--- ---------------------------------------------------------------------------
-
-{- | Strong validator comparison (RFC 9110 §8.8.3.2): both tags must
-be 'StrongETag's and their opaque bytes must match.
-
-Used for 'If-Match' and 'If-Range' (which require the strong
-form).
--}
-strongMatch :: EntityTag -> EntityTag -> Bool
-strongMatch a b = case (a, b) of
-  (StrongETag x, StrongETag y) -> x == y
-  _ -> False
-
-
-{- | Weak validator comparison (RFC 9110 §8.8.3.2): the opaque bytes
-must match, regardless of whether either tag is weak.
-
-Used for 'If-None-Match' (cache revalidation, where weak tags
-are explicitly permitted).
--}
-weakMatch :: EntityTag -> EntityTag -> Bool
-weakMatch a b = opaque a == opaque b
-  where
-    opaque (StrongETag x) = x
-    opaque (WeakETag x) = x
 
 
 -- ---------------------------------------------------------------------------
@@ -192,10 +156,13 @@ data IfRange
   deriving stock (Eq, Show)
 
 
+-- | Render an If-Range wire value. Use 'ifRange' to attach it to a request.
 ifRangeHeader :: IfRange -> ByteString
-ifRangeHeader = \case
-  IfRangeETag t -> renderETag t
-  IfRangeDate d -> formatHttpDate d
+ifRangeHeader value = M.toStrictByteString (HermesIfRange.renderIfRange validator)
+  where
+    validator = case value of
+      IfRangeETag tag -> HermesIfRange.IfRangeETag tag
+      IfRangeDate date -> HermesIfRange.IfRangeDate date
 
 
 -- ---------------------------------------------------------------------------
@@ -218,5 +185,11 @@ ifUnmodifiedSince :: UTCTime -> Request a -> Request a
 ifUnmodifiedSince t = setHeader H.hIfUnmodifiedSince (ifUnmodifiedSinceHeader t)
 
 
+{- | Attach a validator for a request with a @Range@ field. The built-in
+client transports omit both fields when the range or validator is unusable,
+requesting the full representation. Supply a date only when there is no
+entity tag for the representation and the date is known to be a strong
+validator under RFC 9110 §8.8.2.2.
+-}
 ifRange :: IfRange -> Request a -> Request a
-ifRange ir = setHeader H.hIfRange (ifRangeHeader ir)
+ifRange validator = setHeader H.hIfRange (ifRangeHeader validator)

@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9297 §3.4 @Capsule-Protocol@ — an Item Structured Field whose value
 is a Boolean indicating that the message content is composed of capsules
@@ -13,7 +11,8 @@ Capsule-Protocol = sf-boolean   ; \"?1\" / \"?0\"
 
 RFC 9297 §3.4 defines no parameters for this field and instructs receivers
 to ignore unknown parameters; any non-Boolean value is to be handled as if
-the field were absent. We surface the Boolean value directly.
+the field were absent. 'capsuleProtocolInUse' implements that receiver
+rule and the typed codec reports malformed field values.
 
 Spec: RFC 9297, <https://www.rfc-editor.org/rfc/rfc9297#section-3.4>.
 
@@ -22,11 +21,12 @@ See also: "Network.HTTP.Headers.Upgrade", "Network.HTTP.Headers.Connection",
 -}
 module Network.HTTP.Headers.CapsuleProtocol (
   CapsuleProtocol (..),
+  capsuleProtocolInUse,
   capsuleProtocolParser,
   renderCapsuleProtocol,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hCapsuleProtocol)
 import qualified Network.HTTP.Headers.Mason as M
@@ -46,28 +46,27 @@ instance KnownHeader CapsuleProtocol where
   type Direction CapsuleProtocol = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser capsuleProtocolParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Capsule-Protocol header: " <> show rest
-    Fail -> Left "Failed to parse Capsule-Protocol header"
-    Err e -> Left e
+  parseFromHeaders _ ("?1" :| []) = Right (CapsuleProtocol True)
+  parseFromHeaders _ ("?0" :| []) = Right (CapsuleProtocol False)
+  parseFromHeaders _ fields = parseSingleFieldLine "Capsule-Protocol" capsuleProtocolParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderCapsuleProtocol
+  renderToHeaders _ (CapsuleProtocol True) = "?1"
+  renderToHeaders _ (CapsuleProtocol False) = "?0"
 
 
   headerName _ = hCapsuleProtocol
 
 
 capsuleProtocolParser :: ParserT st String CapsuleProtocol
-capsuleProtocolParser =
-  $( switch
-      [|
-        case _ of
-          "?1" -> pure (CapsuleProtocol True)
-          "?0" -> pure (CapsuleProtocol False)
-        |]
-   )
+capsuleProtocolParser = CapsuleProtocol <$> structuredFieldBooleanItem
+
+
+-- | Check whether a valid received field enables capsule framing.
+capsuleProtocolInUse :: HeaderMap -> Bool
+capsuleProtocolInUse headers = case lookupHeader @CapsuleProtocol headers of
+  Right (Just (CapsuleProtocol True)) -> True
+  _ -> False
 
 
 renderCapsuleProtocol :: CapsuleProtocol -> M.Builder

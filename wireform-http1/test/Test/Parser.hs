@@ -17,11 +17,36 @@ tests =
       [ requestLineTests
       , statusLineTests
       , headerBlockTests
+      , authorityTests
       , requestFramingTests
       , responseFramingTests
       , chunkHeaderTests
       , smugglingGuardTests
       ]
+
+
+authorityTests :: Spec
+authorityTests = describe "request authority" $ do
+  it "accepts typed Host values and preserves the wire spelling" $ do
+    mapM_
+      (\host -> check ("GET / HTTP/1.1\r\nHost: \t" <> host <> " \t") (Right (Just host)))
+      ["Example.test", "example.test:", "exa%6dple.test:8080", "[2001:db8::1]:65535", "[v1.a:b]", ""]
+  it "rejects malformed Host values on both HTTP versions" $ do
+    mapM_
+      (\host -> check ("GET / HTTP/1.1\r\nHost: " <> host) (Left ParseInvalidHost))
+      ["example.test:port", "example.test:65536", "exa%mple.test", "[2001:db8::g]", "[::1", "example.test#fragment"]
+    check "GET / HTTP/1.0\r\nHost: example.test:port" (Left ParseInvalidHost)
+    check "GET / HTTP/1.0\r\nHost: first.test\r\nHost: second.test" (Left ParseMultipleHosts)
+  it "uses a nonempty host and explicit decimal port for CONNECT" $ do
+    check "CONNECT [2001:db8::1]:443 HTTP/1.1\r\nHost: [2001:db8::1]" (Right (Just "[2001:db8::1]"))
+    check "CONNECT example.test:443 HTTP/1.1\r\nHost: example.test" (Right (Just "example.test"))
+    mapM_
+      (\target -> check ("CONNECT " <> target <> " HTTP/1.1\r\nHost: example.test") (Left ParseInvalidTarget))
+      [":443", "example.test:", "example.test:port", "example.test:65536", "[2001:db8::1]", "[2001:db8::g]:443"]
+  where
+    check wire expected = do
+      fmap (findHost . requestHeaders . fst) (parseRequest wire) `shouldBe` expected
+      fmap (findHost . requestHeaders . fst) (parseRequestLower (BS.copy wire)) `shouldBe` expected
 
 
 ------------------------------------------------------------------------
@@ -80,6 +105,11 @@ headerBlockTests =
       , it "OWS trimming on value" $
           parseHeaderBlock "X-Test:   spaces and tabs\t  "
             `shouldBe` Right [("X-Test", "spaces and tabs")]
+      , it "parses one trailer field using the header field grammar" $ do
+          parseHeaderLine "Content-Digest:\t value \t" `shouldBe` Right ("Content-Digest", "value")
+          parseHeaderLine "Content Digest: value" `shouldBe` Left ParseBadHeaderName
+          parseHeaderLine "X-Note: A\x7f\&B" `shouldBe` Left ParseInvalidHeaderValue
+          parseHeaderLine "X-Note: value\r\n" `shouldBe` Left ParseInvalidHeaderValue
       , it "rejects bare LF in value" $
           parseHeaderBlock "X-Bad: line1\nline2"
             `shouldBe` Left ParseInvalidHeaderValue
@@ -113,9 +143,26 @@ requestFramingTests =
       , it "POST chunked" $
           runReq "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
             `shouldBe` Right (POST, Chunked)
+      , it "reads transfer codings across field lines and respects quoted commas" $
+          runReq "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: example; name=\"a,b\"\r\nTransfer-Encoding: Chunked\r\n\r\n"
+            `shouldBe` Right (POST, Chunked)
+      , it "reads equal Content-Length values as one decimal count" $
+          runReq "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 004, 4\r\nContent-Length: 04\r\n\r\n"
+            `shouldBe` Right (POST, ContentLength 4)
+      , it "accepts the full Word64 length range and rejects overflow" $ do
+          runReq "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 18446744073709551615\r\n\r\n"
+            `shouldBe` Right (POST, ContentLength maxBound)
+          runReq "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 18446744073709551616\r\n\r\n"
+            `shouldBe` Left ParseInvalidLength
       , it "TE with non-chunked-last is rejected" $
           runReq "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\n"
             `shouldBe` Left ParseChunkedNotFinal
+      , it "HTTP/1.0 rejects Transfer-Encoding" $
+          runReq "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n"
+            `shouldBe` Left ParseInvalidHeaderValue
+      , it "message framing is independent of the request method" $
+          runReq "TRACE / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
+            `shouldBe` Right (TRACE, ContentLength 0)
       , it "HTTP/1.1 GET missing Host rejected" $
           runReq "GET / HTTP/1.1\r\n\r\n"
             `shouldBe` Left ParseMissingHost
@@ -146,9 +193,12 @@ responseFramingTests =
       , it "1.0 no framing => close-delimited" $
           runResp GET "HTTP/1.0 200 OK\r\n\r\n"
             `shouldBe` Right CloseDelimited
-      , it "1.1 no framing => zero-length" $
+      , it "1.1 without explicit framing is close-delimited" $
           runResp GET "HTTP/1.1 200 OK\r\n\r\n"
-            `shouldBe` Right NoBody
+            `shouldBe` Right CloseDelimited
+      , it "uses EOF when a response ends in another transfer coding" $
+          runResp GET "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n"
+            `shouldBe` Right CloseDelimited
       ]
   where
     runResp m bs = case BS.breakSubstring "\r\n\r\n" bs of

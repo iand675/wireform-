@@ -1,273 +1,146 @@
 # wireform-parquet
 
-[![BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
-
-
-> [!CAUTION]
-> wireform is in heavy development and has not been published to Hackage yet. APIs may change.
-
-[Apache Parquet](https://parquet.apache.org/) for Haskell. The
-metadata footer ([`Parquet.Footer`](src/Parquet/Footer.hs),
-[`Parquet.Types`](src/Parquet/Types.hs),
-[`Parquet.Thrift.Schema`](src/Parquet/Thrift/Schema.hs)), column page
-read and write paths
-([`Parquet.Page`](src/Parquet/Page.hs),
-[`Parquet.Read`](src/Parquet/Read.hs),
-[`Parquet.Write`](src/Parquet/Write.hs)), the rep / def level
-materializer ([`Parquet.Levels`](src/Parquet/Levels.hs),
-[`Parquet.LevelsEncode`](src/Parquet/LevelsEncode.hs)), every
-encoding the Parquet format supports
-([`Parquet.Delta`](src/Parquet/Delta.hs),
-[`Parquet.DeltaEncode`](src/Parquet/DeltaEncode.hs),
-[`Parquet.ByteStreamSplit`](src/Parquet/ByteStreamSplit.hs)),
-the page index and bloom filter
-([`Parquet.PageIndex`](src/Parquet/PageIndex.hs),
-[`Parquet.BloomFilter`](src/Parquet/BloomFilter.hs)),
-column-level encryption
-([`Parquet.Encryption`](src/Parquet/Encryption.hs)),
-the high-level reader / writer
-([`Parquet.HighLevel`](src/Parquet/HighLevel.hs)),
-predicate pushdown ([`Parquet.Predicate`](src/Parquet/Predicate.hs),
-[`Parquet.Aggregate`](src/Parquet/Aggregate.hs)), an Arrow bridge
-([`Parquet.Arrow`](src/Parquet/Arrow.hs)), and an annotation-driven
-deriver ([`Parquet.Derive`](src/Parquet/Derive.hs)).
-
-Parquet is the on-disk columnar format that won at scale: every
-data warehouse from Snowflake to Redshift to BigQuery to Databricks
-reads it, every data-lake table format (Iceberg, Delta Lake, Hudi)
-stores its data files in it, and every modern dataframe runtime
-ships a reader for it. The wire format is dense (per-column
-encoding selected by the writer, with optional dictionary, delta,
-or byte-stream-split encodings on top, optional Snappy / Zstd /
-LZ4 / Brotli compression on top of that, optional column-level
-encryption on top of that, plus a Thrift-encoded footer at the end
-of the file with all the row-group statistics needed for
-predicate pushdown).
-
-This package is part of the [wireform](https://github.com/iand675/wireform-)
-monorepo and shares its allocation primitives, annotation deriver, and
-testing discipline with every other format.
+Read and write [Apache Parquet](https://parquet.apache.org/) files in Haskell.
+Work with records or Arrow columns, including nullable fields, structs, lists
+and maps. Compression, column projection and statistics-based filtering are
+available for analytical workloads.
 
 ## Install
+
+Requires **GHC 9.10 or newer**. Add `wireform-parquet` to your application's dependencies. The example below
+also uses `wireform-arrow` for record conversion:
 
 ```cabal
 build-depends:
   base,
-  wireform-parquet,
-  wireform-arrow,       -- for the Arrow bridge / typed record surface
-  wireform-columnar,    -- iterator surface + predicate vocabulary
-  wireform-derive,      -- only if you want the cross-format annotation deriver
+  bytestring,
+  text,
+  vector,
+  wireform-arrow,
+  wireform-parquet
 ```
 
-The package supports four compression flags. Snappy, Zstandard, and
-LZ4_RAW are on by default because virtually every Parquet file in the
-wild uses one of them (pyarrow + DuckDB default to Snappy, Polars
-defaults to ZSTD, Spark frequently emits LZ4_RAW). Brotli (codec 4)
-is off by default since it shows up much less often:
+The default build enables Snappy, Zstandard and LZ4 and needs their native
+development libraries, together with zlib. Brotli is optional:
 
-```cabal
-flags: +snappy +zstd +lz4 -brotli
+```sh
+cabal build wireform-parquet -fbrotli
 ```
 
-Disable individually with `-f-snappy`, `-f-zstd`, etc., if you want
-a smaller dep tree.
+Brotli also requires the native Brotli 1.x development libraries and
+`pkg-config`. Individual optional codecs can be disabled with `-f-snappy`,
+`-f-zstd`, `-f-lz4` and `-f-brotli`. Uncompressed, GZip and LZO support is
+always available. If you disable Snappy, set `writeCompression` to another
+enabled codec.
 
-The package is part of the [wireform](https://github.com/iand675/wireform-)
-monorepo. Clone the repo and `cabal build wireform-parquet` to compile
-locally.
+## Write and read a file
 
-## Hello world
-
-Round-tripping a Parquet file footer:
+This example derives an Arrow table for a Haskell record, writes it to
+Parquet with the default Snappy compression, then reads the records back.
+Nullable fields are preserved.
 
 ```haskell
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
+
+import qualified Arrow.Derive as Derive
+import qualified Arrow.Record as Arrow
 import qualified Data.ByteString as BS
-import qualified Data.Vector     as V
-import qualified Parquet.Types  as P
-import qualified Parquet.Footer as PF
+import Data.Int (Int64)
+import Data.Text (Text)
+import qualified Data.Vector as V
+import qualified Parquet as P
+
+data Person = Person
+  { personId :: Int64
+  , personName :: Text
+  , personEmail :: Maybe Text
+  } deriving (Eq, Show)
+
+Derive.deriveArrow ''Person
 
 main :: IO ()
 main = do
-  let schema = V.fromList
-        [ P.SchemaElement "schema" Nothing               Nothing               (Just 2) Nothing Nothing Nothing
-        , P.SchemaElement "id"     (Just P.Required)     (Just P.PTInt64)      Nothing  Nothing Nothing Nothing
-        , P.SchemaElement "name"   (Just P.Optional)     (Just P.PTByteArray)  Nothing  Nothing Nothing Nothing
+  let people = V.fromList
+        [ Person 1 "Ada" (Just "ada@example.com")
+        , Person 2 "Grace" Nothing
         ]
-      metadata = P.FileMetadata
-        { P.fmVersion       = 2
-        , P.fmSchema        = schema
-        , P.fmNumRows       = 1000
-        , P.fmRowGroups     = V.empty
-        , P.fmCreatedBy     = Just "wireform"
-        , P.fmColumnOrders  = Nothing
-        }
-      footer = PF.writeFooter metadata
-  case PF.readFooter footer of
-    Right fm -> putStrLn $ "Read back: rows=" ++ show (P.fmNumRows fm)
-    Left  err -> putStrLn err
+      (schema, columns) = Arrow.encodeTable Derive.hasTable people
+
+  (fileSchema, rowGroups) <- either fail pure $
+    P.arrowToParquetMixed schema [columns]
+  BS.writeFile "people.parquet" $
+    P.encodeParquetMixed P.defaultWriteOptions fileSchema rowGroups
+
+  bytes <- BS.readFile "people.parquet"
+  file <- either fail pure (P.decodeParquet P.defaultReadOptions bytes)
+  storedSchema <- either fail pure (P.parquetFileArrowSchemaChecked file)
+  storedColumns <- either (fail . show) pure $
+    P.parquetRowGroupToArrow storedSchema file 0
+  decoded <- either fail pure $
+    Arrow.decodeTable Derive.hasTable storedSchema storedColumns
+  print (decoded :: V.Vector Person)
 ```
 
-The runnable version lives in [`examples/ParquetExample.hs`](../examples/ParquetExample.hs).
+If you already have Arrow columns, start with `arrowToParquetMixed`.
+Use `streamRowGroupsIter` to decode row groups as they are consumed.
+For nested data, `encodeParquetNestedWith` accepts writer options for
+compression, page version and indexes, with automatic min/max statistics.
+Set `writeBloomFilters` to top-level field names to generate filters for all of their physical leaves. For
+individual leaf control, use `buildNestedFileWithAux`.
 
-For end-to-end file reading and writing, the high-level entry points
-are in `Parquet.HighLevel` and through the Arrow bridge in
-`Parquet.Arrow`. The cross-format `Wireform.Columnar` facade in the
-umbrella package layers a uniform Arrow-shaped surface on top.
+## Choosing an API
 
-## What's in here
+Import `Parquet` for the main file, Arrow and record APIs. More specialized
+modules are available when you need them:
 
-| Module                  | Role                                                      |
-|-------------------------|-----------------------------------------------------------|
-| `Parquet.Types`         | Parquet schema and metadata AST (`FileMetadata`, `SchemaElement`, `RowGroup`, `ColumnChunk`, the Parquet logical type system) |
-| `Parquet.Thrift.Schema` | The Thrift binding for `parquet.thrift` (Parquet's metadata is Thrift-encoded inside the footer) |
-| `Parquet.Footer`        | `readFooter` / `writeFooter`: parse and emit the magic-prefixed Thrift-encoded footer |
-| `Parquet.Page`          | Per-page header decoder (DataPageV1, DataPageV2, DictionaryPage), page-body slicing |
-| `Parquet.PageIndex`     | Column index and offset index decoders (Parquet's per-page min / max statistics for sub-row-group pushdown) |
-| `Parquet.BloomFilter`   | Split-block bloom filter decoder (Parquet 2.4+ probabilistic bloom for equality predicates) |
-| `Parquet.Levels`        | Materialise definition / repetition levels into a column shape (`readPlain*OptionalColumnChunk`) |
-| `Parquet.LevelsEncode`  | The encode side of definition / repetition levels |
-| `Parquet.Nested`        | Nested-type materialisation: lists, maps, and struct columns built out of the leaf-column reads |
-| `Parquet.NullPagesBitmap` | Validity bitmap construction from definition levels |
-| `Parquet.Delta`         | DELTA_BINARY_PACKED, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY decoders |
-| `Parquet.DeltaEncode`   | DELTA_BINARY_PACKED encoder |
-| `Parquet.ByteStreamSplit` | BYTE_STREAM_SPLIT decoder (Parquet 2.8+ float-friendly encoding) |
-| `Parquet.Compress`      | Snappy / Zstandard / LZ4_RAW / Brotli / Gzip codec dispatch (each behind its own Cabal flag) |
-| `Parquet.Encryption`    | Column-level encryption (PME, AES-GCM-CTR) per the Parquet Modular Encryption spec |
-| `Parquet.Read`          | `loadParquetFilePath`, `openParquetReader` (path + handle helpers), and the pull-based reader entry points |
-| `Parquet.Write`         | PLAIN / RLE / dictionary page encoders, page header encode, `buildParquetFile` |
-| `Parquet.HighLevel`     | High-level entry points: `decodeParquet`, `WriteOptions`, `defaultWriteOptions`, `defaultReadOptions` |
-| `Parquet.Predicate`     | Pushdown predicate evaluator over column statistics + page index + bloom filter |
-| `Parquet.Aggregate`     | Statistics-driven aggregate pushdown: `count(*)` / `count(col)` / `min` / `max` directly from the footer when statistics are present |
-| `Parquet.Arrow`         | Bridge between `Parquet` columns and Arrow `ColumnArray` (used by the `Wireform.Columnar` facade) |
-| `Parquet.Derive`        | `deriveParquet` Template Haskell entry point |
+| Task | API |
+| --- | --- |
+| Read or write files and choose compression | [`Parquet.HighLevel`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-HighLevel.html) |
+| Convert Arrow columns, project fields or read row groups | [`Parquet.Arrow`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-Arrow.html) |
+| Write nested structs, lists and maps | [`Parquet.Nested`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-Nested.html) |
+| Derive Parquet schemas and row conversions | [`Parquet.Derive`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-Derive.html) |
+| Skip data using predicates, indexes and bloom filters | [`Parquet.Predicate`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-Predicate.html) |
+| Answer counts and extrema from available statistics | [`Parquet.Aggregate`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-Aggregate.html) |
+| Work with Variant values | [`Parquet.Variant`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-Variant.html), [`Parquet.Variant.Parquet`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-Variant-Parquet.html) |
 
-## Encoding coverage
+The Arrow bridge supports decimals, UUIDs, dates and timestamps alongside
+ordinary numeric, Boolean, text and binary columns. The nested bridge also
+preserves binary16 values. Wide and legacy timestamps
+can be preserved losslessly; conversions to ordinary Arrow timestamps check
+range and precision.
 
-The reader implements every encoding the Parquet 2.x format defines:
+Target schemas can select and reorder fields, widen numeric types, and request
+large strings, binary columns or lists. Filtering with page indexes retains
+whole matching pages; apply a row filter when you need exact matching rows.
 
-- PLAIN, RLE, RLE_DICTIONARY, BIT_PACKED.
-- DELTA_BINARY_PACKED, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY.
-- BYTE_STREAM_SPLIT.
+Use `encodeParquetIO`, `encodeParquetMixedIO` or `encodeParquetNestedIO` to
+write encrypted files with required, nullable or nested columns. Set
+`writeFooterEncryption` and select columns with `writeColumnEncryption`;
+columns can share the footer key or use separate keys. Set `writeFooterMode`
+to `SignedPlaintextFooter` to keep the footer readable and authenticate it
+with the supplied signing key. Generate a fresh footer configuration with
+`newFooterEncryption` for every file.
 
-Compression codecs (each behind its Cabal flag): UNCOMPRESSED, SNAPPY,
-ZSTD, LZ4_RAW, BROTLI, GZIP.
+Use `readDecryptionConfig` in the read options to supply footer and column
+keys for encrypted files and to verify signed plaintext footers. See
+[`Parquet.Decryption`](https://hackage.haskell.org/package/wireform-parquet/docs/Parquet-Decryption.html) for key routing.
 
-The writer covers PLAIN page encoders for every leaf type plus
-RLE / dictionary pages, the right defaults for nullable columns
-(`Parquet.LevelsEncode`), and bloom filter generation
-(`Parquet.HighLevel.buildBloomFilterFor`).
+For applications working across Parquet, Arrow IPC and ORC, the separate
+[`wireform-columnar`](https://github.com/iand675/wireform-/tree/main/wireform-columnar) package provides a shared API.
 
-## Predicate pushdown
+## Current limitations
 
-`Parquet.Predicate` evaluates a `Columnar.Predicate.Predicate` against:
+- Readers do not follow column chunks into external files. Read the individual
+  data files rather than a metadata-only file that refers to them.
+- For a text or binary column with 2 GiB or more of decoded value bytes in a
+  row group, request `ALargeUtf8` or `ALargeBinary` in the target Arrow schema.
 
-- per-row-group column statistics from the footer,
-- per-page column / offset index entries (Parquet 2.5+),
-- split-block bloom filters where available.
+## Development
 
-The `Wireform.Columnar.decodeFilteredIter` facade entry point in the
-umbrella package combines this evaluator with the streaming reader so
-callers get only the row groups (and pages, with `PageIndex`) that
-the predicate didn't rule out.
-
-`Parquet.Aggregate` short-circuits the entire scan for `count(*)`,
-`count(<col>)`, `min(<col>)`, and `max(<col>)` queries when the
-required statistics are present in the footer; the reader returns
-the aggregate without reading any column data.
-
-## Arrow bridge
-
-`Parquet.Arrow` converts Parquet column reads to Arrow `ColumnArray`s
-and vice versa. The `Wireform.Columnar` facade in the umbrella package
-layers a uniform Arrow-shaped API on top of both formats, so a
-caller working with Arrow `ColumnArray`s can pick Parquet (or ORC, or
-Arrow IPC) by switching the `Format` argument.
-
-## Annotation-driven deriving
-
-`Parquet.Derive` consumes the cross-format `Wireform.Derive.Modifier`
-vocabulary from [`wireform-derive`](../wireform-derive/README.md):
-
-```haskell
-{-# LANGUAGE TemplateHaskell #-}
-
-import qualified Parquet.Derive as DPq
-import Wireform.Derive (renameStyle, SnakeCase)
-
-data Trade = Trade
-  { tradeTicker :: !Text
-  , tradePrice  :: !Double
-  } deriving stock (Show, Eq, Generic)
-
-{-# ANN type Trade ("Trade" :: String) #-}
-{-# ANN tradeTicker (renameStyle SnakeCase) #-}
-{-# ANN tradePrice  (renameStyle SnakeCase) #-}
-
-DPq.deriveParquet ''Trade
-```
-
-## Testing
-
-The per-format Hedgehog + HUnit suites live in `test/` and `test-derive/`:
-
-```bash
-cabal test wireform-parquet:wireform-parquet-test
-cabal test wireform-parquet:wireform-parquet-derive-test
-```
-
-They cover footer round-trips, every encoding, every compression
-codec (when its flag is enabled), the page index, the bloom filter,
-the encryption surface, and the Arrow bridge.
-
-A separate pyarrow round-trip suite exercises the writer against
-pyarrow's reader (and vice versa) to catch wire-level deviations
-that an in-process round-trip wouldn't.
-
-## Benchmarks
-
-A criterion harness in [`bench/Bench.hs`](bench/Bench.hs) measures
-the C-vs-pure speedup on the XXH64 hash that Parquet bloom filters
-key off:
-
-```bash
-cabal bench wireform-parquet:parquet-bench
-```
-
-<!-- BEGIN_AUTOGEN bench:parquet-xxh64-c-vs-pure -->
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="bench-results/charts/parquet-xxh64-c-vs-pure-dark.svg">
-  <img src="bench-results/charts/parquet-xxh64-c-vs-pure-light.svg" alt="Parquet XXH64 hash: C kernel vs pure Haskell across input sizes">
-</picture>
-
-| Operation | C kernel | pure Haskell | ratio |
-| :-------- | -------: | -----------: | ----: |
-| 8 B       |  12.1 ns |      10.3 ns | 0.85x |
-| 64 B      |  18.1 ns |     42.10 ns | 2.37x |
-| 1 KiB     |  79.9 ns |       457 ns | 5.71x |
-| 64 KiB    |  4387 ns |     28291 ns | 6.45x |
-
-<sub>Last run 2026-06-27 11:45:59 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
-<!-- END_AUTOGEN bench:parquet-xxh64-c-vs-pure -->
-
-For cross-language comparisons (file-format-level):
-
-- Haskell:
-  [`parquet-hs`](https://hackage.haskell.org/package/parquet-hs) (the
-  established Hackage Parquet library) and
-  [`parquet`](https://hackage.haskell.org/package/parquet).
-- C++: [arrow-cpp](https://github.com/apache/arrow/tree/main/cpp/src/parquet),
-  the de facto reference. DuckDB also ships a high-quality reader.
-- Rust: [`parquet`](https://crates.io/crates/parquet), used by
-  Datafusion and Polars.
-- Python: [`pyarrow.parquet`](https://arrow.apache.org/docs/python/parquet.html).
+See the [developer guide](https://hackage.haskell.org/package/wireform-parquet-0.1.0.0/src/DEVELOPING.md) for build and test commands,
+compatibility checks, benchmarks and implementation notes.
 
 ## License
 
-BSD-3-Clause.
-
-## References
-
-- [Apache Parquet specification](https://github.com/apache/parquet-format)
-- [Parquet Thrift schema](https://github.com/apache/parquet-format/blob/master/src/main/thrift/parquet.thrift)
-- [Parquet modular encryption spec](https://github.com/apache/parquet-format/blob/master/Encryption.md)
-- [Parquet bloom filter spec](https://github.com/apache/parquet-format/blob/master/BloomFilter.md)
+[BSD-3-Clause](https://hackage.haskell.org/package/wireform-parquet-0.1.0.0/src/LICENSE).

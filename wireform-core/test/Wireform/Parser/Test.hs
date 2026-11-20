@@ -1,10 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Wireform.Parser.Test (spec) where
 
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Coerce (coerce)
 import Data.Int
 import Data.Word
 import Test.QuickCheck
@@ -12,7 +14,8 @@ import Test.Syd
 import Wireform.Parser
 import Wireform.Parser.Driver (parseByteString)
 import Wireform.Parser.Error
-import Wireform.Parser.Internal (Pure)
+import Wireform.Parser.Internal (Pure, Stream)
+import Wireform.Parser.Switch (switchAsciiCI)
 
 
 type P = Parser Pure String
@@ -30,6 +33,24 @@ bad (Right a) = expectationFailure ("expected failure, got: " <> show a)
 
 spec :: Spec
 spec = describe "Parser" $ do
+  it "folds ASCII letters in literal branches and leaves punctuation unchanged" $ do
+    let parser =
+          $( switchAsciiCI
+               [|
+                 case _ of
+                   "CaChe-Age" -> pure (1 :: Int)
+                   "{" -> pure 2
+                   "_" -> pure 3
+                 |]
+           )
+            <* eof
+            :: P Int
+    ok (parseByteString parser "CaCHE-aGE") 1
+    ok (parseByteString parser "{") 2
+    ok (parseByteString parser "_") 3
+    bad (parseByteString parser "[")
+    bad (parseByteString parser "CACHE")
+
   describe "byte primitives" $ do
     it "anyWord8" $
       ok (parseByteString (anyWord8 :: P Word8) "\x42") 0x42
@@ -236,6 +257,19 @@ spec = describe "Parser" $ do
     it "withSpan captures span" $ do
       let p = withSpan (skip 3) (\_ (Span s e) -> pure (subPos e s)) :: P Int
       ok (parseByteString p "hello") 3
+    it "keeps a bounded window inside a sliced input" $ do
+      let bytes = BS.drop 2 "xxabcd"
+          window p = skip 1 *> withSpan (skip 1) (\_ span' -> inSpan span' p)
+      ok (parseByteString (window (takeBs 1) :: P ByteString) bytes) "b"
+      bad (parseByteString (window (takeBs 2) :: P ByteString) bytes)
+      bad (parseByteString (window (byteString "bc") :: P ()) bytes)
+      case parseByteString (window (ensureNOrEof 2 "past window") :: P ()) bytes of
+        Left (ParseErr 0 "past window") -> pure ()
+        result -> expectationFailure (show result)
+      ok (parseByteString (window (skip 1) *> takeRest :: P ByteString) bytes) "cd"
+
+  it "reports EOF when a streaming checkpoint is used in a whole input" $
+    bad (parseByteString (coerce (checkpoint :: Parser Stream String ()) :: P ()) "abc")
 
   describe "skipBack" $ do
     it "skips backward and re-reads" $ do

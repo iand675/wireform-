@@ -1,0 +1,13 @@
+{
+  "package": "wireform-proto",
+  "version": "0.2.0.0",
+  "source": "https://hackage.haskell.org/package/wireform-proto-0.2.0.0/wireform-proto.cabal",
+  "originalMetadataSha256": "52ab434ba493563c186251eb95e922eca444bac73e2c98df03de74693e6b7d5f",
+  "candidateMetadataSha256": "fb653d2c92534a9de738b8839e779ddf8e746e504391f0f9cdd6fba0eaa7a992",
+  "change": "Only widens wireform-core from ==0.2.* to >=0.2 &&<0.4; no source changes.",
+  "validation": {
+    "GHC9.10.3": "Compiled published sources and ran generated 2MiB+3 protobuf message plus new Parquet decode with Core0.3.0.0",
+    "GHC9.14.1": "Compiled published sources and ran the same coexistence consumer with Core0.3.0.0"
+  },
+  "status": "Proposed revision; not uploaded."
+}

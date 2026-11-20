@@ -20,12 +20,13 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.IORef
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime (..))
 import Network.HTTP.Client.BodyStream qualified as BSm
 import Network.HTTP.Client.Middleware
 import Network.HTTP.Client.Protocol (ProtocolInfo (..))
 import Network.HTTP.Client.Request (Request, get)
 import Network.HTTP.Client.Request qualified as WReq
-import Network.HTTP.Client.Response (RawResponse (..))
 import Network.HTTP.Client.Response qualified as Resp
 import Network.HTTP.Client.Send (prepareRequest)
 import Network.HTTP.Client.Transport
@@ -54,7 +55,7 @@ mkTransport canned = do
         let (st, hdrs, body) = next
         popper <- BSm.popperFromStrict body
         pure
-          RawResponse
+          Resp.RawResponse
             { Resp.statusCode = st
             , Resp.headers = hdrs
             , Resp.bodyPopper = popper
@@ -168,53 +169,114 @@ unit_429_is_retried = it "429 is retried by default" $ do
 -- Retry-After
 -- ---------------------------------------------------------------------------
 
-unit_retry_after_delta_seconds :: Spec
-unit_retry_after_delta_seconds = it
-  "Retry-After in delta-seconds is honoured (clamped)"
-  $ do
-    -- A short Retry-After overrides the (much shorter) backoff
-    -- delay; the value is clamped to maxDelay so the test stays
-    -- fast.
-    (t, calls) <-
-      mkTransport
-        [ (S.status503, [(H.hRetryAfter, "1")], "")
+retryAfterHeader :: Spec
+retryAfterHeader = describe "Retry-After header" $ do
+  it "honors delta-seconds with field whitespace on 429" $
+    check defaultPolicy S.status429 (field " \t1 \t") (seconds 1) 0
+  it "allows a server delay right at the policy limit" $
+    check defaultPolicy S.status503 (field "2") (seconds 2) 0
+  it "returns an unread response when a numeric delay exceeds the policy limit" $
+    mapM_ (\wire -> checkStopped S.status429 (field wire) 0)
+      ["3", BS8.pack (show (maxBound :: Word)), BS8.replicate 4096 '9']
+  it "falls back to backoff for signed, malformed, repeated, and connection-scoped fields" $
+    mapM_ (\fields -> check defaultPolicy S.status503 fields (millis 100) 0)
+      [ field "+1"
+      , field "1junk"
+      , field "1844674407370955161600000000000junk"
+      , field (BS8.replicate 4096 '9' <> "junk")
+      , field "1" <> field "1"
+      , field "1" <> [(H.hConnection, "keep-alive, RETRY-AFTER")]
+      ]
+  it "honors the HTTP-date without rounding the wait down" $
+    check defaultPolicy S.status503 (field "Thu, 01 Jan 2026 00:00:01 GMT") (millis 250) 1
+  it "uses the live century window for an obsolete HTTP-date" $
+    checkStopped S.status503 (field "Tuesday, 01-Jan-75 00:00:00 GMT") 1
+  it "returns an unread response when a date exceeds the policy limit" $
+    checkStopped S.status503 (field "Thu, 01 Jan 2026 00:00:03 GMT") 1
+  it "uses client backoff for a past HTTP-date" $
+    check defaultPolicy S.status503 (field "Sun, 06 Nov 1994 08:49:37 GMT") (millis 100) 1
+  it "does not read the clock for an absent field or an opted-out policy" $ do
+    check defaultPolicy S.status503 [] (millis 100) 0
+    check defaultPolicy{honorRetryAfter = False} S.status503
+      (field "Thu, 01 Jan 2026 00:00:01 GMT") (millis 100) 0
+    check defaultPolicy{honorRetryAfter = False} S.status429
+      (field (BS8.replicate 4096 '9')) (millis 100) 0
+  where
+    defaultPolicy = defaultRetryPolicy{initialDelay = millis 100, maxDelay = seconds 2, maxAttempts = 2}
+    field value = [(H.hRetryAfter, value)]
+    testTime = UTCTime (fromGregorian 2026 1 1) 0.75000075
+    check policy status fields expected expectedClockReads = do
+      (inner, calls) <- mkTransport
+        [ (status, fields, "discard")
         , (S.status200, [], "ok")
         ]
-    let cfg =
-          defaultRetryPolicy
-            { initialDelay = millis 1
-            , maxDelay = millis 5 -- clamp Retry-After down to 5ms
-            , maxAttempts = 2
-            }
-    req <- makeGet
-    _ <- sendRaw (withRetry cfg t) req
-    n <- readIORef calls
-    n `shouldBe` 2
+      waits <- newIORef []
+      clockReads <- newIORef (0 :: Int)
+      let clock = modifyIORef' clockReads (+ 1) >> pure testTime
+          wait duration = modifyIORef' waits (duration :)
+      request <- makeGet
+      response <- sendRaw (withRetryUsing clock wait policy inner) request
+      BSm.popperBytes (Resp.bodyPopper response) `shouldReturn` "ok"
+      readIORef calls `shouldReturn` 2
+      readIORef waits `shouldReturn` [expected]
+      readIORef clockReads `shouldReturn` expectedClockReads
+    checkStopped status fields expectedClockReads = do
+      (inner, calls) <- mkTransport [(status, fields, "retry later"), (S.status200, [], "unexpected retry")]
+      waits <- newIORef []
+      clockReads <- newIORef (0 :: Int)
+      bodyReads <- newIORef (0 :: Int)
+      let transport = Transport $ \request -> do
+            reply <- sendRaw inner request
+            pure reply{Resp.bodyPopper = modifyIORef' bodyReads (+ 1) >> Resp.bodyPopper reply}
+          clock = modifyIORef' clockReads (+ 1) >> pure testTime
+          wait duration = modifyIORef' waits (duration :)
+      request <- makeGet
+      response <- sendRaw (withRetryUsing clock wait defaultPolicy transport) request
+      Resp.statusCode response `shouldBe` status
+      Resp.headers response `shouldBe` fields
+      readIORef bodyReads `shouldReturn` 0
+      BSm.popperBytes (Resp.bodyPopper response) `shouldReturn` "retry later"
+      readIORef calls `shouldReturn` 1
+      readIORef waits `shouldReturn` []
+      readIORef clockReads `shouldReturn` expectedClockReads
 
 
-unit_retry_after_http_date :: Spec
-unit_retry_after_http_date = it
-  "Retry-After as HTTP-date is parsed without crashing"
-  $ do
-    -- We can't pin a real date to "5ms from now", so we just check
-    -- that an HTTP-date Retry-After doesn't break the loop. We use
-    -- an absolute date in the past so the computed delay is
-    -- negative → clamps to 0 → no sleep, retry immediately.
-    (t, calls) <-
-      mkTransport
-        [ (S.status503, [(H.hRetryAfter, "Sun, 06 Nov 1994 08:49:37 GMT")], "")
-        , (S.status200, [], "ok")
-        ]
-    let cfg =
-          defaultRetryPolicy
-            { initialDelay = millis 1
-            , maxDelay = millis 5
-            , maxAttempts = 2
-            }
-    req <- makeGet
-    _ <- sendRaw (withRetry cfg t) req
-    n <- readIORef calls
-    n `shouldBe` 2
+unit_drains_before_backoff :: Spec
+unit_drains_before_backoff = it "drains the intermediate body before waiting and leaves the final body readable" $ do
+  (inner, _) <- mkTransport
+    [ (S.status503, [], "discard")
+    , (S.status503, [], "last response")
+    ]
+  drained <- newIORef False
+  let transport = Transport $ \request -> do
+        response <- sendRaw inner request
+        pure response{Resp.bodyPopper = do
+          chunk <- Resp.bodyPopper response
+          if BS.null chunk then writeIORef drained True else pure ()
+          pure chunk}
+      wait _ = readIORef drained `shouldReturn` True
+      policy = defaultRetryPolicy{maxAttempts = 2}
+      clock = pure (UTCTime (fromGregorian 2026 1 1) 0)
+  request <- makeGet
+  response <- sendRaw (withRetryUsing clock wait policy transport) request
+  BSm.popperBytes (Resp.bodyPopper response) `shouldReturn` "last response"
+
+
+unit_caps_backoff_before_rounding :: Spec
+unit_caps_backoff_before_rounding = it "caps the initial and scaled backoff before scheduling" $ do
+  (inner, _) <- mkTransport
+    [ (S.status503, [], "")
+    , (S.status503, [], "")
+    , (S.status200, [], "ok")
+    ]
+  waits <- newIORef []
+  let policy = defaultRetryPolicy{initialDelay = seconds 10, backoffFactor = 1e30, maxDelay = seconds 2}
+      wait duration = modifyIORef' waits (duration :)
+      clock = pure (UTCTime (fromGregorian 2026 1 1) 0)
+  request <- makeGet
+  response <- sendRaw (withRetryUsing clock wait policy inner) request
+  BSm.popperBytes (Resp.bodyPopper response) `shouldReturn` "ok"
+  readIORef waits `shouldReturn` [seconds 2, seconds 2]
 
 
 -- ---------------------------------------------------------------------------
@@ -246,7 +308,7 @@ unit_breaker_opens_after_threshold = it
     n <- readIORef calls
     n `shouldBe` 3
   where
-    drain :: RawResponse -> IO ByteString
+    drain :: Resp.RawResponse -> IO ByteString
     drain = BSm.popperBytes . Resp.bodyPopper
 
 
@@ -277,8 +339,9 @@ tests =
       , unit_does_not_retry_post_by_default
       , unit_retries_post_when_opted_in
       , unit_429_is_retried
-      , unit_retry_after_delta_seconds
-      , unit_retry_after_http_date
+      , retryAfterHeader
+      , unit_drains_before_backoff
+      , unit_caps_backoff_before_rounding
       , unit_breaker_opens_after_threshold
       , unit_breaker_passes_when_healthy
       ]

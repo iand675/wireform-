@@ -4,6 +4,8 @@ server lists the client-hint request header field names it is willing to
 receive on subsequent requests to the origin, opting in to client-hint content
 negotiation. Its value is an RFC 8941 Structured Field List of tokens, each
 naming a client-hint request header (for example @Sec-CH-UA@, @DPR@, @Width@).
+The codec validates member parameters and retains the names. An explicitly
+empty field clears the advertised set.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc8942> (RFC 8942, HTTP Client Hints;
 the Structured Field syntax is RFC 8941).
@@ -16,8 +18,7 @@ module Network.HTTP.Headers.AcceptCH (
   renderAcceptCH,
 ) where
 
-import qualified Data.ByteString as B
-import Data.Foldable1 (fold1)
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptCH)
 import qualified Network.HTTP.Headers.Mason as M
@@ -37,9 +38,14 @@ instance KnownHeader AcceptCH where
   type Direction AcceptCH = 'Response
 
 
-  parseFromHeaders _ headers = do
-    res <- traverse runAcceptCHParser headers
-    pure (fold1 res)
+  parseFromHeaders _ (line :| []) = parseFieldLine "Accept-CH" acceptCHParser line
+  parseFromHeaders _ fields = AcceptCH <$> parseListFieldLines "Accept-CH" populatedHintList fields
+    where
+      populatedHintList = do
+        hints <- hintList
+        case hints of
+          [] -> failed
+          _ -> pure hints
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderAcceptCH
@@ -48,16 +54,16 @@ instance KnownHeader AcceptCH where
   headerName _ = hAcceptCH
 
 
-runAcceptCHParser :: B.ByteString -> Either String AcceptCH
-runAcceptCHParser bs = case runParser acceptCHParser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left ("Unconsumed input after parsing Accept-CH header: " <> show rest)
-  Fail -> Left "Failed to parse Accept-CH header"
-  Err e -> Left e
-
-
 acceptCHParser :: ParserT st String AcceptCH
-acceptCHParser = AcceptCH <$> rfc8941List rfc8941Token
+acceptCHParser = AcceptCH <$> hintList
+
+
+hintList :: ParserT st String [RFC8941Token]
+hintList = ows *> rfc8941List hint <* ows
+  where
+    -- A hint is both a Structured Fields Token and an HTTP field name.
+    hint = (RFC8941Token <$> shortASCIIFromParser_ hintName) <* skipStructuredFieldParameters
+    hintName = lookahead (skipSatisfyAscii (\c -> isLatinLetter c || c == '*')) *> tokenBytes
 
 
 renderAcceptCH :: AcceptCH -> M.Builder

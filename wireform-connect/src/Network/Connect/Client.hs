@@ -58,6 +58,7 @@ import Control.Concurrent.STM
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception (throwIO)
 import Data.Aeson qualified as Aeson
+import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.CaseInsensitive qualified as CI
@@ -66,7 +67,6 @@ import Data.ByteString.Lazy qualified as BL
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy (..))
-import Data.Text (Text)
 import Data.Text qualified as T
 import Network.Connect.Codec (decodeOutputBody, encodeInputBody)
 import Network.Connect.Error
@@ -88,16 +88,23 @@ import Network.Connect.Envelope
 import Network.Connect.Metadata (headersToLeading, leadingToHeaders, prefixedHeadersToTrailing)
 import Network.Connect.Protocol
   ( Codec (..)
+  , ConnectContentType (..)
+  , ConnectContentTypeError (..)
+  , IsStreaming (..)
+  , boundTimeoutMillis
   , connectGetVersion
   , connectProtocolVersion
   , hConnectAcceptEncoding
   , hConnectContentEncoding
+  , hConnectProtocolVersion
   , hConnectTimeoutMs
+  , lookupConnectContentType
   , qpBase64
   , qpCompression
   , qpConnect
   , qpEncoding
   , qpMessage
+  , renderTimeoutMillis
   , streamContentType
   , unaryContentType
   )
@@ -122,10 +129,10 @@ import Network.HTTP.Types.Header
   , hContentEncoding
   , hContentType
   , insertHeader
-  , lookupHeader
+  , lookupHeaders
   )
 import Network.HTTP.Types.Method qualified as Method
-import Network.HTTP.Types.Status (Status, pattern Status)
+import Network.HTTP.Types.Status (Status, status200)
 import Network.HTTP.Types.Version (pattern HTTP1_1)
 
 ------------------------------------------------------------------------
@@ -140,14 +147,18 @@ data ConnectClientConfig = ConnectClientConfig
   , cccRequestCompression :: !CC.ContentCoding
     -- ^ Compression applied to outgoing messages ('Identity' = none).
   , cccAcceptCompression :: ![CC.ContentCoding]
-    -- ^ Codings advertised to the server via @connect-accept-encoding@.
+    -- ^ Codings advertised via @accept-encoding@ for unary calls and
+    -- @connect-accept-encoding@ for streaming calls. An empty list omits
+    -- the field, so the request's coding is implicitly accepted.
   , cccTimeoutMs :: !(Maybe Int)
     -- ^ Optional per-call deadline, sent as @connect-timeout-ms@.
+    -- Negative durations are already expired. Long durations are capped
+    -- at the ten-digit wire limit and local timer range.
   , cccMetadata :: ![CustomMetadata]
     -- ^ Leading metadata sent on every call.
   , cccSendProtocolVersion :: !Bool
-    -- ^ Send @connect-protocol-version: 1@ on unary calls (spec-required;
-    -- disable only for non-conformant peers).
+    -- ^ Send the optional @connect-protocol-version: 1@ marker on POST
+    -- calls. Unary GET uses the @connect=v1@ query parameter.
   }
 
 -- | Binary Protobuf, no request compression, advertising @identity@ + @gzip@,
@@ -246,7 +257,7 @@ nonStreaming cl p input = do
           , requestBody = BodyBytes bodyBytes
           }
   resp <- Connection.sendOn (clConn cl) req
-  readUnaryResponse codec p resp
+  readUnaryResponse cfg p resp
 
 -- | Issue a unary RPC over HTTP @GET@, encoding the request in query
 -- parameters (@?connect=v1&encoding=…&message=…@). Use only for
@@ -285,45 +296,54 @@ nonStreamingGet cl p input = do
         (baseRequest cl)
           { requestMethod = Method.mGet
           , requestTarget = path
-          , requestHeaders = leadingToHeaders (cccMetadata cfg)
+          , requestHeaders = unaryGetHeaders cfg
           , requestBody = BodyEmpty
           }
   resp <- Connection.sendOn (clConn cl) req
-  readUnaryResponse codec p resp
+  readUnaryResponse cfg p resp
 
 readUnaryResponse
   :: (SupportsClientRpc rpc, Aeson.FromJSON (Output rpc))
-  => Codec
+  => ConnectClientConfig
   -> Proxy rpc
   -> Response
   -> IO (Output rpc)
-readUnaryResponse codec p resp = do
-  let status = responseStatus resp
-      headers = responseHeaders resp
-  bodyBytes <- drainBody (responseBody resp)
-  if is2xx status
-    then case unaryContentTypeError codec headers of
-      Just err -> throwIO (ConnectException err)
-      Nothing -> do
-        let mRespCoding = lookupHeader hContentEncoding headers >>= CC.codingFromName
-        plain <- decompressResp bodyBytes mRespCoding
-        case decodeOutputBody codec p plain of
-          Left e ->
-            throwConnectIO $
-              ConnectError
-                { ceCode = GrpcInternal
-                , ceMessage = Just (T.pack ("connect: could not decode response: " <> e))
-                , ceDetails = []
-                }
-          Right out -> pure out
-    else do
-      let mRespCoding = lookupHeader hContentEncoding headers >>= CC.codingFromName
-      plainErr <- decompressResp bodyBytes mRespCoding
-      let err =
-            case Aeson.decode (BL.fromStrict plainErr) of
-              Just v -> fromMaybe (inferError status) (decodeConnectErrorLenient (httpStatusToConnectCode status) v)
-              Nothing -> inferError status
-      throwIO (ConnectException err)
+readUnaryResponse cfg p resp = decodeUnaryResponse cfg p resp >>= either throwConnectIO pure
+
+decodeUnaryResponse
+  :: (SupportsClientRpc rpc, Aeson.FromJSON (Output rpc))
+  => ConnectClientConfig
+  -> Proxy rpc
+  -> Response
+  -> IO (Either ConnectError (Output rpc))
+decodeUnaryResponse cfg p resp = case unaryResponseCoding cfg resp of
+  Left err -> discardBody body >> pure (Left err)
+  Right coding -> do
+    plain <- decodeUnaryBody coding body
+    pure $
+      if status == status200
+        then first decodeFailure (plain >>= decodeOutputBody (cccCodec cfg) p)
+        else Left $ case plain >>= Aeson.eitherDecodeStrict of
+          Right v -> fromMaybe (inferError status) (decodeConnectErrorLenient (httpStatusToConnectCode status) v)
+          Left _ -> inferError status
+  where
+    status = responseStatus resp
+    body = responseBody resp
+
+unaryResponseCoding :: ConnectClientConfig -> Response -> Either ConnectError CC.ContentCoding
+unaryResponseCoding cfg resp = case mediaError of
+  Just err -> Left err
+  Nothing -> case validateResponseCoding cfg "Content-Encoding" parsedCoding of
+    Left _ | status /= status200 -> Left (inferError status)
+    result -> result
+  where
+    status = responseStatus resp
+    headers = responseHeaders resp
+    parsedCoding = CC.parseUnaryContentCoding (lookupHeaders hContentEncoding headers)
+    mediaError
+      | status == status200 = responseContentTypeError Unary (cccCodec cfg) headers
+      | Right (ConnectContentType Unary CodecJSON) <- lookupConnectContentType headers = Nothing
+      | otherwise = Just (inferError status)
 
 ------------------------------------------------------------------------
 -- Server streaming
@@ -356,8 +376,8 @@ serverStreaming cl p input recvAction = do
           , requestBody = BodyBytes body
           }
   Connection.withResponseOn (clConn cl) req $ \resp -> do
-    fr <- newFrameReader =<< responseBodyProducer (responseBody resp)
-    recvAction (readDataFrame codec p cfg fr)
+    reader <- openStreamingResponse cl resp >>= either throwConnectIO pure
+    recvAction (readDataFrame codec p reader)
 
 ------------------------------------------------------------------------
 -- Client streaming
@@ -401,8 +421,8 @@ clientStreaming cl p sendAction = do
           , requestBody = BodyStream producer
           }
   Connection.withResponseOn (clConn cl) req $ \resp -> do
-    fr <- newFrameReader =<< responseBodyProducer (responseBody resp)
-    readClientStreamOutput codec p cfg fr
+    reader <- openStreamingResponse cl resp >>= either throwConnectIO pure
+    readClientStreamOutput codec p reader
 
 ------------------------------------------------------------------------
 -- Bidirectional streaming
@@ -446,15 +466,14 @@ biDiStreaming cl p action = do
           }
   Connection.withResponseDeferredOn (clConn cl) req $ \awaitResp -> do
     -- The frame reader is created lazily on the first recv (the response
-    -- head may not have arrived yet); memoized for subsequent calls.
+    -- head may not have arrived yet). Cache both admission and rejection.
     frCell <- newMVar Nothing
     let getFrameReader = modifyMVar frCell $ \case
           st@(Just fr) -> pure (st, fr)
           Nothing -> do
-            resp <- awaitResp
-            fr <- newFrameReader =<< responseBodyProducer (responseBody resp)
-            pure (Just fr, fr)
-        recv = getFrameReader >>= readDataFrame codec p cfg
+            result <- awaitResp >>= openStreamingResponse cl
+            pure (Just result, result)
+        recv = getFrameReader >>= either throwConnectIO (readDataFrame codec p)
     r <- action send recv
     atomically (writeTQueue outQ Nothing)
     pure r
@@ -484,7 +503,7 @@ data RpcOutcome a = RpcOutcome
 -- rather than relying solely on the server to do so.
 withRpcDeadline :: ConnectClient -> IO (RpcOutcome a) -> IO (RpcOutcome a)
 withRpcDeadline cl act =
-  case cccTimeoutMs (clConfig cl) of
+  case boundTimeoutMillis <$> cccTimeoutMs (clConfig cl) of
     Just ms | ms > 0 -> do
       m <- timeout (ms * 1000) act
       case m of
@@ -524,7 +543,7 @@ nonStreamingResolved cl p input = withRpcDeadline cl $ do
           , requestBody = BodyBytes bodyBytes
           }
   resp <- Connection.sendOn (clConn cl) req
-  resolveUnary codec p resp
+  resolveUnary cfg p resp
 
 -- | Unary @GET@, returning the full outcome instead of throwing.
 nonStreamingGetResolved
@@ -559,11 +578,11 @@ nonStreamingGetResolved cl p input = withRpcDeadline cl $ do
         (baseRequest cl)
           { requestMethod = Method.mGet
           , requestTarget = "/" <> rpcServiceName p <> "/" <> rpcMethodName p <> "?" <> query
-          , requestHeaders = leadingToHeaders (cccMetadata cfg)
+          , requestHeaders = unaryGetHeaders cfg
           , requestBody = BodyEmpty
           }
   resp <- Connection.sendOn (clConn cl) req
-  resolveUnary codec p resp
+  resolveUnary cfg p resp
 
 -- | Server-streaming, collecting all response payloads + trailing metadata.
 serverStreamingResolved
@@ -605,7 +624,7 @@ serverStreamingResolvedUpTo cl p mcap input = withRpcDeadline cl $ do
           , requestHeaders = streamingHeaders cl cfg (cccRequestCompression cfg)
           , requestBody = BodyBytes body
           }
-  Connection.withResponseOn (clConn cl) req (collectStreamResp mcap codec p cfg)
+  Connection.withResponseOn (clConn cl) req (collectStreamResp cl mcap p)
 
 -- | Client-streaming: send all inputs, then collect the single response.
 clientStreamingResolved
@@ -700,37 +719,23 @@ streamSendAllResolvedUpTo cl p mcap inputs = withRpcDeadline cl $ do
           , requestHeaders = streamingHeaders cl cfg reqCoding
           , requestBody = BodyStream producer
           }
-  Connection.withResponseOn (clConn cl) req (collectStreamResp mcap codec p cfg)
+  Connection.withResponseOn (clConn cl) req (collectStreamResp cl mcap p)
 
 -- | Parse a unary response into a full outcome (does not throw).
 resolveUnary
   :: (SupportsClientRpc rpc, Aeson.FromJSON (Output rpc))
-  => Codec
+  => ConnectClientConfig
   -> Proxy rpc
   -> Response
   -> IO (RpcOutcome (Output rpc))
-resolveUnary codec p resp = do
-  let status = responseStatus resp
-      headers = responseHeaders resp
+resolveUnary cfg p resp = do
+  let headers = responseHeaders resp
       leading = headersToLeading (filter (not . isTrailerHeader) headers)
       trailers = prefixedHeadersToTrailing headers
-  bodyBytes <- drainBody (responseBody resp)
-  if is2xx status
-    then case unaryContentTypeError codec headers of
-      Just err -> pure (RpcOutcome leading [] trailers (Just err))
-      Nothing -> do
-        let mRespCoding = lookupHeader hContentEncoding headers >>= CC.codingFromName
-        plain <- decompressResp bodyBytes mRespCoding
-        pure $ case decodeOutputBody codec p plain of
-          Left e -> RpcOutcome leading [] trailers (Just (decodeFailure e))
-          Right out -> RpcOutcome leading [out] trailers Nothing
-    else do
-      let mRespCoding = lookupHeader hContentEncoding headers >>= CC.codingFromName
-      plainErr <- decompressResp bodyBytes mRespCoding
-      let err = case Aeson.decode (BL.fromStrict plainErr) of
-            Just v -> fromMaybe (inferError status) (decodeConnectErrorLenient (httpStatusToConnectCode status) v)
-            Nothing -> inferError status
-      pure (RpcOutcome leading [] trailers (Just err))
+  result <- decodeUnaryResponse cfg p resp
+  pure $ case result of
+    Left err -> RpcOutcome leading [] trailers (Just err)
+    Right out -> RpcOutcome leading [out] trailers Nothing
 
 -- | Collect a streaming response into a full outcome (does not throw): all
 -- data frames as payloads, plus the EndStreamResponse's metadata and error.
@@ -742,53 +747,38 @@ resolveUnary codec p resp = do
 -- cancellation mode).
 collectStreamResp
   :: (SupportsClientRpc rpc, Aeson.FromJSON (Output rpc))
-  => Maybe Int
-  -> Codec
+  => ConnectClient
+  -> Maybe Int
   -> Proxy rpc
-  -> ConnectClientConfig
   -> Response
   -> IO (RpcOutcome (Output rpc))
-collectStreamResp mcap codec p cfg resp = do
-  let headers = responseHeaders resp
-      leading = headersToLeading (filter (not . isTrailerHeader) headers)
-      compressedAllowed =
-        maybe False (\c -> CC.codingName c /= "identity")
-          (lookupHeader hConnectContentEncoding headers >>= CC.codingFromName)
-  fr <- newFrameReader =<< responseBodyProducer (responseBody resp)
-  let go acc = do
-        mframe <- readFrame fr
-        case mframe of
-          Nothing -> pure (RpcOutcome leading (reverse acc) [] Nothing)
-          Just (flags, payload)
-            | efCompressed flags && not compressedAllowed ->
-                pure
-                  ( RpcOutcome
-                      leading
-                      (reverse acc)
-                      []
-                      (Just (ConnectError GrpcInternal (Just "connect: received compressed message but no compression was negotiated") []))
-                  )
-            | efEndStream flags -> do
-                plain <- decompressFrame flags payload cfg
+collectStreamResp cl mcap p resp = do
+  result <- openStreamingResponse cl resp
+  case result of
+    Left err -> failWith [] err
+    Right (StreamingReader fr coding) -> go fr coding []
+  where
+    codec = cccCodec (clConfig cl)
+    leading = headersToLeading (filter (not . isTrailerHeader) (responseHeaders resp))
+    failWith acc err = pure (RpcOutcome leading (reverse acc) [] (Just err))
+    go fr coding acc = do
+      mframe <- readFrame fr
+      case mframe of
+        Nothing -> pure (RpcOutcome leading (reverse acc) [] Nothing)
+        Just (flags, payload) ->
+          withFramePayload coding flags payload (failWith acc) $ \plain ->
+            if efEndStream flags
+              then
                 let esr = decodeEndStreamLenient plain
-                pure (RpcOutcome leading (reverse acc) (esMetadata esr) (esError esr))
-            | otherwise -> do
-                plain <- decompressFrame flags payload cfg
-                case decodeOutputBody codec p plain of
-                  Left e -> pure (RpcOutcome leading (reverse acc) [] (Just (decodeFailure e)))
-                  Right out ->
-                    let acc' = out : acc
-                    in case mcap of
-                         Just n | length acc' >= n ->
-                           pure
-                             ( RpcOutcome
-                                 leading
-                                 (reverse acc')
-                                 []
-                                 (Just (ConnectError GrpcCancelled (Just "connect: canceled") []))
-                             )
-                         _ -> go acc'
-  go []
+                in pure (RpcOutcome leading (reverse acc) (esMetadata esr) (esError esr))
+              else case decodeOutputBody codec p plain of
+                Left e -> failWith acc (decodeFailure e)
+                Right out ->
+                  let acc' = out : acc
+                  in case mcap of
+                       Just n | length acc' >= n ->
+                         failWith acc' (ConnectError GrpcCancelled (Just "connect: canceled") [])
+                       _ -> go fr coding acc'
 
 isTrailerHeader :: (CI.CI ByteString, ByteString) -> Bool
 isTrailerHeader (n, _) = "trailer-" `BS.isPrefixOf` CI.foldedCase n
@@ -824,17 +814,16 @@ unaryHeaders _cl cfg codec =
       h1 = case cccRequestCompression cfg of
         CC.Identity -> h0
         c -> insertHeader hContentEncoding (CC.codingName c) h0
-      h2 = case cccAcceptCompression cfg of
-        [] -> h1
-        cs -> insertHeader hAcceptEncoding (renderAccept cs) h1
-      h3 = case cccTimeoutMs cfg of
-        Nothing -> h2
-        Just ms -> insertHeader hConnectTimeoutMs (bsPack (show ms)) h2
-      h4 =
-        if cccSendProtocolVersion cfg
-          then insertHeader "connect-protocol-version" connectProtocolVersion h3
-          else h3
-   in h4
+   in postControlHeaders cfg (unaryAcceptHeaders cfg h1)
+
+unaryGetHeaders :: ConnectClientConfig -> Headers
+unaryGetHeaders cfg =
+  timeoutHeaders cfg (unaryAcceptHeaders cfg (leadingToHeaders (cccMetadata cfg)))
+
+unaryAcceptHeaders :: ConnectClientConfig -> Headers -> Headers
+unaryAcceptHeaders cfg headers = case cccAcceptCompression cfg of
+  [] -> headers
+  codings -> insertHeader hAcceptEncoding (CC.renderAcceptEncoding codings) headers
 
 streamingHeaders :: ConnectClient -> ConnectClientConfig -> CC.ContentCoding -> Headers
 streamingHeaders _cl cfg reqCoding =
@@ -847,11 +836,20 @@ streamingHeaders _cl cfg reqCoding =
         c -> insertHeader hConnectContentEncoding (CC.codingName c) baseHeaders
       h1 = case cccAcceptCompression cfg of
         [] -> h0
-        cs -> insertHeader hConnectAcceptEncoding (renderAccept cs) h0
-      h2 = case cccTimeoutMs cfg of
-        Nothing -> h1
-        Just ms -> insertHeader hConnectTimeoutMs (bsPack (show ms)) h1
-   in h2
+        cs -> insertHeader hConnectAcceptEncoding (CC.renderAcceptEncoding cs) h0
+   in postControlHeaders cfg h1
+
+timeoutHeaders :: ConnectClientConfig -> Headers -> Headers
+timeoutHeaders cfg headers = case cccTimeoutMs cfg of
+  Nothing -> headers
+  Just ms -> insertHeader hConnectTimeoutMs (renderTimeoutMillis ms) headers
+
+postControlHeaders :: ConnectClientConfig -> Headers -> Headers
+postControlHeaders cfg headers
+  | cccSendProtocolVersion cfg = insertHeader hConnectProtocolVersion connectProtocolVersion withTimeout
+  | otherwise = withTimeout
+  where
+    withTimeout = timeoutHeaders cfg headers
 
 -- | A single enveloped input frame (for server streaming's one message).
 singleInputFrame
@@ -881,34 +879,65 @@ inputFrame = singleInputFrame
 -- Frame reading
 ------------------------------------------------------------------------
 
+data StreamingReader = StreamingReader !FrameReader !CC.ContentCoding
+
+-- Validate the response head before creating a reader or consuming the body.
+openStreamingResponse :: ConnectClient -> Response -> IO (Either ConnectError StreamingReader)
+openStreamingResponse cl resp = case streamingResponseCoding (clConfig cl) resp of
+  Right coding -> do
+    fr <- newFrameReader =<< responseBodyProducer (responseBody resp)
+    pure (Right (StreamingReader fr coding))
+  Left err -> do
+    case responseBody resp of
+      -- HTTP/1 cannot reuse a connection with an unread body. Closing it
+      -- also avoids waiting for a body whose headers we already rejected.
+      BodyStream _ | responseH2StreamId resp == 0 ->
+        Connection.closeConnection (clConn cl)
+      _ -> responseCancel resp
+    pure (Left err)
+
+streamingResponseCoding :: ConnectClientConfig -> Response -> Either ConnectError CC.ContentCoding
+streamingResponseCoding cfg resp
+  | responseStatus resp /= status200 = Left (inferError (responseStatus resp))
+  | Just err <- responseContentTypeError Streaming (cccCodec cfg) headers = Left err
+  | otherwise = validateResponseCoding cfg "Connect-Content-Encoding" (CC.parseStreamingContentCoding headers)
+  where
+    headers = responseHeaders resp
+
+-- An omitted preference field implicitly advertises the request's coding.
+validateResponseCoding
+  :: ConnectClientConfig
+  -> String
+  -> Either String CC.ContentCoding
+  -> Either ConnectError CC.ContentCoding
+validateResponseCoding cfg field result = case result of
+  Left err -> Left (decodeFailure err)
+  Right coding
+    | coding == CC.Identity || advertised coding -> Right coding
+    | otherwise -> Left (decodeFailure ("unadvertised response " <> field))
+  where
+    advertised coding = case cccAcceptCompression cfg of
+      [] -> coding == cccRequestCompression cfg
+      codings -> coding `elem` codings
+{-# INLINE validateResponseCoding #-}
+
 -- | Read the next output frame; @Nothing@ at the end-stream frame (throwing
 -- if the end-stream carries an error).
 readDataFrame
   :: (SupportsClientRpc rpc, Aeson.FromJSON (Output rpc))
   => Codec
   -> Proxy rpc
-  -> ConnectClientConfig
-  -> FrameReader
+  -> StreamingReader
   -> IO (Maybe (Output rpc))
-readDataFrame codec p cfg fr = do
+readDataFrame codec p (StreamingReader fr coding) = do
   mframe <- readFrame fr
   case mframe of
     Nothing -> pure Nothing
-    Just (flags, payload)
-      | efEndStream flags -> do
-          checkEndStream flags payload cfg
-          pure Nothing
-      | otherwise -> do
-          plain <- decompressFrame flags payload cfg
-          case decodeOutputBody codec p plain of
-            Left e ->
-              throwConnectIO $
-                ConnectError
-                  { ceCode = GrpcInternal
-                  , ceMessage = Just (T.pack ("connect: could not decode response frame: " <> e))
-                  , ceDetails = []
-                  }
-            Right out -> pure (Just out)
+    Just (flags, payload) ->
+      withFramePayload coding flags payload throwConnectIO $ \plain ->
+        if efEndStream flags
+          then checkEndStream plain >> pure Nothing
+          else either (throwConnectIO . decodeFailure) (pure . Just) (decodeOutputBody codec p plain)
 
 -- | Read the single output message of a client-streaming response, then the
 -- end-stream frame.
@@ -916,53 +945,32 @@ readClientStreamOutput
   :: (SupportsClientRpc rpc, Aeson.FromJSON (Output rpc))
   => Codec
   -> Proxy rpc
-  -> ConnectClientConfig
-  -> FrameReader
+  -> StreamingReader
   -> IO (Output rpc)
-readClientStreamOutput codec p cfg fr = do
+readClientStreamOutput codec p (StreamingReader fr coding) = do
   mframe <- readFrame fr
   case mframe of
-    Nothing ->
-      throwConnectIO $
-        ConnectError
-          { ceCode = GrpcInternal
-          , ceMessage = Just "connect: client stream ended without output"
-          , ceDetails = []
-          }
-    Just (flags, payload)
-      | efEndStream flags -> do
-          plain <- decompressFrame flags payload cfg
-          let esErr = esError (decodeEndStreamLenient plain)
-          throwConnectIO $
-            fromMaybe
-              (ConnectError{ceCode = GrpcInternal, ceMessage = Just "connect: client stream ended without output", ceDetails = []})
-              esErr
-      | otherwise -> do
-          plain <- decompressFrame flags payload cfg
-          out <-
-            case decodeOutputBody codec p plain of
-              Left e ->
-                throwConnectIO $
-                  ConnectError
-                    { ceCode = GrpcInternal
-                    , ceMessage = Just (T.pack ("connect: could not decode response: " <> e))
-                    , ceDetails = []
-                    }
-              Right x -> pure x
-          -- Read and validate the end-stream frame.
-          mEnd <- readFrame fr
-          case mEnd of
-            Just (ef, ep) | efEndStream ef -> checkEndStream ef ep cfg
-            _ -> pure ()
-          pure out
+    Nothing -> throwConnectIO missingOutput
+    Just (flags, payload) ->
+      withFramePayload coding flags payload throwConnectIO $ \plain ->
+        if efEndStream flags
+          then throwConnectIO (fromMaybe missingOutput (esError (decodeEndStreamLenient plain)))
+          else do
+            out <- either (throwConnectIO . decodeFailure) pure (decodeOutputBody codec p plain)
+            mEnd <- readFrame fr
+            case mEnd of
+              Just (endFlags, endPayload) | efEndStream endFlags ->
+                withFramePayload coding endFlags endPayload throwConnectIO checkEndStream
+              _ -> pure ()
+            pure out
+  where
+    missingOutput = ConnectError GrpcInternal (Just "connect: client stream ended without output") []
 
--- | Throw if an end-stream frame carries an error (decompressing it first
--- when the frame's compressed bit is set).
-checkEndStream :: EnvelopeFlags -> ByteString -> ConnectClientConfig -> IO ()
-checkEndStream flags payload cfg = do
-  plain <- decompressFrame flags payload cfg
+-- | Throw if a decoded end-stream frame carries an RPC error.
+checkEndStream :: ByteString -> IO ()
+checkEndStream plain =
   case esError (decodeEndStreamLenient plain) of
-    Just ce -> throwIO (ConnectException ce)
+    Just ce -> throwConnectIO ce
     Nothing -> pure ()
 
 ------------------------------------------------------------------------
@@ -977,33 +985,21 @@ compressUnary' :: CC.ContentCoding -> ByteString -> (ByteString, Bool)
 compressUnary' CC.Identity bs = (bs, False)
 compressUnary' c bs = (CC.compress c bs, True)
 
-decompressResp :: ByteString -> Maybe CC.ContentCoding -> IO ByteString
-decompressResp bodyBytes mCoding = case mCoding of
-  Nothing -> pure bodyBytes
-  Just CC.Identity -> pure bodyBytes
-  Just c
-    | BS.null bodyBytes -> pure bodyBytes
-    | otherwise -> do
-        r <- CC.decompress c bodyBytes
-        pure $ case r of
-          Left _ -> bodyBytes
-          Right bs -> bs
+decodeUnaryBody :: CC.ContentCoding -> Body -> IO (Either String ByteString)
+decodeUnaryBody coding body = do
+  bytes <- drainBody body
+  if BS.null bytes
+    then pure (Right bytes)
+    else CC.decompress coding bytes
 
--- | Decompress a streaming response frame. The coding is taken from the
--- client's first accepted non-identity coding (sent in
--- @connect-accept-encoding@); the server's @connect-content-encoding@ header
--- isn't exposed here, so we rely on the frame's compressed bit.
-decompressFrame :: EnvelopeFlags -> ByteString -> ConnectClientConfig -> IO ByteString
-decompressFrame flags payload cfg =
-  if efCompressed flags
-    then case filter (/= CC.Identity) (cccAcceptCompression cfg) of
-      (c : _) -> do
-        r <- CC.decompress c payload
-        pure $ case r of
-          Left _ -> payload
-          Right bs -> bs
-      [] -> pure payload
-    else pure payload
+-- Uncompressed frames use the original payload without wrapping a result.
+withFramePayload :: CC.ContentCoding -> EnvelopeFlags -> ByteString -> (ConnectError -> IO a) -> (ByteString -> IO a) -> IO a
+withFramePayload coding flags payload onError onPayload
+  | not (efCompressed flags) = onPayload payload
+  | coding == CC.Identity =
+      onError (ConnectError GrpcInternal (Just "connect: received compressed message but no compression was negotiated") [])
+  | otherwise = CC.decompress coding payload >>= either (onError . decodeFailure) onPayload
+{-# INLINE withFramePayload #-}
 
 drainBody :: Body -> IO ByteString
 drainBody BodyEmpty = pure BS.empty
@@ -1014,6 +1010,13 @@ drainBody (BodyStream p) = go []
       p >>= \case
         Nothing -> pure (BS.concat (reverse acc))
         Just chunk -> go (chunk : acc)
+
+-- Consume the wire framing for connection reuse without buffering the body.
+discardBody :: Body -> IO ()
+discardBody (BodyStream pull) = go
+  where
+    go = pull >>= maybe (pure ()) (const go)
+discardBody _ = pure ()
 
 responseBodyProducer :: Body -> IO (IO (Maybe ByteString))
 responseBodyProducer BodyEmpty = pure (pure Nothing)
@@ -1030,36 +1033,25 @@ responseBodyProducer (BodyBytes bs) = do
       )
 responseBodyProducer (BodyStream p) = pure p
 
-renderAccept :: [CC.ContentCoding] -> ByteString
-renderAccept = BS.intercalate ", " . map CC.codingName
-
-is2xx :: Status -> Bool
-is2xx (Status w) = w >= 200 && w < 300
-
 inferError :: Status -> ConnectError
 inferError status = ConnectError{ceCode = httpStatusToConnectCode status, ceMessage = Just "connect: server error", ceDetails = []}
 
--- | Validate a 2xx unary response's @Content-Type@. Connect unary responses
--- must use @application/<codec>@; a different @application/<x>@ is a
--- wrong-codec protocol error ('GrpcInternal'), and anything else (or a
--- missing content-type) is 'GrpcUnknown'. Matches the connectrpc conformance
--- "unexpected responses" expectations.
-unaryContentTypeError :: Codec -> Headers -> Maybe ConnectError
-unaryContentTypeError codec headers =
-  case lookupHeader hContentType headers of
-    Nothing -> Just (ctErr GrpcUnknown "connect: response missing content-type")
-    Just ct ->
-      let base = lowerBS (BS.takeWhile (\c -> c /= 0x3B && c /= 0x20) ct)
-          expected = "application/" <> codecToken codec
-       in if base == expected
-            then Nothing
-            else
-              if "application/" `BS.isPrefixOf` base
-                then Just (ctErr GrpcInternal "connect: unexpected response codec")
-                else Just (ctErr GrpcUnknown "connect: unexpected response content-type")
+-- | Validate the response media type against the request's envelope and codec.
+responseContentTypeError :: IsStreaming -> Codec -> Headers -> Maybe ConnectError
+responseContentTypeError expected codec headers =
+  case lookupConnectContentType headers of
+    Right (ConnectContentType envelope actual) | envelope == expected && actual == codec -> Nothing
+    Right (ConnectContentType Unary _) | expected == Streaming -> unexpectedType
+    Left (UnsupportedConnectContentType Unary) | expected == Streaming -> unexpectedType
+    Left MissingContentType -> ctErr GrpcUnknown "connect: response missing content-type"
+    Left NonApplicationContentType -> unexpectedType
+    Left MalformedContentType -> ctErr GrpcInternal "connect: malformed response content-type"
+    Left RepeatedContentType -> ctErr GrpcInternal "connect: repeated response content-type"
+    _ -> ctErr GrpcInternal "connect: unsupported or unexpected response codec"
   where
-    ctErr c m = ConnectError{ceCode = c, ceMessage = Just m, ceDetails = []}
-    lowerBS = BS.map (\w -> if w >= 65 && w <= 90 then w + 32 else w)
+    unexpectedType = ctErr GrpcUnknown "connect: unexpected response content-type"
+    ctErr c m = Just ConnectError{ceCode = c, ceMessage = Just m, ceDetails = []}
+{-# INLINE responseContentTypeError #-}
 
 throwConnectIO :: ConnectError -> IO a
 throwConnectIO ce = throwIO (ConnectException ce)

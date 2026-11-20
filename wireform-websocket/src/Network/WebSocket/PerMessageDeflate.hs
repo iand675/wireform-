@@ -66,6 +66,7 @@ import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Char (toLower)
 import Data.IORef
+import Data.Maybe (mapMaybe)
 import Data.Word (Word8)
 import Foreign.C.Types
 import Foreign.ForeignPtr
@@ -169,48 +170,37 @@ offerHeader o =
 
 
 {- | Parse all @permessage-deflate@ offers out of the comma-separated
-token list passed in @Sec-WebSocket-Extensions@.  Non-PMD
-extensions are dropped silently.
+token list passed in @Sec-WebSocket-Extensions@.  Malformed offers and
+other extensions are dropped silently.
 -}
 parseOffers :: [ByteString] -> [PmdOffer]
-parseOffers raw =
-  [ off
-  | tok <- raw
-  , let parts = map stripOws (BS.split 0x3B tok) -- ';'
-  , case parts of
-      (name : _) -> BS8.map toLower name == "permessage-deflate"
-      _ -> False
-  , let mOff = parseExtParams (drop 1 (map stripOws (BS.split 0x3B tok)))
-  , Just off <- [mOff]
-  ]
+parseOffers = mapMaybe parseOffer
   where
-    parseExtParams :: [ByteString] -> Maybe PmdOffer
-    parseExtParams = go defaultPmdOffer {offClientMaxWindowBitsHint = ClientWindowBitsAbsent}
-      where
-        go !acc [] = Just acc
-        go !acc (p : ps) =
-          let (k, mv) = splitKV p
-          in case BS8.map toLower k of
-               "server_no_context_takeover"
-                 | BS.null mv -> go acc {offServerNoContextTakeover = True} ps
-                 | otherwise -> Nothing
-               "client_no_context_takeover"
-                 | BS.null mv -> go acc {offClientNoContextTakeover = True} ps
-                 | otherwise -> Nothing
-               "server_max_window_bits" ->
-                 case readWindowBits mv of
-                   Just n -> go acc {offServerMaxWindowBits = Just n} ps
-                   Nothing -> Nothing
-               "client_max_window_bits"
-                 | BS.null mv -> go acc {offClientMaxWindowBitsHint = ClientWindowBitsHinted} ps
-                 | otherwise -> case readWindowBits mv of
-                     Just n -> go acc {offClientMaxWindowBitsHint = ClientWindowBitsSet n} ps
-                     Nothing -> Nothing
-               _ -> Nothing
+    parseOffer hdr = case BS.split 0x3B hdr of
+      name : params
+        | BS8.map toLower (stripOws name) == "permessage-deflate" ->
+            parseUniqueParams
+              step
+              defaultPmdOffer {offClientMaxWindowBitsHint = ClientWindowBitsAbsent}
+              params
+      _ -> Nothing
 
-    splitKV b = case BS.elemIndex 0x3D b of -- '='
-      Just i -> (stripOws (BS.take i b), stripQuotes (stripOws (BS.drop (i + 1) b)))
-      Nothing -> (b, BS.empty)
+    step acc key rawValue =
+      let value = stripQuotes rawValue
+      in case key of
+           "server_no_context_takeover"
+             | BS.null value -> Just acc {offServerNoContextTakeover = True}
+           "client_no_context_takeover"
+             | BS.null value -> Just acc {offClientNoContextTakeover = True}
+           "server_max_window_bits" -> do
+             n <- readWindowBits value
+             Just acc {offServerMaxWindowBits = Just n}
+           "client_max_window_bits"
+             | BS.null value -> Just acc {offClientMaxWindowBitsHint = ClientWindowBitsHinted}
+             | otherwise -> do
+                 n <- readWindowBits value
+                 Just acc {offClientMaxWindowBitsHint = ClientWindowBitsSet n}
+           _ -> Nothing
 
     stripQuotes b
       | BS.length b >= 2
@@ -218,10 +208,6 @@ parseOffers raw =
       , BS.last b == 0x22 =
           BS.init (BS.tail b)
       | otherwise = b
-
-    readWindowBits b = case BS8.readInt b of
-      Just (n, rest) | BS.null rest && n >= 8 && n <= 15 -> Just (fromIntegral n)
-      _ -> Nothing
 
 
 {- | Server-side decision: pick one of the client's offers and
@@ -292,41 +278,54 @@ responseHeader p =
 
 {- | Client-side: parse the server's reply (the value of one
 @Sec-WebSocket-Extensions@ header line) into the negotiated
-'PmdParams'.  Returns 'Nothing' if the line is not for
-@permessage-deflate@.
+'PmdParams'.  Returns 'Nothing' for malformed replies or replies
+for other extensions.
 -}
 parseResponseParams :: ByteString -> Maybe PmdParams
-parseResponseParams hdr =
-  let parts = map stripOws (BS.split 0x3B hdr)
-  in case parts of
-       (name : rest)
-         | BS8.map toLower name == "permessage-deflate" ->
-             go defaultPmdParams rest
-       _ -> Nothing
+parseResponseParams hdr = case BS.split 0x3B hdr of
+  name : params
+    | BS8.map toLower (stripOws name) == "permessage-deflate" ->
+        parseUniqueParams step defaultPmdParams params
+  _ -> Nothing
   where
-    go acc [] = Just acc
-    go acc (p : ps) =
-      let (k, mv) = splitKV p
-      in case BS8.map toLower k of
-           "server_no_context_takeover"
-             | BS.null mv -> go acc {pmdServerNoContextTakeover = True} ps
-             | otherwise -> Nothing
-           "client_no_context_takeover"
-             | BS.null mv -> go acc {pmdClientNoContextTakeover = True} ps
-             | otherwise -> Nothing
-           "server_max_window_bits" -> case readBits mv of
-             Just n -> go acc {pmdServerMaxWindowBits = n} ps
-             Nothing -> Nothing
-           "client_max_window_bits" -> case readBits mv of
-             Just n -> go acc {pmdClientMaxWindowBits = n} ps
-             Nothing -> Nothing
-           _ -> Nothing
-    splitKV b = case BS.elemIndex 0x3D b of
-      Just i -> (stripOws (BS.take i b), stripOws (BS.drop (i + 1) b))
-      Nothing -> (b, BS.empty)
-    readBits b = case BS8.readInt b of
-      Just (n, rest) | BS.null rest && n >= 8 && n <= 15 -> Just (fromIntegral n)
+    step acc key value = case key of
+      "server_no_context_takeover"
+        | BS.null value -> Just acc {pmdServerNoContextTakeover = True}
+      "client_no_context_takeover"
+        | BS.null value -> Just acc {pmdClientNoContextTakeover = True}
+      "server_max_window_bits" -> do
+        n <- readWindowBits value
+        Just acc {pmdServerMaxWindowBits = n}
+      "client_max_window_bits" -> do
+        n <- readWindowBits value
+        Just acc {pmdClientMaxWindowBits = n}
       _ -> Nothing
+
+
+-- RFC 7692 §7 rejects repeated names within a single offer or response.
+parseUniqueParams
+  :: (a -> ByteString -> ByteString -> Maybe a)
+  -> a
+  -> [ByteString]
+  -> Maybe a
+parseUniqueParams step = go []
+  where
+    go _ !acc [] = Just acc
+    go seen !acc (param : rest)
+      | name `elem` seen = Nothing
+      | otherwise = do
+          next <- step acc name value
+          go (name : seen) next rest
+      where
+        (key, suffix) = BS.break (== 0x3D) param -- '='
+        name = BS8.map toLower (stripOws key)
+        value = stripOws (BS.drop 1 suffix)
+
+
+readWindowBits :: ByteString -> Maybe Int
+readWindowBits b = case BS8.readInt b of
+  Just (n, rest) | BS.null rest && n >= 8 && n <= 15 -> Just n
+  _ -> Nothing
 
 
 stripOws :: ByteString -> ByteString

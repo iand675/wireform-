@@ -130,6 +130,16 @@ data Stream
 Resolved at compile time via specialization.
 -}
 class ParserMode (m :: Type) where
+  {- | Refresh the end of a streaming window. Fixed input retains the
+  current bound, including when parsing a subspan.
+  -}
+  refreshEnd# :: ParserEnv -> Addr# -> State# RealWorld -> (# State# RealWorld, Addr# #)
+  refreshEnd# env end st
+    | wholeInput env = (# st, end #)
+    | otherwise = readEnd# env st
+  {-# INLINE refreshEnd# #-}
+
+
   onEnsureFail
     :: ParserEnv
     -> Addr#
@@ -151,6 +161,10 @@ class ParserMode (m :: Type) where
 
 
 instance ParserMode Pure where
+  refreshEnd# _ end st = (# st, end #)
+  {-# INLINE refreshEnd# #-}
+
+
   onEnsureFail _env _eob _s _n st = (# st, Fail# #)
   {-# INLINE onEnsureFail #-}
   modeCheckpoint = Parser \_env _eob s st -> (# st, OK# () s #)
@@ -232,7 +246,7 @@ data ParserEnv = ParserEnv
   }
 
 
--- | Recover the typed PromptTag# from the env. Only call from ensureNSlow.
+-- | Recover the typed PromptTag# from a streaming environment.
 {-# INLINE pePromptTag #-}
 pePromptTag :: forall e r. ParserEnv -> PromptTag# (Step e r)
 pePromptTag env = unsafeCoerce# (peTag env)
@@ -303,6 +317,11 @@ readEnd# env s =
        (# s', a #) -> (# s', a #)
 
 
+wholeInput :: ParserEnv -> Bool
+wholeInput env = peMask env == maxBound
+{-# INLINE wholeInput #-}
+
+
 {-# INLINE writeEnd# #-}
 writeEnd# :: ParserEnv -> Addr# -> State# RealWorld -> State# RealWorld
 writeEnd# env val s =
@@ -352,9 +371,8 @@ data Resume e r = Resume
 The representation mirrors flatparse exactly:
 @ForeignPtrContents -> Addr# (eob) -> Addr# (cur) -> State# -> Res#@
 
-The @ParserEnv@ and @PromptTag#@ are additional parameters for
-streaming support.  For whole-input parsing ('parseByteString'),
-the PromptTag# is allocated but @ensureNSlow@ is never reached.
+The parser environment carries a prompt for streaming runs.
+The whole-input driver calls the parser directly.
 | Parser result with state token.
 -}
 type StRes# e a = (# State# RealWorld, Res# e a #)
@@ -467,7 +485,7 @@ ensureN# :: forall m e. ParserMode m => Int# -> Parser m e ()
 ensureN# n# = Parser \env eob s st ->
   case n# <=# minusAddr# eob s of
     1# -> (# st, OK# () s #)
-    _ -> case readEnd# env st of
+    _ -> case refreshEnd# @m env eob st of
       (# st', eob' #) -> case n# <=# minusAddr# eob' s of
         1# -> (# st', OK# () s #)
         _ -> onEnsureFail @m env eob' s n# st'
@@ -489,41 +507,43 @@ ensureNSlow
   -> Int#
   -> State# RealWorld
   -> StRes# e ()
-ensureNSlow env _eob s n# st =
-  case readEnd# env st of
-    (# st0, eob' #) ->
-      case n# <=# minusAddr# eob' s of
-        1# -> (# st0, OK# () s #)
-        _ ->
-          let tag :: PromptTag# (Step Any Any)
-              tag = unsafeCoerce# (peTag env)
-          in case curToPos env s st0 of
-               (# st0', pos #) ->
-                 let !needed = I# n#
-                 in control0#
-                      tag
-                      ( \k st1 ->
-                          let resume =
-                                Resume
-                                  { resumeContinue = \(Ptr newCur) (Ptr newEnd) ->
-                                      IO \st2 ->
-                                        -- The driver always wraps newCur back
-                                        -- into the first mapping; re-anchor
-                                        -- so 'curToPos' stays correct after
-                                        -- the wrap.  Both stores are safe
-                                        -- without a fence: the parser is
-                                        -- suspended (between this 'control0#'
-                                        -- and the 'prompt#' below) while
-                                        -- they execute.
-                                        let st3 = writeEnd# env newEnd st2
-                                            st4 = writeAnchor# env pos newCur st3
-                                        in prompt# tag (\st5 -> k (\st6 -> (# st6, OK# () newCur #)) st5) st4
-                                  , resumeEof =
-                                      IO \st2 -> prompt# tag (\st3 -> k (\st4 -> (# st4, Fail# #)) st3) st2
-                                  }
-                          in (# st1, StepSuspend pos needed resume #)
-                      )
-                      st0'
+ensureNSlow env _eob s n# st
+  | wholeInput env = (# st, Fail# #)
+  | otherwise =
+      case readEnd# env st of
+        (# st0, eob' #) ->
+          case n# <=# minusAddr# eob' s of
+            1# -> (# st0, OK# () s #)
+            _ ->
+              let tag :: PromptTag# (Step Any Any)
+                  tag = unsafeCoerce# (peTag env)
+              in case curToPos env s st0 of
+                   (# st0', pos #) ->
+                     let !needed = I# n#
+                     in control0#
+                          tag
+                          ( \k st1 ->
+                              let resume =
+                                    Resume
+                                      { resumeContinue = \(Ptr newCur) (Ptr newEnd) ->
+                                          IO \st2 ->
+                                            -- The driver always wraps newCur back
+                                            -- into the first mapping; re-anchor
+                                            -- so 'curToPos' stays correct after
+                                            -- the wrap.  Both stores are safe
+                                            -- without a fence: the parser is
+                                            -- suspended (between this 'control0#'
+                                            -- and the 'prompt#' below) while
+                                            -- they execute.
+                                            let st3 = writeEnd# env newEnd st2
+                                                st4 = writeAnchor# env pos newCur st3
+                                            in prompt# tag (\st5 -> k (\st6 -> (# st6, OK# () newCur #)) st5) st4
+                                      , resumeEof =
+                                          IO \st2 -> prompt# tag (\st3 -> k (\st4 -> (# st4, Fail# #)) st3) st2
+                                      }
+                              in (# st1, StepSuspend pos needed resume #)
+                          )
+                          st0'
 {-# NOINLINE ensureNSlow #-}
 
 
@@ -533,40 +553,46 @@ ensureNSlow env _eob s n# st =
 
 -- | Checkpoint is only meaningful in streaming mode.
 checkpoint :: Parser Stream e ()
-checkpoint = Parser \env _ s st0 ->
-  let tag :: PromptTag# (Step Any Any)
-      tag = unsafeCoerce# (peTag env)
-  in case curToPos env s st0 of
-       (# st0', pos #) ->
-         control0#
-           tag
-           ( \k st1 ->
-               let resume =
-                     Resume
-                       { resumeContinue = \(Ptr newCur) (Ptr newEnd) ->
-                           IO \st2 ->
-                             -- Re-anchor: the driver has wrapped newCur
-                             -- back to @base + (pos .&. mask)@ which
-                             -- decouples the cur pointer from the original
-                             -- anchor.  Without re-anchoring, 'curToPos'
-                             -- would compute the wrong absolute position
-                             -- on the next call.
-                             --
-                             -- These two stores (end pointer + anchor
-                             -- pair) are not behind any lock or fence:
-                             -- they run inside the resume body, which is
-                             -- only invoked while the parser is suspended
-                             -- between 'control0#' and the matching
-                             -- 'prompt#' below.  The parser cannot observe
-                             -- a partial update because it is not running
-                             -- at all during the update — suspension is
-                             -- the synchronization mechanism.
-                             let st3 = writeEnd# env newEnd st2
-                                 st4 = writeAnchor# env pos newCur st3
-                             in prompt# tag (\st5 -> k (\st6 -> (# st6, OK# () newCur #)) st5) st4
-                       , resumeEof =
-                           IO \st2 -> prompt# tag (\st3 -> k (\st4 -> (# st4, Fail# #)) st3) st2
-                       }
-               in (# st1, StepCheckpoint pos resume #)
-           )
-           st0'
+checkpoint = Parser checkpoint#
+
+
+checkpoint# :: ParserEnv -> Addr# -> Addr# -> State# RealWorld -> StRes# e ()
+checkpoint# env _ s st0
+  | wholeInput env = (# st0, Fail# #)
+  | otherwise =
+      let tag :: PromptTag# (Step Any Any)
+          tag = unsafeCoerce# (peTag env)
+      in case curToPos env s st0 of
+           (# st0', pos #) ->
+             control0#
+               tag
+               ( \k st1 ->
+                   let resume =
+                         Resume
+                           { resumeContinue = \(Ptr newCur) (Ptr newEnd) ->
+                               IO \st2 ->
+                                 -- Re-anchor: the driver has wrapped newCur
+                                 -- back to @base + (pos .&. mask)@ which
+                                 -- decouples the cur pointer from the original
+                                 -- anchor.  Without re-anchoring, 'curToPos'
+                                 -- would compute the wrong absolute position
+                                 -- on the next call.
+                                 --
+                                 -- These two stores (end pointer + anchor
+                                 -- pair) are not behind any lock or fence:
+                                 -- they run inside the resume body, which is
+                                 -- only invoked while the parser is suspended
+                                 -- between 'control0#' and the matching
+                                 -- 'prompt#' below.  The parser cannot observe
+                                 -- a partial update because it is not running
+                                 -- at all during the update — suspension is
+                                 -- the synchronization mechanism.
+                                 let st3 = writeEnd# env newEnd st2
+                                     st4 = writeAnchor# env pos newCur st3
+                                 in prompt# tag (\st5 -> k (\st6 -> (# st6, OK# () newCur #)) st5) st4
+                           , resumeEof =
+                               IO \st2 -> prompt# tag (\st3 -> k (\st4 -> (# st4, Fail# #)) st3) st2
+                           }
+                   in (# st1, StepCheckpoint pos resume #)
+               )
+               st0'

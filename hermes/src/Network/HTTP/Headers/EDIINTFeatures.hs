@@ -3,16 +3,15 @@
 {- |
 The @EDIINT-Features@ header field (RFC 6017), used by EDIINT/AS2 agents to
 advertise the set of optional EDIINT features they support. Its value is a
-non-empty, comma-separated list of feature tokens:
+non-empty, comma-separated list of feature names:
 
 @
-EDIINT-Features = #feature
-feature         = "multiple-attachments" / "CEM" / feature-extension
-feature-extension = token
+EDIINT-Features = feature-name *([WSP] "," [WSP] feature-name)
+feature-name    = 1*(ALPHA / DIGIT / "-")
 @
 
-We capture the list structure directly as a non-empty list of tokens, since the
-grammar is a simple, current RFC 9110 token list.
+Feature names are case insensitive. The codec retains their spelling and
+combines repeated HTTP field lines in wire order.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc6017>
 
@@ -24,17 +23,19 @@ module Network.HTTP.Headers.EDIINTFeatures (
   renderEDIINTFeatures,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import qualified Data.CharSet as CharSet
+import Data.CharSet.Posix.Ascii (alnum)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hEDIINTFeatures)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedText, renderSeparated, shortText)
 
 
 -- | @EDIINT-Features@ value: the non-empty list of advertised feature tokens.
-newtype EDIINTFeatures = EDIINTFeatures {ediintFeatures :: NE.NonEmpty ST.ShortText}
+newtype EDIINTFeatures = EDIINTFeatures {ediintFeatures :: NonEmpty ST.ShortText}
   deriving stock (Eq, Show)
 
 
@@ -44,25 +45,35 @@ instance KnownHeader EDIINTFeatures where
   type Direction EDIINTFeatures = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser ediintFeaturesParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing EDIINT-Features header: " <> show rest
-    Fail -> Left "Failed to parse EDIINT-Features header"
-    Err e -> Left e
+  parseFromHeaders _ = fmap EDIINTFeatures . parseListFieldLines "EDIINT-Features" featureNamesParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderEDIINTFeatures
+  renderToHeaders _ = encodeCommaSeparatedText . ediintFeatures
 
 
   headerName _ = hEDIINTFeatures
 
 
 ediintFeaturesParser :: ParserT st String EDIINTFeatures
-ediintFeaturesParser = do
-  firstFeature <- rfc9110Token
-  rest <- many (ows *> $(char ',') *> ows *> rfc9110Token)
-  pure $ EDIINTFeatures (firstFeature NE.:| rest)
+ediintFeaturesParser = EDIINTFeatures <$> featureNamesParser
+
+
+featureNamesParser :: ParserT st String (NonEmpty ST.ShortText)
+featureNamesParser = do
+  firstFeature <- ows *> featureName
+  rest <- many (wsp *> $(char ',') *> wsp *> featureName)
+  ows
+  pure (firstFeature :| rest)
+  where
+    featureName = shortASCIIFromParser_ (asciiAlnumSetBytes featureNameChars)
+    wsp = skipSatisfyAscii isOWS <|> pure ()
+
+
+featureNameChars :: AsciiSet
+featureNameChars = asciiSet (alnum <> CharSet.singleton '-')
+{-# NOINLINE featureNameChars #-}
 
 
 renderEDIINTFeatures :: EDIINTFeatures -> M.Builder
-renderEDIINTFeatures (EDIINTFeatures fs) = M.intersperse ", " $ map shortText $ NE.toList fs
+renderEDIINTFeatures (EDIINTFeatures (first :| rest)) =
+  renderSeparated ", " shortText (first : rest)

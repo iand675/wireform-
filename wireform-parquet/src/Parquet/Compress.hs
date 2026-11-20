@@ -5,7 +5,8 @@
 
 The reader's 'Parquet.Read.decompressChunk' supports @Uncompressed@,
 @GZip@, @Snappy@ (with @-fsnappy@), @ZSTD@ (with @-fzstd@), and
-@LZ4_RAW@ (with @-flz4@). This module exposes the symmetric writer
+@LZ4_RAW@ (with @-flz4@), raw @LZO@ and optional @Brotli@
+(with @-fbrotli@). This module exposes the symmetric writer
 side: 'compressPageBytes' takes a 'Compression' codec and a page body
 and returns the compressed bytes.
 
@@ -15,12 +16,15 @@ returns @Left@ rather than silently emitting uncompressed data.
 -}
 module Parquet.Compress (
   compressPageBytes,
+  validateCompression,
 ) where
 
 import Codec.Compression.GZip qualified as GZip
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Columnar.LZO qualified as LZO
+import Data.Bifunctor (first)
 
 
 #ifdef HAVE_SNAPPY
@@ -36,10 +40,31 @@ import qualified Columnar.LZ4 as LZ4
 #endif
 
 #ifdef HAVE_BROTLI
-import qualified Codec.Compression.Brotli as Brotli
+import qualified Parquet.Brotli as Brotli
 #endif
 
 import Parquet.Types (Compression (..))
+
+
+-- | Check availability without running the codec or allocating a page.
+validateCompression :: Compression -> Either String ()
+validateCompression codec = case codec of
+  Uncompressed -> Right ()
+  GZip -> Right ()
+  LZO -> Right ()
+#ifdef HAVE_SNAPPY
+  Snappy -> Right ()
+#endif
+#ifdef HAVE_ZSTD
+  ZSTD -> Right ()
+#endif
+#ifdef HAVE_LZ4
+  LZ4Raw -> Right ()
+#endif
+#ifdef HAVE_BROTLI
+  Brotli -> Right ()
+#endif
+  _ -> Left ("Parquet.Compress: codec unavailable for writing: " ++ show codec)
 
 
 {- | Compress a page-body byte string with the given codec.
@@ -79,7 +104,11 @@ compressPageBytes ZSTD _ =
 -- 'LZ4.compress' would return an empty payload, which would be written
 -- as a valid but empty page. Reject it instead (Parquet pages are
 -- bounded by the page size, far below the limit).
+-- The raw block format represents empty input with a final zero token.
+-- Columnar.LZ4 uses an empty ByteString as its failure/empty sentinel, so
+-- handle this legal page explicitly before asking for a non-empty bound.
 compressPageBytes LZ4Raw bs
+  | BS.null bs = Right (BS.singleton 0)
   | LZ4.compressBound (BS.length bs) < 0 =
       Left "Parquet.Compress: LZ4_RAW input exceeds LZ4_MAX_INPUT_SIZE"
   | otherwise = Right (LZ4.compress bs)
@@ -96,17 +125,13 @@ compressPageBytes LZ4 _ =
 
 #ifdef HAVE_BROTLI
 compressPageBytes Brotli bs =
-  Right (BL.toStrict (Brotli.compress (BL.fromStrict bs)))
+  Brotli.compress bs
 #else
 compressPageBytes Brotli _ =
   Left "Parquet.Compress: Brotli requires building wireform with -fbrotli"
 #endif
 
 
--- LZO is intentionally unsupported: the Parquet spec lists it (codec 3)
--- for historical compatibility with Hadoop writers, but none of the
--- mainstream modern writers (parquet-mr, arrow-cpp, pyarrow) emit LZO
--- pages and parquet-cpp ships with it disabled by default. We surface a
--- clear error rather than pretending otherwise.
-compressPageBytes LZO _ =
-  Left "Parquet.Compress: LZO (codec 3) is not supported; it's a legacy Hadoop codec not emitted by modern writers"
+-- Parquet uses the raw LZO1X stream, without Hadoop/lzop framing.
+compressPageBytes LZO bytes =
+  first (("Parquet.Compress: " ++) . LZO.prettyLZOError) (LZO.compress bytes)

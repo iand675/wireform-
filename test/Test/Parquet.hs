@@ -3,6 +3,7 @@ module Test.Parquet (parquetTests) where
 import Data.Bits (shiftL)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
+import Data.Either (isLeft)
 import Data.Int (Int32, Int64)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -154,13 +155,13 @@ levelsAndSchemaTests =
       [ it "maxLevels optional and required leaves" $ do
           let schOpt =
                 V.fromList
-                  [ SchemaElement (T.pack "schema") Nothing Nothing (Just 1) Nothing Nothing Nothing
-                  , SchemaElement (T.pack "x") (Just Optional) (Just PTInt32) Nothing Nothing Nothing Nothing
+                  [ SchemaElement (T.pack "schema") Nothing Nothing (Just 1) Nothing Nothing Nothing Nothing
+                  , SchemaElement (T.pack "x") (Just Optional) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
                   ]
               schReq =
                 V.fromList
-                  [ SchemaElement (T.pack "schema") Nothing Nothing (Just 1) Nothing Nothing Nothing
-                  , SchemaElement (T.pack "y") (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
+                  [ SchemaElement (T.pack "schema") Nothing Nothing (Just 1) Nothing Nothing Nothing Nothing
+                  , SchemaElement (T.pack "y") (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
                   ]
           maxLevelsForColumnPath schOpt (V.singleton (T.pack "x")) `shouldBe` Right (0, 1)
           maxLevelsForColumnPath schReq (V.singleton (T.pack "y")) `shouldBe` Right (0, 0)
@@ -427,12 +428,13 @@ footerRoundtrips =
                   { fmVersion = 2
                   , fmSchema =
                       V.fromList
-                        [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
-                        , SchemaElement "value" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
+                        [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing Nothing
+                        , SchemaElement "value" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
                         ]
                   , fmNumRows = 100
                   , fmRowGroups = V.empty
                   , fmCreatedBy = Just "wireform"
+                  , fmKeyValueMetadata = Nothing
                   , fmColumnOrders = Nothing
                   }
           readFooter (writeFooter fm) `shouldBe` Right fm
@@ -457,12 +459,13 @@ footerRoundtrips =
                 FileMetadata
                   2
                   ( V.fromList
-                      [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
-                      , SchemaElement "value" (Just Optional) (Just PTInt64) Nothing Nothing Nothing Nothing
+                      [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing Nothing
+                      , SchemaElement "value" (Just Optional) (Just PTInt64) Nothing Nothing Nothing Nothing Nothing
                       ]
                   )
                   1000
                   (V.singleton rg)
+                  Nothing
                   Nothing
                   Nothing
           readFooter (writeFooter fm) `shouldBe` Right fm
@@ -471,27 +474,36 @@ footerRoundtrips =
               fm =
                 FileMetadata
                   1
-                  (V.singleton (SchemaElement "root" Nothing Nothing (Just 0) Nothing Nothing Nothing))
+                  (V.singleton (SchemaElement "root" Nothing Nothing (Just 0) Nothing Nothing Nothing Nothing))
                   3000
                   (V.fromList [mkRG 1000, mkRG 1000, mkRG 1000])
                   (Just "test-writer v1.0")
                   Nothing
+                  Nothing
           readFooter (writeFooter fm) `shouldBe` Right fm
       , it "All parquet types" $ do
           let types = [PTBoolean, PTInt32, PTInt64, PTInt96, PTFloat, PTDouble, PTByteArray, PTFixedLenByteArray]
-              mkSchema t = SchemaElement (T.pack (show t)) (Just Required) (Just t) Nothing Nothing Nothing Nothing
-              fm = FileMetadata 2 (V.fromList (map mkSchema types)) 0 V.empty Nothing Nothing
+              mkSchema t = SchemaElement (T.pack (show t)) (Just Required) (Just t) Nothing Nothing Nothing Nothing (if t == PTFixedLenByteArray then Just 16 else Nothing)
+              fm = FileMetadata 2 (V.fromList (map mkSchema types)) 0 V.empty Nothing Nothing Nothing
           readFooter (writeFooter fm) `shouldBe` Right fm
       , it "fmColumnOrders round-trips" $ do
           let orders = V.fromList [TypeDefinedOrder, TypeDefinedOrder, TypeDefinedOrder]
+              schema =
+                V.fromList
+                  [ SchemaElement "schema" Nothing Nothing (Just 3) Nothing Nothing Nothing Nothing
+                  , SchemaElement "a" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
+                  , SchemaElement "b" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
+                  , SchemaElement "c" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
+                  ]
               fm =
                 FileMetadata
                   2
-                  V.empty
+                  schema
                   0
                   V.empty
                   (Just "wireform")
                   (Just orders)
+                  Nothing
           readFooter (writeFooter fm) `shouldBe` Right fm
       , it "rgSortingColumns round-trips" $ do
           let sc1 = SortingColumn 0 False True
@@ -505,6 +517,7 @@ footerRoundtrips =
                   (V.singleton rg)
                   Nothing
                   Nothing
+                  Nothing
           readFooter (writeFooter fm) `shouldBe` Right fm
       ]
 
@@ -514,7 +527,7 @@ magicTests =
   describe "Magic" $
     sequence_
       [ it "Footer ends with PAR1" $ do
-          let fm = FileMetadata 2 V.empty 0 V.empty Nothing Nothing
+          let fm = FileMetadata 2 V.empty 0 V.empty Nothing Nothing Nothing
               bs = writeFooter fm
               magic = BS.drop (BS.length bs - 4) bs
           magic `shouldBe` parquetMagic
@@ -554,7 +567,7 @@ edgeCases =
               cm = ColumnMetadata PTInt32 (V.fromList encs) (V.singleton "x") Uncompressed 0 0 0 0 Nothing Nothing Nothing Nothing
               cc = ColumnChunk Nothing 0 (Just cm) Nothing Nothing Nothing Nothing
               rg = RowGroup (V.singleton cc) 0 0 Nothing
-              fm = FileMetadata 2 V.empty 0 (V.singleton rg) Nothing Nothing
+              fm = FileMetadata 2 V.empty 0 (V.singleton rg) Nothing Nothing Nothing
           readFooter (writeFooter fm) `shouldBe` Right fm
       ]
 
@@ -567,7 +580,7 @@ propertyRoundtrips =
           ver <- forAll $ Gen.int32 (Range.linear 1 3)
           nRows <- forAll $ Gen.int64 (Range.linear 0 1000000)
           createdBy <- forAll $ Gen.maybe (Gen.text (Range.linear 1 32) Gen.alphaNum)
-          let fm = FileMetadata ver V.empty nRows V.empty createdBy Nothing
+          let fm = FileMetadata ver V.empty nRows V.empty createdBy Nothing Nothing
           readFooter (writeFooter fm) === Right fm
       , it "FileMetadata with random schema elements" $ property $ do
           nFields <- forAll $ Gen.int (Range.linear 0 5)
@@ -578,10 +591,10 @@ propertyRoundtrips =
                     name <- Gen.text (Range.linear 1 20) Gen.alphaNum
                     rep <- Gen.maybe (Gen.element [Required, Optional, Repeated])
                     pt <- Gen.maybe (Gen.element [PTBoolean, PTInt32, PTInt64, PTFloat, PTDouble, PTByteArray])
-                    pure (SchemaElement name rep pt Nothing Nothing Nothing Nothing)
+                    pure (SchemaElement name rep pt Nothing Nothing Nothing Nothing Nothing)
                 )
                 [1 .. nFields]
-          let fm = FileMetadata 2 (V.fromList fields) 0 V.empty Nothing Nothing
+          let fm = FileMetadata 2 (V.fromList fields) 0 V.empty Nothing Nothing Nothing
           readFooter (writeFooter fm) === Right fm
       , it "FileMetadata with random row groups" $ property $ do
           nGroups <- forAll $ Gen.int (Range.linear 0 3)
@@ -594,7 +607,7 @@ propertyRoundtrips =
                     pure (RowGroup V.empty totalBytes nRows Nothing)
                 )
                 [1 .. nGroups]
-          let fm = FileMetadata 2 V.empty (sum (map rgNumRows rgs)) (V.fromList rgs) Nothing Nothing
+          let fm = FileMetadata 2 V.empty (sum (map rgNumRows rgs)) (V.fromList rgs) Nothing Nothing Nothing
           readFooter (writeFooter fm) === Right fm
       ]
 
@@ -689,26 +702,28 @@ deltaBinaryPackedTests =
   describe "DELTA_BINARY_PACKED" $
     sequence_
       [ it "single value (header only)" $ do
-          let bs = BS.pack [0x08, 0x01, 0x01, 0x54]
+          let bs = BS.pack [0x80, 0x01, 0x04, 0x01, 0x54]
           decodeDeltaBinaryPackedInt32 1 bs `shouldBe` Right (VP.fromList [42 :: Int32])
       , it "constant delta (bit_width=0)" $ do
-          let bs = BS.pack [0x08, 0x01, 0x03, 0xC8, 0x01, 0x14, 0x00]
+          let bs = BS.pack [0x80, 0x01, 0x04, 0x03, 0xC8, 0x01, 0x14, 0x00, 0x00, 0x00, 0x00]
           decodeDeltaBinaryPackedInt32 3 bs `shouldBe` Right (VP.fromList [100, 110, 120 :: Int32])
       , it "variable deltas (bit_width=2)" $ do
-          let bs = BS.pack [0x08, 0x01, 0x04, 0x00, 0x02, 0x02, 0x24, 0x00]
+          let bs = BS.pack [0x80, 0x01, 0x04, 0x04, 0x00, 0x02, 0x02, 0x00, 0x00, 0x00, 0x24] <> BS.replicate 7 0
           decodeDeltaBinaryPackedInt32 4 bs `shouldBe` Right (VP.fromList [0, 1, 3, 6 :: Int32])
       , it "INT64 variant" $ do
-          let bs = BS.pack [0x08, 0x01, 0x01, 0x54]
+          let bs = BS.pack [0x80, 0x01, 0x04, 0x01, 0x54]
           decodeDeltaBinaryPackedInt64 1 bs `shouldBe` Right (VP.fromList [42 :: Int64])
       , it "negative first value" $ do
-          let bs = BS.pack [0x08, 0x01, 0x01, 0x09]
+          let bs = BS.pack [0x80, 0x01, 0x04, 0x01, 0x09]
           decodeDeltaBinaryPackedInt32 1 bs `shouldBe` Right (VP.fromList [-5 :: Int32])
       , it "negative deltas" $ do
-          let bs = BS.pack [0x08, 0x01, 0x03, 0x14, 0x05, 0x00]
+          let bs = BS.pack [0x80, 0x01, 0x04, 0x03, 0x14, 0x05, 0x00, 0x00, 0x00, 0x00]
           decodeDeltaBinaryPackedInt32 3 bs `shouldBe` Right (VP.fromList [10, 7, 4 :: Int32])
       , it "empty (total_values=0)" $ do
-          let bs = BS.pack [0x08, 0x01, 0x00, 0x00]
+          let bs = BS.pack [0x80, 0x01, 0x04, 0x00, 0x00]
           decodeDeltaBinaryPackedInt32 0 bs `shouldBe` Right VP.empty
+      , it "rejects the abbreviated, invalid 8-value block used in spec illustrations" $ do
+          decodeDeltaBinaryPackedInt32 1 (BS.pack [0x08, 0x01, 0x01, 0x54]) `shouldSatisfy` isLeft
       ]
 
 
@@ -791,8 +806,8 @@ writerRoundtripTests =
       [ it "buildParquetFile -> loadParquetFile -> readPlainInt32ColumnChunk" $ do
           let schema =
                 V.fromList
-                  [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
-                  , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
+                  [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing Nothing
+                  , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
                   ]
               vals = VP.fromList [1, 2, 3, 4, 5 :: Int32]
               fileBytes = buildParquetFile schema (V.singleton (V.singleton (ColInt32 vals)))
@@ -805,9 +820,9 @@ writerRoundtripTests =
       , it "multiple columns round-trip" $ do
           let schema =
                 V.fromList
-                  [ SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing Nothing
-                  , SchemaElement "a" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
-                  , SchemaElement "b" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
+                  [ SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing Nothing Nothing
+                  , SchemaElement "a" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
+                  , SchemaElement "b" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
                   ]
               colA = VP.fromList [10, 20, 30 :: Int32]
               colB = VP.fromList [100, 200, 300 :: Int32]
@@ -825,8 +840,8 @@ writerRoundtripTests =
       , it "empty column round-trip" $ do
           let schema =
                 V.fromList
-                  [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
-                  , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
+                  [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing Nothing
+                  , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
                   ]
               vals = VP.empty :: VP.Vector Int32
               fileBytes = buildParquetFile schema (V.singleton (V.singleton (ColInt32 vals)))
@@ -883,7 +898,8 @@ pageIndexTests =
       , it "ColumnIndex round-trip with min/max + null counts" $ do
           let ci =
                 ColumnIndex
-                  { ciNullPages = V.fromList [False, False, True]
+                  { ciNanCounts = Nothing
+                  , ciNullPages = V.fromList [False, False, True]
                   , ciMinValues = V.fromList [BS.pack [0, 0, 0, 0], BS.pack [10, 0, 0, 0], BS.empty]
                   , ciMaxValues = V.fromList [BS.pack [9, 0, 0, 0], BS.pack [99, 0, 0, 0], BS.empty]
                   , ciBoundaryOrder = OrderAscending
@@ -895,7 +911,8 @@ pageIndexTests =
       , it "ColumnIndex round-trip with level histograms" $ do
           let ci =
                 ColumnIndex
-                  { ciNullPages = V.fromList [False, False]
+                  { ciNanCounts = Nothing
+                  , ciNullPages = V.fromList [False, False]
                   , ciMinValues = V.fromList [BS.pack [1], BS.pack [2]]
                   , ciMaxValues = V.fromList [BS.pack [3], BS.pack [4]]
                   , ciBoundaryOrder = OrderUnordered
@@ -944,7 +961,7 @@ pageIndexTests =
               mins = V.fromList (map (\(_, b, _, _) -> b) pages)
               maxs = V.fromList (map (\(_, _, c, _) -> c) pages)
               ncs = V.fromList (map (\(_, _, _, d) -> d) pages)
-              ci = ColumnIndex nulls mins maxs bos (Just ncs) Nothing Nothing
+              ci = ColumnIndex nulls mins maxs bos (Just ncs) Nothing Nothing Nothing
           decodeColumnIndex (encodeColumnIndex ci) === Right ci
       , it "ColumnChunk carries page-index and bloom offsets" $ do
           let cm =
@@ -975,12 +992,13 @@ pageIndexTests =
                 FileMetadata
                   2
                   ( V.fromList
-                      [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
-                      , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
+                      [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing Nothing
+                      , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing Nothing
                       ]
                   )
                   100
                   (V.singleton rg)
+                  Nothing
                   Nothing
                   Nothing
           readFooter (writeFooter fm) `shouldBe` Right fm

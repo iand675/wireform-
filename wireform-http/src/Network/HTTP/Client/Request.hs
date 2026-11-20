@@ -41,6 +41,9 @@ module Network.HTTP.Client.Request (
   addHeader,
   removeHeader,
   addRequestHeader,
+  withRequestTrailers,
+  withoutRequestTrailers,
+  RequestTrailerError (..),
   withBody,
   withRawBody,
   addSpanAttribute,
@@ -51,14 +54,20 @@ module Network.HTTP.Client.Request (
   SpanAttribute (..),
 ) where
 
+import Control.Exception (Exception, throwIO)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.CaseInsensitive qualified as CI
 import Data.Int (Int64)
+import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
 import Network.HTTP.Client.Media (Encode, encode, mediaType, renderMediaType)
 import Network.HTTP.Client.Protocol
 import Network.HTTP.Client.URI
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Method qualified as M
+import Network.HTTP.Types.Version (Version)
 
 
 {- | A value tag for tracing attributes.
@@ -163,6 +172,53 @@ addHeader = addRequestHeader
 
 removeHeader :: H.HeaderName -> Request a -> Request a
 removeHeader n r = r {headers = H.deleteHeader n (headers r)}
+
+
+data RequestTrailerError
+  = InvalidRequestTrailerName !H.HeaderName
+  | InvalidRequestTrailerValue !H.HeaderName
+  | ForbiddenRequestTrailer !H.HeaderName
+  | RequestTrailersUnsupportedVersion !Version
+  deriving stock (Eq, Show)
+
+instance Exception RequestTrailerError
+
+
+{- | Announce the supplied field names and attach a trailer producer.
+The built-in transports evaluate it after the body reaches EOF. Use
+`pure fields` for precomputed trailers. A body-preserving retry can
+send the request again, so the action must be repeatable.
+Only announce fields whose definitions allow trailer use.
+-}
+withRequestTrailers
+  :: NonEmpty H.HeaderName
+  -> IO H.Headers
+  -> Request a
+  -> Either RequestTrailerError (Request a)
+withRequestTrailers names produce req = do
+  mapM_ validateTrailerName names
+  let announcement = BS.intercalate ", " (map CI.original (NE.toList names))
+      checkedTrailers = do
+        fields <- produce
+        mapM_ (either throwIO pure . validateTrailerField) fields
+        pure fields
+  pure (setHeader H.hTrailer announcement (addProtocolHint (withProtocolRequestTrailers (Just checkedTrailers)) req))
+  where
+    validateTrailerField (name, value) = do
+      validateTrailerName name
+      if H.isValidHeaderValue value then Right () else Left (InvalidRequestTrailerValue name)
+    validateTrailerName name
+      | not (H.isValidHeaderName (CI.original name)) = Left (InvalidRequestTrailerName name)
+      | H.isHopByHop name || H.isHttp2Forbidden name
+          || name `elem` [H.hHost, H.hContentLength, H.hContentType, H.hContentEncoding, H.hContentRange, H.hAuthorization, H.hExpect, H.hRange] =
+          Left (ForbiddenRequestTrailer name)
+      | otherwise = Right ()
+
+
+-- | Clear both the announcement and the producer.
+withoutRequestTrailers :: Request a -> Request a
+withoutRequestTrailers = removeHeader H.hTrailer . addProtocolHint (withProtocolRequestTrailers Nothing)
+
 
 
 {- | Encode a value as the request body, setting @Content-Type@ from

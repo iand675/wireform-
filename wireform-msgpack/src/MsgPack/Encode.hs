@@ -17,7 +17,6 @@ module MsgPack.Encode (
   encode,
 ) where
 
-import Data.Bits (shiftR, (.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
@@ -30,11 +29,14 @@ import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (pokeByteOff)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
+import MsgPack.Timestamp (checkExtension, invalidNanoseconds, timestamp64Word, validNanoseconds)
 import MsgPack.Value qualified as MV
 import Wireform.Encode.Direct (dWord8, directEncode)
 
 
--- | Encode a MessagePack value to its binary wire format.
+{- | Encode a MessagePack value to its binary wire format. Raises an error
+for an invalid timestamp, including a raw extension of reserved type -1.
+-}
 encode :: MV.Value -> ByteString
 encode !val = directEncode (valueSize val) (writeValue val)
 {-# NOINLINE encode #-}
@@ -55,7 +57,7 @@ valueSize (MV.String t) = strSize (TE.encodeUtf8 t)
 valueSize (MV.Binary bs) = binSize bs
 valueSize (MV.Array vs) = arraySize vs
 valueSize (MV.Map kvs) = mapSize kvs
-valueSize (MV.Ext _ bs) = extSize bs
+valueSize (MV.Ext ty bs) = checkExtension ty bs (extSize bs)
 valueSize (MV.Timestamp s ns) = timestampSize s ns
 
 
@@ -134,6 +136,7 @@ extSize bs = case len of
 
 timestampSize :: Int64 -> Word32 -> Int
 timestampSize s ns
+  | not (validNanoseconds ns) = error invalidNanoseconds
   | ns == 0 && s >= 0 && s <= 0xFFFFFFFF = 2 + 4 -- fixext4: 4 bytes data
   | s >= 0 && s <= 0x3FFFFFFFF = 2 + 8 -- fixext8: 8 bytes data
   | otherwise = 3 + 12 -- ext8 with 12 bytes data
@@ -344,11 +347,7 @@ writeTimestamp p off s ns
   | s >= 0 && s <= 0x3FFFFFFFF = do
       off1 <- dWord8 p off 0xd7 -- fixext8
       off2 <- dWord8 p off1 0xff -- type = -1
-      let !secHi = (fromIntegral s `shiftR` 32) .&. 0x3 :: Word64
-          !secLo = fromIntegral s .&. 0xFFFFFFFF :: Word64
-          !w64upper = ((fromIntegral ns :: Word64) .&. 0x3FFFFFFF) * 4 + secHi
-          !w64 = w64upper * 0x100000000 + secLo
-      pokeBE64 p off2 w64
+      pokeBE64 p off2 (timestamp64Word s ns)
   -- Timestamp 96: 12 bytes
   | otherwise =
       do

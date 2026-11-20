@@ -1,39 +1,57 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 {- |
 @Content-Script-Type@ — HTML 4.01 entity-header that names the default
 scripting language (a media type, e.g. @text/javascript@) for scripts in the
 served document, when no @META http-equiv=\"Content-Script-Type\"@ declaration
 is present.
 
-== Value
-
-A single media type token such as @text/javascript@, @text/ecmascript@,
-@text/tcl@ or @text/vbscript@. Per the depth guidance for obsolete/host-specific
-values this is a faithful raw-preserving newtype: the media-type string is kept
-verbatim and re-emitted unchanged (a full media-type grammar is intentionally
-not duplicated here).
+A media type such as @text/javascript@, with optional parameters. On repeated
+field lines the last value takes precedence. The wire spelling is preserved.
 
 Spec: <https://www.w3.org/TR/html401/interact/scripts.html#h-18.2.2>
 
 See also: "Network.HTTP.Headers.ContentStyleType", "Network.HTTP.Headers.DefaultStyle", "Network.HTTP.Headers.ContentType".
 -}
 module Network.HTTP.Headers.ContentScriptType (
-  ContentScriptType (..),
+  ContentScriptType (ContentScriptType, contentScriptType),
+  contentScriptTypeBytes,
+  contentScriptMediaType,
   contentScriptTypeParser,
   renderContentScriptType,
 ) where
 
+import qualified Data.ByteString.Short as SBS
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
+import Network.HTTP.Headers.ContentType (ContentType, MediaTypeField, mediaTypeFieldBytes, mediaTypeFieldContentType, mediaTypeFieldFromText, mediaTypeFieldParser, mediaTypeFieldText)
 import Network.HTTP.Headers.HeaderFieldName (hContentScriptType)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | @Content-Script-Type@ value: the default scripting media type, verbatim.
-newtype ContentScriptType = ContentScriptType {contentScriptType :: ST.ShortText}
+-- | The default scripting media type and its wire spelling.
+newtype ContentScriptType = ContentScriptTypeField MediaTypeField
   deriving stock (Eq, Show)
+
+
+pattern ContentScriptType :: ST.ShortText -> ContentScriptType
+pattern ContentScriptType {contentScriptType} <- ContentScriptTypeField (mediaTypeFieldText -> contentScriptType)
+  where
+    ContentScriptType value = ContentScriptTypeField (mediaTypeFieldFromText value)
+
+
+{-# COMPLETE ContentScriptType #-}
+
+
+contentScriptTypeBytes :: ContentScriptType -> SBS.ShortByteString
+contentScriptTypeBytes (ContentScriptTypeField value) = mediaTypeFieldBytes value
+
+
+contentScriptMediaType :: ContentScriptType -> Either String ContentType
+contentScriptMediaType (ContentScriptTypeField value) = mediaTypeFieldContentType value
 
 
 instance KnownHeader ContentScriptType where
@@ -42,22 +60,18 @@ instance KnownHeader ContentScriptType where
   type Direction ContentScriptType = 'Response
 
 
-  parseFromHeaders _ headers = case runParser contentScriptTypeParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Content-Script-Type header: " <> show rest
-    Fail -> Left "Failed to parse Content-Script-Type header"
-    Err e -> Left e
+  parseFromHeaders _ = parseFieldLine "Content-Script-Type" contentScriptTypeParser . NE.last
 
 
-  renderToHeaders _ = M.toStrictByteString . renderContentScriptType
+  renderToHeaders _ = SBS.fromShort . contentScriptTypeBytes
 
 
   headerName _ = hContentScriptType
 
 
 contentScriptTypeParser :: ParserT st String ContentScriptType
-contentScriptTypeParser = ContentScriptType <$> takeRestShortText
+contentScriptTypeParser = ContentScriptTypeField <$> mediaTypeFieldParser
 
 
 renderContentScriptType :: ContentScriptType -> M.Builder
-renderContentScriptType (ContentScriptType mediaType) = shortText mediaType
+renderContentScriptType = M.shortByteString . contentScriptTypeBytes

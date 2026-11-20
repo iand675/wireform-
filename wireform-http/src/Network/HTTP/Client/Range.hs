@@ -49,20 +49,31 @@ module Network.HTTP.Client.Range (
   withRange,
 ) where
 
+import Control.Applicative ((<|>))
+import Control.Monad (guard)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as BS8
+import Data.ByteString.Unsafe qualified as BSU
+import Data.CaseInsensitive qualified as CI
+import Data.Foldable (traverse_)
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Text.Short qualified as ST
-import Data.Word (Word64)
-import Network.HTTP.Client.Request (Request, setHeader)
+import Data.Word (Word64, Word8)
+import Foreign.Ptr (castPtr)
+import Network.HTTP.Client.Request (Request, removeHeader, setHeader)
+import Network.HTTP.Headers qualified as Typed
 import Network.HTTP.Headers.AcceptRanges qualified as HAR
 import Network.HTTP.Headers.ContentRange qualified as HCR
+import Network.HTTP.Headers.ContentType qualified as HCT
 import Network.HTTP.Headers.Mason qualified as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import Network.HTTP.Headers.Range qualified as HR
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Status qualified as S
+import Network.HTTP1.Parser qualified as H1
+import System.IO.Unsafe (unsafePerformIO)
+import Wireform.FFI (findByte)
 
 
 -- ---------------------------------------------------------------------------
@@ -100,17 +111,12 @@ byteRangeSuffix :: Word64 -> ByteRange
 byteRangeSuffix = ByteRangeSuffix
 
 
-{- | Render a 'Range' as a complete @Range@ header value
-(e.g. @bytes=0-1023,2048-@). Goes through the hermes builder so
-the wire form matches the canonical grammar.
+{- | Render the byte-range list with the Hermes builder. An empty
+list renders as @bytes=@. Use 'withRange' for checked request authoring.
 -}
 rangeHeader :: Range -> ByteString
 rangeHeader rs = case NE.nonEmpty (map toHermes rs) of
   Nothing -> "bytes="
-  -- Empty range is not strictly legal (the grammar mandates
-  -- 1#range-spec), but produce a syntactically empty form so
-  -- the caller's malformed input fails on the server side
-  -- rather than here.
   Just ne -> M.toStrictByteString (HR.renderRange (HR.ByteRanges ne))
   where
     toHermes = \case
@@ -168,32 +174,25 @@ renderContentRange cr =
         }
 
 
-{- | Parse a @Content-Range@ header value. Returns 'Nothing' for
-both malformed input /and/ the unsatisfied form (@bytes *\/N@)
-— that's the original behaviour and the right surface for the
-common \"I expected a satisfied range\" callsite.
+{- | Parse a satisfied byte @Content-Range@. Returns 'Nothing' for
+malformed input, other range units, and the unsatisfied form (@bytes *\/N@).
 
 For full discrimination (including 416's unsatisfied form),
 use 'parseContentRangeFull'.
 -}
 parseContentRange :: ByteString -> Maybe ContentRange
 parseContentRange raw = case parseContentRangeFull raw of
-  Just (HCR.ContentRange _ (HCR.RangeRespSatisfied a b mTot)) ->
-    Just (ContentRange a b mTot)
+  Just (HCR.ContentRange unit (HCR.RangeRespSatisfied a b mTot))
+    | unit == "bytes" || CI.mk (ST.toByteString unit) == "bytes" -> Just (ContentRange a b mTot)
   _ -> Nothing
 
 
 {- | Full @Content-Range@ parse including the unsatisfied form.
-Returns 'Nothing' only when the value is syntactically broken.
+Retains the received unit for callers that recognize extension units.
 -}
 parseContentRangeFull :: ByteString -> Maybe HCR.ContentRange
-parseContentRangeFull raw = case runParser HCR.contentRangeParser raw of
-  OK cr leftover
-    | BS.null (trim leftover) -> Just cr
-  _ -> Nothing
-  where
-    trim = BS.dropWhile isWS . BS.dropWhileEnd isWS
-    isWS w = w == 0x20 || w == 0x09
+parseContentRangeFull wire =
+  either (const Nothing) Just (Typed.parseFromHeaders Typed.defaultHeaderSettings (wire :| []))
 
 
 -- ---------------------------------------------------------------------------
@@ -206,8 +205,8 @@ data AcceptRanges
     literal @"none"@).
     -}
     AcceptRangesNone
-  | {- | Non-empty list of accepted range-units. Caller's job to
-    check for @"bytes"@ before issuing a byte-range request.
+  | {- | Non-empty list of accepted range units in their received spelling.
+    Range unit names compare case-insensitively.
     -}
     AcceptRangesUnits ![ByteString]
   deriving stock (Eq, Show)
@@ -222,7 +221,7 @@ parseAcceptRanges raw = case runParser HAR.acceptRangesParser raw of
     | BS.null (trim leftover) -> Just AcceptRangesNone
   OK (HAR.AcceptRangesUnits ne) leftover
     | BS.null (trim leftover) ->
-        Just (AcceptRangesUnits (map (BS8.pack . ST.toString) (NE.toList ne)))
+        Just (AcceptRangesUnits (map ST.toByteString (NE.toList ne)))
   _ -> Nothing
   where
     trim = BS.dropWhile isWS . BS.dropWhileEnd isWS
@@ -246,125 +245,186 @@ data MultipartByterange = MultipartByterange
   deriving stock (Eq, Show)
 
 
-{- | Parse a @multipart\/byteranges@ body. Takes the multipart
-boundary (sans the leading @--@) and the raw body bytes; returns
-'Nothing' on malformed input.
-
-Limitations: the parser ignores parts whose @Content-Range@
-doesn't satisfy the 'parseContentRange' grammar, and it does
-not attempt to honour 'Content-Transfer-Encoding'.
+{- | Parse a multipart/byteranges body with the decoded boundary parameter.
+A correctly framed response can contain unusable parts. These are skipped.
+Returned parts have one satisfied byte Content-Range and exactly the
+number of octets it describes. Identity transfer encodings are accepted.
+The opening delimiter selects CRLF or legacy LF framing for the body.
 -}
 parseMultipartByteranges :: ByteString -> ByteString -> Maybe [MultipartByterange]
 parseMultipartByteranges boundary body = do
-  let dashBoundary = "--" <> boundary
-      closing = dashBoundary <> "--"
-  -- Step 1: split on the boundary delimiter. The first piece
-  -- before the first boundary is the optional preamble (we drop
-  -- it); the last piece after the closing boundary is the
-  -- optional epilogue (we drop that too).
-  case splitOn dashBoundary body of
-    [] -> Nothing
-    (_pre : rest) ->
-      let parts = takeWhile (not . isClosing closing) rest
-          kept = mapMaybe parseOnePart (map stripCRLFEdges parts)
-      in Just kept
+  guard (validBoundary boundary)
+  first <- (BS.stripPrefix marker body >>= parseFirstDelimiter 0)
+    <|> nextDelimiter "\n" marker parseFirstDelimiter body
+  case first of
+    OpenDelimiter _ eol rest -> collect eol rest []
+    CloseDelimiter _ -> Nothing
   where
-    isClosing close chunk =
-      "--" `BS.isPrefixOf` BS.dropWhile (\w -> w == 0x0D || w == 0x0A) chunk
-        || close `BS.isPrefixOf` chunk
-    stripCRLFEdges b =
-      let b1 = dropPrefixCRLF b
-          b2 = dropSuffixCRLF b1
-      in b2
-    dropPrefixCRLF b = case BS.uncons b of
-      Just (0x0D, r) -> case BS.uncons r of
-        Just (0x0A, r') -> r'
-        _ -> r
-      Just (0x0A, r) -> r
-      _ -> b
-    dropSuffixCRLF b = case BS.unsnoc b of
-      Just (r, 0x0A) -> case BS.unsnoc r of
-        Just (r', 0x0D) -> r'
-        _ -> r
-      _ -> b
+    marker = "--" <> boundary
+
+    collect eol = go
+      where
+        go input !parts = do
+          delimiter <- nextDelimiter eol marker (parseDelimiter eol) input
+          case delimiter of
+            OpenDelimiter size _ rest -> go rest (keepPart size input parts)
+            CloseDelimiter size -> pure (reverse (keepPart size input parts))
+
+    keepPart size input parts =
+      case parseOnePart (BS.take size input) of
+        Just part -> part : parts
+        Nothing -> parts
+
+
+-- RFC 2046 §5.1.1, bchars and bcharsnospace.
+validBoundary :: ByteString -> Bool
+validBoundary boundary =
+  not (BS.null boundary)
+    && BS.length boundary <= 70
+    && BS.last boundary /= 0x20
+    && BS.all allowed boundary
+  where
+    allowed w =
+      (w >= 0x30 && w <= 0x39)
+        || (w >= 0x41 && w <= 0x5A)
+        || (w >= 0x61 && w <= 0x7A)
+        || BS.elem w "'()+_,-./:=? "
+
+
+data MultipartDelimiter
+  = OpenDelimiter {-# UNPACK #-} !Int !ByteString !ByteString
+  | CloseDelimiter {-# UNPACK #-} !Int
+
+
+-- Every delimiter starts with a line break immediately followed by "--".
+-- Look for both bytes in bulk so runs of line breaks or dashes can be skipped.
+nextDelimiter :: ByteString -> ByteString -> (Int -> ByteString -> Maybe MultipartDelimiter) -> ByteString -> Maybe MultipartDelimiter
+nextDelimiter eol marker parseCandidate input = unsafePerformIO $
+  BSU.unsafeUseAsCStringLen input $ \(ptr, _) ->
+    pure $! search (castPtr ptr) beforeLf
+  where
+    beforeLf = BS.length eol - 1
+    inputLength = BS.length input
+    lastMarkerStart = inputLength - BS.length marker
+
+    search ptr !offset
+      | offset >= lastMarkerStart = Nothing
+      | otherwise =
+          let !lf = findByte ptr offset inputLength 0x0A
+          in if lf >= lastMarkerStart
+               then Nothing
+               else checkMarker ptr (findByte ptr (lf + 1) inputLength 0x2D)
+
+    checkMarker ptr !dash
+      | dash > lastMarkerStart = Nothing
+      | BSU.unsafeIndex input (dash - 1) /= 0x0A = search ptr dash
+      | BSU.unsafeIndex input (dash + 1) /= 0x2D = search ptr dash
+      | beforeLf /= 0 && BSU.unsafeIndex input partEnd /= 0x0D = search ptr dash
+      | otherwise =
+          case BS.stripPrefix marker (BSU.unsafeDrop dash input) >>= parseCandidate partEnd of
+            Just delimiter -> Just delimiter
+            Nothing -> search ptr dash
+      where
+        partEnd = dash - 1 - beforeLf
+
+
+parseFirstDelimiter :: Int -> ByteString -> Maybe MultipartDelimiter
+parseFirstDelimiter size suffix =
+  parseDelimiter "\r\n" size suffix <|> parseDelimiter "\n" size suffix
+
+
+parseDelimiter :: ByteString -> Int -> ByteString -> Maybe MultipartDelimiter
+parseDelimiter eol size suffix = case BS.stripPrefix "--" suffix of
+  Just close ->
+    let rest = BS.dropWhile isOws close
+    in if BS.null rest then Just (CloseDelimiter size) else CloseDelimiter size <$ BS.stripPrefix eol rest
+  Nothing -> OpenDelimiter size eol <$> BS.stripPrefix eol (BS.dropWhile isOws suffix)
 
 
 parseOnePart :: ByteString -> Maybe MultipartByterange
 parseOnePart raw = do
-  let (rawHdrs, rawBody) = splitHeaderBody raw
-      hdrLines = filter (not . BS.null) (BS.split 0x0A (BS.map dropCR rawHdrs))
-      hdrs = mapMaybe parseHdrLine hdrLines
-      mcr = lookup "content-range" hdrs >>= parseContentRange
-      mct = lookup "content-type" hdrs
-  cr <- mcr
-  pure
-    MultipartByterange
-      { mbRange = cr
-      , mbContentType = mct
-      , mbBody = rawBody
-      }
+  PartHead headers payload <- parsePartHead raw
+  rangeWire <- either (const Nothing) id (H.lookupSingletonHeader H.hContentRange headers)
+  range <- parseContentRange rangeWire
+  let size = BS.length payload
+  guard (size > 0 && crEnd range - crStart range == fromIntegral (size - 1))
+  mType <- either (const Nothing) Just (H.lookupSingletonHeader H.hContentType headers)
+  traverse_ validateType mType
+  guard (identityTransferEncoding headers)
+  pure MultipartByterange{mbRange = range, mbContentType = mType, mbBody = payload}
   where
-    dropCR 0x0D = 0x20
-    dropCR w = w
-    parseHdrLine line = case BS.break (== 0x3A) line of
-      (n, rest)
-        | BS.null rest -> Nothing
-        | otherwise ->
-            let trimOws = BS.dropWhile isOws . BS.dropWhileEnd isOws
-                isOws w = w == 0x20 || w == 0x09
-                v = trimOws (BS.drop 1 rest)
-            in Just (BS.map asciiToLower n, v)
-    asciiToLower w
-      | w >= 0x41 && w <= 0x5A = w + 0x20
-      | otherwise = w
+    validateType wire =
+      either (const Nothing) (const (Just ()))
+        (Typed.parseFromHeaders @HCT.ContentType Typed.defaultHeaderSettings (wire :| []))
 
 
-splitHeaderBody :: ByteString -> (ByteString, ByteString)
-splitHeaderBody bs = case findCRLFCRLF bs of
-  Just i -> (BS.take i bs, BS.drop (i + 4) bs)
-  Nothing -> case findLFLF bs of
-    Just i -> (BS.take i bs, BS.drop (i + 2) bs)
-    Nothing -> (bs, BS.empty)
+identityTransferEncoding :: H.Headers -> Bool
+identityTransferEncoding headers = case H.lookupSingletonHeader "Content-Transfer-Encoding" headers of
+  Right Nothing -> True
+  Right (Just wire) ->
+    let encoding = CI.mk wire
+    in encoding == "binary" || encoding == "8bit" || encoding == "7bit"
+  Left _ -> False
+
+
+data PartHead = PartHead !H.Headers !ByteString
+
+
+data MimeLine = MimeLine !ByteString !ByteString
+
+
+parsePartHead :: ByteString -> Maybe PartHead
+parsePartHead = go []
   where
-    findCRLFCRLF = findSeq "\r\n\r\n"
-    findLFLF = findSeq "\n\n"
+    go fields input = do
+      MimeLine line rest <- nextMimeLine input
+      if BS.null line
+        then pure (PartHead (reverse fields) rest)
+        else do
+          MimeLine unfolded after <- unfoldMimeLine line rest
+          (name, value) <- either (const Nothing) Just (H1.parseHeaderLine unfolded)
+          go ((CI.mk name, value) : fields) after
 
 
-findSeq :: ByteString -> ByteString -> Maybe Int
-findSeq needle haystack
-  | BS.null needle = Nothing
-  | otherwise = go 0
+nextMimeLine :: ByteString -> Maybe MimeLine
+nextMimeLine bytes = case BS.break (== 0x0A) bytes of
+  (line, rest)
+    | BS.null rest -> Nothing
+    | otherwise -> Just (MimeLine (maybe line id (BS.stripSuffix "\r" line)) (BS.drop 1 rest))
+
+
+unfoldMimeLine :: ByteString -> ByteString -> Maybe MimeLine
+unfoldMimeLine line bytes
+  | startsWithOws bytes = gather [line] bytes
+  | otherwise = Just (MimeLine line bytes)
   where
-    n = BS.length needle
-    h = BS.length haystack
-    go i
-      | i + n > h = Nothing
-      | BS.take n (BS.drop i haystack) == needle = Just i
-      | otherwise = go (i + 1)
+    gather fields rest
+      | startsWithOws rest = do
+          MimeLine continuation after <- nextMimeLine rest
+          gather (continuation : fields) after
+      | otherwise = Just (MimeLine (BS.concat (reverse fields)) rest)
+
+    startsWithOws input = not (BS.null input) && isOws (BS.head input)
 
 
-splitOn :: ByteString -> ByteString -> [ByteString]
-splitOn needle haystack = case findSeq needle haystack of
-  Nothing -> [haystack]
-  Just i ->
-    BS.take i haystack
-      : splitOn needle (BS.drop (i + BS.length needle) haystack)
-
-
-mapMaybe :: (a -> Maybe b) -> [a] -> [b]
-mapMaybe _ [] = []
-mapMaybe f (x : xs) = case f x of
-  Nothing -> mapMaybe f xs
-  Just y -> y : mapMaybe f xs
+isOws :: Word8 -> Bool
+isOws w = w == 0x20 || w == 0x09
 
 
 -- ---------------------------------------------------------------------------
 -- Request combinator
 -- ---------------------------------------------------------------------------
 
--- | Attach a @Range@ header to a request.
+{- | Replace the request's @Range@ field. An empty list or a range with
+reversed endpoints removes both @Range@ and its @If-Range@ validator.
+-}
 withRange :: Range -> Request a -> Request a
-withRange r = setHeader H.hRange (rangeHeader r)
+withRange ranges
+  | null ranges || any reversed ranges = removeHeader H.hIfRange . removeHeader H.hRange
+  | otherwise = setHeader H.hRange (rangeHeader ranges)
+  where
+    reversed (ByteRange start end) = start > end
+    reversed _ = False
 
 
 {- | Predicate for @206 Partial Content@ responses, kept here so

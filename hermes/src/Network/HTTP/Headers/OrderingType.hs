@@ -1,12 +1,9 @@
 {- |
 @Ordering-Type@ (RFC 3648 §5.1) — request header used with @MKCOL@ to
 declare the semantics of the ordering of a newly created collection.
-Its value is a @Simple-ref@ (an absolute URI or a path-absolute
-reference) identifying the ordering type, e.g.
-@http://example.com/orderings/custom.xml@.
-
-The value is a URI reference, preserved verbatim as a faithful raw
-newtype (mirroring 'Network.HTTP.Headers.Referer.Referer').
+Its value is an absolute URI identifying the ordering type. The grammar
+preserves its spelling, including the special values @DAV:custom@ and
+@DAV:unordered@.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc3648.html#section-5.1>
 
@@ -18,8 +15,8 @@ module Network.HTTP.Headers.OrderingType (
   renderOrderingType,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (absoluteURI)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hOrderingType)
 import qualified Network.HTTP.Headers.Mason as M
@@ -38,11 +35,7 @@ instance KnownHeader OrderingType where
   type Direction OrderingType = 'Request
 
 
-  parseFromHeaders _ headers = case runParser orderingTypeParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Ordering-Type header: " <> show rest
-    Fail -> Left "Failed to parse Ordering-Type header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Ordering-Type" orderingTypeParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderOrderingType
@@ -52,7 +45,7 @@ instance KnownHeader OrderingType where
 
 
 orderingTypeParser :: ParserT st String OrderingType
-orderingTypeParser = OrderingType <$> takeRestShortText
+orderingTypeParser = OrderingType <$> absoluteURI
 
 
 renderOrderingType :: OrderingType -> M.Builder

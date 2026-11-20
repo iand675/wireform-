@@ -38,11 +38,13 @@ import Data.ByteString qualified as BS
 import Data.Int (Int16, Int32, Int64)
 import Data.Text.Encoding qualified
 import Data.Vector qualified as V
-import Parquet.Read (ParquetFile (..))
+import Parquet.Encryption qualified as Encryption
+import Parquet.Read (ParquetFile (..), decryptFileColumnModule, rawColumnChunkSlice)
 import Parquet.Thrift.Schema
 import Parquet.Types (
   ColumnChunk (..),
   ColumnIndex (..),
+  ColumnMetadata (..),
   FileMetadata (..),
   OffsetIndex (..),
   PageLocation (..),
@@ -50,7 +52,7 @@ import Parquet.Types (
   boundaryOrderToInt,
   intToBoundaryOrder,
  )
-import Thrift.Decode (decodeCompact)
+import Thrift.Decode (decodeCompactBinaryStrings)
 import Thrift.Encode (encodeCompact)
 import Thrift.Value qualified as TV
 
@@ -66,7 +68,7 @@ encodeOffsetIndex = encodeCompact . offsetIndexToThrift
 
 -- | Parse an 'OffsetIndex' from a Thrift Compact byte slice.
 decodeOffsetIndex :: ByteString -> Either String OffsetIndex
-decodeOffsetIndex bs = decodeCompact bs >>= thriftToOffsetIndex
+decodeOffsetIndex bs = decodeCompactBinaryStrings bs >>= thriftToOffsetIndex
 
 
 {- | Look up the 'OffsetIndex' for the column chunk at @(rowGroupIdx, columnIdx)@
@@ -82,7 +84,10 @@ readOffsetIndex pf rg col = do
   msl <- columnChunkOffsetIndexSlice pf rg col
   case msl of
     Nothing -> Right Nothing
-    Just bs -> Just <$> decodeOffsetIndex bs
+    Just bs -> do
+      index <- decodeOffsetIndex bs
+      validateColumnOffsets pf rg col index
+      Right (Just index)
 
 
 {- | Slice a 'ParquetFile' to the bytes covering a column chunk's serialized
@@ -96,7 +101,9 @@ columnChunkOffsetIndexSlice
 columnChunkOffsetIndexSlice pf rgIdx colIdx = do
   cc <- selectColumnChunk pf rgIdx colIdx
   case (ccOffsetIndexOffset cc, ccOffsetIndexLength cc) of
-    (Just off, Just len) -> Just <$> sliceFile pf off len "offset index"
+    (Just off, Just len) -> do
+      bytes <- sliceFile pf off len "offset index"
+      Just <$> decryptFileColumnModule pf rgIdx colIdx Encryption.ModuleOffsetIndex bytes
     _ -> Right Nothing
 
 
@@ -109,9 +116,9 @@ encodeColumnIndex :: ColumnIndex -> ByteString
 encodeColumnIndex = encodeCompact . columnIndexToThrift
 
 
--- | Parse a 'ColumnIndex' from a Thrift Compact byte slice.
+-- | Parse a 'ColumnIndex' without interpreting opaque min/max bytes as text.
 decodeColumnIndex :: ByteString -> Either String ColumnIndex
-decodeColumnIndex bs = decodeCompact bs >>= thriftToColumnIndex
+decodeColumnIndex bs = decodeCompactBinaryStrings bs >>= thriftToColumnIndex
 
 
 {- | Look up the 'ColumnIndex' for the column chunk at @(rowGroupIdx,
@@ -140,7 +147,9 @@ columnChunkColumnIndexSlice
 columnChunkColumnIndexSlice pf rgIdx colIdx = do
   cc <- selectColumnChunk pf rgIdx colIdx
   case (ccColumnIndexOffset cc, ccColumnIndexLength cc) of
-    (Just off, Just len) -> Just <$> sliceFile pf off len "column index"
+    (Just off, Just len) -> do
+      bytes <- sliceFile pf off len "column index"
+      Just <$> decryptFileColumnModule pf rgIdx colIdx Encryption.ModuleColumnIndex bytes
     _ -> Right Nothing
 
 
@@ -234,6 +243,9 @@ columnIndexToThrift ci =
             (ciNullCounts ci)
             (ColumnIndex_NullCounts . V.map TV.I64)
         , optField
+            (ciNanCounts ci)
+            (ColumnIndex_NanCounts . V.map TV.I64)
+        , optField
             (ciRepetitionLevelHistograms ci)
             (ColumnIndex_RepetitionLevelHistograms . V.map TV.I64)
         , optField
@@ -280,12 +292,25 @@ thriftToColumnIndex (TV.Struct fields) = do
   ncv <- optListI64 fm $ \case
     ColumnIndex_NullCounts xs -> Just xs
     _ -> Nothing
+  nanv <- optListI64 fm $ \case
+    ColumnIndex_NanCounts xs -> Just xs
+    _ -> Nothing
   repv <- optListI64 fm $ \case
     ColumnIndex_RepetitionLevelHistograms xs -> Just xs
     _ -> Nothing
   defv <- optListI64 fm $ \case
     ColumnIndex_DefinitionLevelHistograms xs -> Just xs
     _ -> Nothing
+  let count = V.length nullPages
+  if V.length mins /= count
+    || V.length maxs /= count
+    || maybe False ((/= count) . V.length) ncv
+    || maybe False ((/= count) . V.length) nanv
+    then Left "Parquet.PageIndex: per-page vector lengths differ"
+    else Right ()
+  if any (maybe False (V.any (< 0))) [ncv, nanv, repv, defv]
+    then Left "Parquet.PageIndex: negative count or level frequency"
+    else Right ()
   Right
     ColumnIndex
       { ciNullPages = nullPages
@@ -293,6 +318,7 @@ thriftToColumnIndex (TV.Struct fields) = do
       , ciMaxValues = maxs
       , ciBoundaryOrder = bo
       , ciNullCounts = ncv
+      , ciNanCounts = nanv
       , ciRepetitionLevelHistograms = repv
       , ciDefinitionLevelHistograms = defv
       }
@@ -323,7 +349,61 @@ selectColumnChunk pf rgIdx colIdx = do
       let cs = rgColumns (V.unsafeIndex rgs rgIdx)
       if colIdx < 0 || colIdx >= V.length cs
         then Left "Parquet.PageIndex: column index out of range"
-        else Right (V.unsafeIndex cs colIdx)
+        else do
+          let chunk = V.unsafeIndex cs colIdx
+          case ccFilePath chunk of
+            Just path | path /= mempty -> Left "Parquet.PageIndex: external column-chunk files are not supported"
+            _ -> Right chunk
+
+
+-- Check the complete index, including entries the predicate will skip.
+-- Data-page bytes are deliberately left untouched until a page is retained.
+validateColumnOffsets :: ParquetFile -> Int -> Int -> OffsetIndex -> Either String ()
+validateColumnOffsets pf groupIndex columnIndex index = do
+  chunk <- selectColumnChunk pf groupIndex columnIndex
+  metadata <- maybe (Left "Parquet.PageIndex: missing column metadata") Right (ccMetadata chunk)
+  bytes <- rawColumnChunkSlice pf groupIndex columnIndex
+  let group = fmRowGroups (pfFooter pf) V.! groupIndex
+      rows = rgNumRows group
+      locations = oiPageLocations index
+      start = maybe (cmDataPageOffset metadata) (min (cmDataPageOffset metadata)) (cmDictionaryPageOffset metadata)
+      size = if cmNumValues metadata == 0 then cmTotalCompressedSize metadata else fromIntegral (BS.length bytes)
+      fileSize = fromIntegral (BS.length (pfBytes pf)) :: Int64
+  if rows < 0 || start < 0 || start > fileSize || size < 0 || size > fileSize - start
+    then Left "Parquet.PageIndex: invalid column bounds"
+    else Right ()
+  if V.null locations && rows /= 0
+    then Left "Parquet.PageIndex: nonempty group has no indexed pages"
+    else Right ()
+  V.imapM_
+    ( \i location -> do
+        let offset = plOffset location
+            pageSize = fromIntegral (plCompressedPageSize location) :: Int64
+            row = plFirstRowIndex location
+        if offset < start
+          || offset > start + size
+          || pageSize <= 0
+          || pageSize > start + size - offset
+          || row < 0
+          || row >= rows && not (rows == 0 && i == 0)
+          || i == 0 && (row /= 0 || offset /= cmDataPageOffset metadata)
+          then Left "Parquet.PageIndex: page location lies outside its column/row range"
+          else Right ()
+        if i == 0
+          then Right ()
+          else do
+            let previous = locations V.! (i - 1)
+            if plOffset previous + fromIntegral (plCompressedPageSize previous) > offset
+              || plFirstRowIndex previous >= row
+              then Left "Parquet.PageIndex: unordered or overlapping page locations"
+              else Right ()
+    )
+    locations
+  case oiUnencodedByteArrayDataBytes index of
+    Just sizes
+      | V.length sizes /= V.length locations || V.any (< 0) sizes ->
+          Left "Parquet.PageIndex: invalid per-page unencoded byte counts"
+    _ -> Right ()
 
 
 sliceFile

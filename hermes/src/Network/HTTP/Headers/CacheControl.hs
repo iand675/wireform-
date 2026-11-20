@@ -17,8 +17,8 @@ allowing developers to parse, manipulate, and generate these directives programm
 
 See <https://httpwg.org/specs/rfc9111.html> for the official specification of the Cache-Control header.
 
-It is important to note that the Cache-Control MUST be respected by all caching mechanisms, including private caches and shared caches,
-along the request/response chain. If a directive is not understood, it MUST be treated as if it had the value "no-cache".
+Caches ignore unrecognized directives. Forwarding proxies preserve them
+because other recipients along the chain may implement the extension.
 
 Notes on Cache-Control Directives:
 
@@ -71,6 +71,11 @@ module Network.HTTP.Headers.CacheControl (
   UsableDirectives (..),
   usableRequestDirectives,
   usableResponseDirectives,
+  cacheControlDirectiveList,
+  cacheDirectiveFieldNames,
+  privateFor,
+  noCacheFor,
+  parseCacheControlDirectives,
   parseCacheControlHeader,
   cacheControlHeaderParser,
   directiveParser,
@@ -79,26 +84,32 @@ module Network.HTTP.Headers.CacheControl (
   -- * Cache control header value rendering
   directivesBuilder,
   directiveBuilder,
+  renderCacheDirective,
 ) where
 
 import Control.Monad
-import Control.Monad.Combinators (option)
-import Control.Monad.Combinators.NonEmpty (sepBy1)
+import Control.Monad.Combinators (between)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
-import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Char8 as BC
+import Data.Char (isAsciiUpper, toLower)
+import qualified Data.CharSet as CharSet
 import Data.Foldable1
 import Data.Hashable
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
-import Data.Semigroup (sconcat)
 import Data.Text.Short (ShortText)
 import qualified Data.Text.Short as TS
+import qualified Data.Text.Short.Unsafe as TSU
 import Data.Validation (Validation (..))
 import GHC.Generics
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName
+import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Network.HTTP.Headers.Rendering.Util (renderHttpQuotedString, shortText)
+import Wireform.Parser.Driver (parseByteString)
 import Prelude
 
 
@@ -111,7 +122,12 @@ validationNel (Left e) = Failure (e :| [])
 validationNel (Right a) = Success a
 
 
-newtype CacheControl = CacheControl {cacheControlDirectives :: NonEmpty CacheControlDirective}
+{- | A present Cache-Control field. Use 'cacheControlDirectiveList' to
+read both constructors. The record selector applies to populated fields.
+-}
+data CacheControl
+  = CacheControl {cacheControlDirectives :: NonEmpty CacheControlDirective}
+  | CacheControlEmpty
   deriving stock (Eq, Show)
 
 
@@ -121,8 +137,12 @@ instance KnownHeader CacheControl where
   type Direction CacheControl = 'RequestAndResponse
 
 
-  parseFromHeaders _ neHeaders = CacheControl . sconcat <$> traverse parseCacheControlHeader neHeaders
-  renderToHeaders _ = pure . BL.toStrict . BB.toLazyByteString . directivesBuilder . cacheControlDirectives
+  parseFromHeaders _ fields =
+    fmap (maybe CacheControlEmpty CacheControl . NE.nonEmpty) $ case fields of
+      value :| [] -> parseCacheControlDirectives value
+      _ -> parseListFieldLines "Cache-Control" (httpList directiveParser) fields
+  renderToHeaders _ CacheControlEmpty = [""]
+  renderToHeaders _ (CacheControl dirs) = [M.toStrictByteString (renderCacheDirectives dirs)]
   headerName _ = hCacheControl
 
 
@@ -136,33 +156,81 @@ Note that this type is not exhaustive and may not include all possible directive
 data CacheControlDirective
   = -- | Indicates the response can be cached by any cache.
     Public
-  | -- | The response is for a single user and should not be stored by shared caches.
-    --     Optional field names can specify parts of the response intended for a single user.
+  | {- | The response is for a single user and should not be stored by shared caches.
+    Optional field names can specify parts of the response intended for a single user.
+    -}
     Private (Maybe ShortText)
-  | -- | Forces caches to validate the response with the origin server before reuse.
-    --     Optional field names can specify parts of the response to always validate.
+  | {- | Forces caches to validate the response with the origin server before reuse.
+    Optional field names can specify parts of the response to always validate.
+    -}
     NoCache (Maybe ShortText)
   | -- | Directs caches not to store the response or request.
     NoStore
   | -- | Specifies the maximum age in seconds a resource is considered fresh.
     MaxAge Word
+  | -- | Maximum acceptable staleness, or any staleness when no limit is supplied.
+    MaxStale (Maybe Word)
+  | -- | Minimum remaining freshness requested by the client, in seconds.
+    MinFresh Word
   | -- | Similar to 'MaxAge', but specifically for shared caches.
     SMaxAge Word
   | -- | Indicates that once stale, the cached response must be validated before use.
     MustRevalidate
+  | -- | Requires a cache to understand the response status code's caching rules.
+    MustUnderstand
   | -- | Similar to 'MustRevalidate', but applies only to shared caches.
     ProxyRevalidate
   | -- | Prohibits transformations of the response content.
     NoTransform
+  | -- | Requests an already stored response.
+    OnlyIfCached
   | -- | Suggests the response will not change over time.
     Immutable
   | -- | Allows serving stale content while asynchronously checking for a fresh version.
     StaleWhileRevalidate Word
   | -- | Permits serving stale content if an error occurs when revalidating.
     StaleIfError Word
-  | -- | Represents directives that are not recognized, optionally with a value.
+  | -- | An unrecognized directive. Quoted value octets use a one-to-one Latin-1 mapping.
     Unknown ShortText (Maybe ShortText)
   deriving stock (Show, Eq, Ord, Generic)
+
+
+-- | All directives of a present field, in wire order.
+cacheControlDirectiveList :: CacheControl -> [CacheControlDirective]
+cacheControlDirectiveList CacheControlEmpty = []
+cacheControlDirectiveList (CacheControl dirs) = NE.toList dirs
+
+
+-- | The case-insensitive field names of a qualified directive.
+cacheDirectiveFieldNames :: CacheControlDirective -> Maybe (NonEmpty HeaderFieldName)
+cacheDirectiveFieldNames dir = case dir of
+  Private arg -> arg >>= qualifiedFieldNames . TS.toByteString
+  NoCache arg -> arg >>= qualifiedFieldNames . TS.toByteString
+  _ -> Nothing
+
+
+-- | Construct a qualified private directive from field names.
+privateFor :: NonEmpty HeaderFieldName -> CacheControlDirective
+privateFor = Private . Just . fieldNameListText
+
+
+-- | Construct a qualified no-cache directive from field names.
+noCacheFor :: NonEmpty HeaderFieldName -> CacheControlDirective
+noCacheFor = NoCache . Just . fieldNameListText
+
+
+fieldNameListText :: NonEmpty HeaderFieldName -> ShortText
+fieldNameListText =
+  TSU.fromByteStringUnsafe
+    . M.toStrictByteString
+    . M.intersperse ", "
+    . fmap (M.shortByteString . headerNameToShortByteString)
+
+
+qualifiedFieldNames :: ByteString -> Maybe (NonEmpty HeaderFieldName)
+qualifiedFieldNames arg = do
+  names <- either (const Nothing) Just (parseByteString (httpList rfc9110TokenBS <* eof) arg)
+  fmap (unsafeUnknownHeaderFromBytestring . foldName) <$> NE.nonEmpty names
 
 
 instance Hashable CacheControlDirective
@@ -211,13 +279,18 @@ updatePresence :: CacheControlDirective -> DirectivePresence -> DirectivePresenc
 updatePresence directive presence = case directive of
   NoCache _ -> presence {hasNoCache = True}
   NoStore -> presence {hasNoStore = True}
-  Private _ -> presence {hasPrivate = True}
+  Private Nothing -> presence {hasPrivate = True}
+  Private (Just _) -> presence
   Public -> presence {hasPublic = True}
   MaxAge _ -> presence {hasMaxAge = True}
+  MaxStale _ -> presence
+  MinFresh _ -> presence
   SMaxAge _ -> presence {hasSMaxAge = True}
   MustRevalidate -> presence {hasMustRevalidate = True}
+  MustUnderstand -> presence
   ProxyRevalidate -> presence {hasProxyRevalidate = True}
   NoTransform -> presence {hasNoTransform = True}
+  OnlyIfCached -> presence
   Immutable -> presence {hasImmutable = True}
   StaleWhileRevalidate _ -> presence {hasStaleWhileRevalidate = True}
   StaleIfError _ -> presence {hasStaleIfError = True}
@@ -234,25 +307,22 @@ checkConflicts p@DirectivePresence {..} =
           (hasPrivate && hasPublic)
           (Left "private conflicts with public.")
           :| [ when
-                ( hasNoStore
-                    && or
-                      [ hasPrivate
-                      , hasPublic
-                      , hasMaxAge
-                      , hasSMaxAge
-                      , hasMustRevalidate
-                      , hasProxyRevalidate
-                      , hasStaleWhileRevalidate
-                      , hasStaleIfError
-                      ]
-                )
-                (Left "no-store conflicts with directives that imply storage.")
+                 ( hasNoStore
+                     && or
+                       [ hasPrivate
+                       , hasPublic
+                       , hasMaxAge
+                       , hasSMaxAge
+                       , hasMustRevalidate
+                       , hasProxyRevalidate
+                       , hasStaleWhileRevalidate
+                       , hasStaleIfError
+                       ]
+                 )
+                 (Left "no-store conflicts with directives that imply storage.")
              , when
-                (hasPrivate && hasSMaxAge)
-                (Left "private conflicts with s-maxage since proxies should not be storing content.")
-             , when
-                (hasImmutable && (hasStaleWhileRevalidate || hasStaleIfError))
-                (Left "immutable conflicts with directives that imply stale content.")
+                 (hasPrivate && hasSMaxAge)
+                 (Left "private conflicts with s-maxage since proxies should not be storing content.")
              ]
       )
 
@@ -283,13 +353,16 @@ usableRequestDirectives = foldr split mempty
     split dir ds =
       let valid = addValidDirective dir ds
       in case dir of
-          Public -> valid
-          NoCache _ -> valid
-          NoStore -> valid
-          MaxAge _ -> valid
-          NoTransform -> valid
-          Unknown k mv -> addUnknownDirective k mv ds
-          _ -> addInvalidDirective dir ds
+           NoCache Nothing -> valid
+           NoStore -> valid
+           MaxAge _ -> valid
+           MaxStale _ -> valid
+           MinFresh _ -> valid
+           NoTransform -> valid
+           OnlyIfCached -> valid
+           StaleIfError _ -> valid
+           Unknown k mv -> addUnknownDirective k mv ds
+           _ -> addInvalidDirective dir ds
 
 
 usableResponseDirectives :: Foldable t => t CacheControlDirective -> UsableDirectives
@@ -298,86 +371,156 @@ usableResponseDirectives = foldr split mempty
     split dir ds =
       let valid = addValidDirective dir ds
       in case dir of
-          Public -> valid
-          Private _ -> valid
-          NoCache _ -> valid
-          NoStore -> valid
-          MaxAge _ -> valid
-          SMaxAge _ -> valid
-          MustRevalidate -> valid
-          ProxyRevalidate -> valid
-          NoTransform -> valid
-          Immutable -> valid
-          StaleWhileRevalidate _ -> valid
-          StaleIfError _ -> valid
-          Unknown k mv -> addUnknownDirective k mv ds
+           Public -> valid
+           Private _ -> valid
+           NoCache _ -> valid
+           NoStore -> valid
+           MaxAge _ -> valid
+           SMaxAge _ -> valid
+           MustRevalidate -> valid
+           MustUnderstand -> valid
+           ProxyRevalidate -> valid
+           NoTransform -> valid
+           Immutable -> valid
+           StaleWhileRevalidate _ -> valid
+           StaleIfError _ -> valid
+           Unknown k mv -> addUnknownDirective k mv ds
+           _ -> addInvalidDirective dir ds
 
 
-numericDirective :: (Word -> CacheControlDirective) -> ParserT st e CacheControlDirective
-numericDirective f = do
-  $(char '=')
-  f <$> anyAsciiDecimalWord
+deltaSeconds :: ParserT st e Word
+deltaSeconds = saturatingDeltaSeconds maxBound
+{-# INLINE deltaSeconds #-}
 
 
-optStringDirective :: (Maybe ShortText -> CacheControlDirective) -> ParserT st e CacheControlDirective
-optStringDirective f = option (f Nothing) (f . Just <$> ($(char '=') *> (rfc9110Token <|> quotedString)))
+directiveDelay :: ParserT st e Word
+directiveDelay = deltaSeconds <|> between $(char '"') $(char '"') deltaSeconds
+{-# INLINE directiveDelay #-}
+
+
+qualifiedDirective :: (Maybe ShortText -> CacheControlDirective) -> ParserT st e CacheControlDirective
+qualifiedDirective make = withOption $(char '=') (const argument) (pure (make Nothing))
+  where
+    argument =
+      (make . Just <$> rfc9110Token) <|> do
+        value <- httpQuotedBytes
+        case qualifiedFieldNames value of
+          Nothing -> failed
+          Just _ -> pure (make (Just (TSU.fromByteStringUnsafe value)))
+
+
+foldName :: ByteString -> ByteString
+foldName key
+  | BC.any isAsciiUpper key = BC.map toLower key
+  | otherwise = key
+{-# INLINE foldName #-}
 
 
 directiveParser :: ParserT st e CacheControlDirective
-directiveParser =
-  $( switch
-      [|
-        case _ of
-          "public" -> pure Public
-          "private" -> optStringDirective Private
-          "no-cache" -> optStringDirective NoCache
-          "no-store" -> pure NoStore
-          "max-age" -> numericDirective MaxAge
-          "s-maxage" -> numericDirective SMaxAge
-          "must-revalidate" -> pure MustRevalidate
-          "proxy-revalidate" -> pure ProxyRevalidate
-          "no-transform" -> pure NoTransform
-          "immutable" -> pure Immutable
-          "stale-while-revalidate" -> numericDirective StaleWhileRevalidate
-          "stale-if-error" -> numericDirective StaleIfError
-          _ -> do
-            k <- rfc9110Token
-            option (Unknown k Nothing) (Unknown k . Just <$> ($(char '=') *> (rfc9110Token <|> quotedString)))
-        |]
-   )
+directiveParser = embedError (knownDirective <|> unknownDirective) (const failed)
+  where
+    knownDirective =
+      $( switchAsciiCI
+           [|
+             case _ of
+               "max-age" -> whole (numeric MaxAge)
+               "no-cache" -> whole (qualifiedDirective NoCache)
+               "no-store" -> whole (bare NoStore)
+               "public" -> whole (bare Public)
+               "private" -> whole (qualifiedDirective Private)
+               "s-maxage" -> whole (numeric SMaxAge)
+               "no-transform" -> whole (bare NoTransform)
+               "must-revalidate" -> whole (bare MustRevalidate)
+               "proxy-revalidate" -> whole (bare ProxyRevalidate)
+               "immutable" -> whole immutableDirective
+               "stale-while-revalidate" -> whole (numeric StaleWhileRevalidate)
+               "stale-if-error" -> whole (numeric StaleIfError)
+               "max-stale" -> whole maxStaleDirective
+               "min-fresh" -> whole (numeric MinFresh)
+               "only-if-cached" -> whole (bare OnlyIfCached)
+               "must-understand" -> whole (bare MustUnderstand)
+             |]
+       )
+    -- An invalid argument for a known name must not become an extension.
+    whole action =
+      notFollowedBy (skipSatisfyAscii (\c -> CharSet.member c tokenCharSet)) *> (action <|> err ())
+    numeric make = $(char '=') *> (make <$> directiveDelay)
+    bare value = value <$ notFollowedBy $(char '=')
+    maxStaleDirective = MaxStale <$> withOption $(char '=') (const (Just <$> directiveDelay)) (pure Nothing)
+    immutableDirective = withOption $(char '=') (const (Immutable <$ (tokenBytes <|> (() <$ httpQuotedBytes)))) (pure Immutable)
+    unknownDirective = do
+      name <- rfc9110Token
+      withOption
+        $(char '=')
+        (const (Unknown name . Just <$> (rfc9110Token <|> (TS.fromText <$> httpQuotedString))))
+        (pure (Unknown name Nothing))
 
 
 cacheControlHeaderParser :: ParserT st e (NonEmpty CacheControlDirective)
-cacheControlHeaderParser = directiveParser `sepBy1` (ows *> $(char ',') *> ows)
+cacheControlHeaderParser = httpList directiveParser >>= maybe failed pure . NE.nonEmpty
 
 
+-- | Parse a field line, including an explicitly empty directive list.
+parseCacheControlDirectives :: ByteString -> Either String [CacheControlDirective]
+parseCacheControlDirectives wire =
+  withSingleCacheDirective wire (\directive -> Right [directive])
+    (parseFieldLine "Cache-Control" (httpList directiveParser) wire)
+
+
+-- | Parse a field line containing at least one directive.
 parseCacheControlHeader :: ByteString -> Either String (NonEmpty CacheControlDirective)
-parseCacheControlHeader bs = case runParser cacheControlHeaderParser bs of
-  (OK dirs "") -> Right dirs
-  (OK _ rest) -> Left $ "Unconsumed input after parsing Cache-Control header: " <> show rest
-  Fail -> Left "Failed to parse Cache-Control header"
-  (Err e) -> Left e
+parseCacheControlHeader wire =
+  withSingleCacheDirective wire (\directive -> Right (directive :| []))
+    (parseFieldLine "Cache-Control" cacheControlHeaderParser wire)
+
+
+-- Recognise common whole field values. Everything else uses the same
+-- list grammar, including mixed case, whitespace and larger delays.
+withSingleCacheDirective :: ByteString -> (CacheControlDirective -> a) -> a -> a
+withSingleCacheDirective wire success fallback
+  | wire == "no-cache" = success (NoCache Nothing)
+  | wire == "no-store" = success NoStore
+  | wire == "only-if-cached" = success OnlyIfCached
+  | Just digits <- BS.stripPrefix "max-age=" wire =
+      withShortDecimal digits (success . MaxAge . fromIntegral) fallback
+  | otherwise = fallback
+{-# INLINE withSingleCacheDirective #-}
 
 
 directivesBuilder :: NonEmpty CacheControlDirective -> BB.Builder
-directivesBuilder = sconcat . NE.intersperse "," . fmap directiveBuilder
+directivesBuilder = BB.byteString . M.toStrictByteString . renderCacheDirectives
 
 
 directiveBuilder :: CacheControlDirective -> BB.Builder
-directiveBuilder = \case
+directiveBuilder = BB.byteString . M.toStrictByteString . renderCacheDirective
+
+
+renderCacheDirectives :: NonEmpty CacheControlDirective -> M.Builder
+renderCacheDirectives = M.intersperse "," . fmap renderCacheDirective
+
+
+renderCacheDirective :: CacheControlDirective -> M.Builder
+renderCacheDirective = \case
   Public -> "public"
-  Private Nothing -> "private"
-  Private (Just v) -> "private=" <> BB.shortByteString (TS.toShortByteString v)
-  NoCache Nothing -> "no-cache"
-  NoCache (Just v) -> "no-cache=" <> BB.shortByteString (TS.toShortByteString v)
+  Private v -> "private" <> foldMap (("=" <>) . renderHttpQuotedString . TS.toText) v
+  NoCache v -> "no-cache" <> foldMap (("=" <>) . renderHttpQuotedString . TS.toText) v
   NoStore -> "no-store"
-  MaxAge v -> "max-age=" <> BB.wordDec v
-  SMaxAge v -> "s-maxage=" <> BB.wordDec v
+  MaxAge v -> "max-age=" <> M.wordDec v
+  MaxStale v -> "max-stale" <> foldMap (("=" <>) . M.wordDec) v
+  MinFresh v -> "min-fresh=" <> M.wordDec v
+  SMaxAge v -> "s-maxage=" <> M.wordDec v
   MustRevalidate -> "must-revalidate"
+  MustUnderstand -> "must-understand"
   ProxyRevalidate -> "proxy-revalidate"
   NoTransform -> "no-transform"
+  OnlyIfCached -> "only-if-cached"
   Immutable -> "immutable"
-  StaleWhileRevalidate v -> "stale-while-revalidate=" <> BB.wordDec v
-  StaleIfError v -> "stale-if-error=" <> BB.wordDec v
-  Unknown k Nothing -> BB.shortByteString $ TS.toShortByteString k
-  Unknown k (Just v) -> BB.shortByteString (TS.toShortByteString k) <> "=" <> BB.shortByteString (TS.toShortByteString v)
+  StaleWhileRevalidate v -> "stale-while-revalidate=" <> M.wordDec v
+  StaleIfError v -> "stale-if-error=" <> M.wordDec v
+  Unknown k v -> shortText k <> foldMap (("=" <>) . extensionValue) v
+  where
+    extensionValue value
+      | not (BS.null bytes) && BC.all (\c -> CharSet.member c tokenCharSet) bytes = shortText value
+      | otherwise = renderHttpQuotedString (TS.toText value)
+      where
+        bytes = TS.toByteString value

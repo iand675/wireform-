@@ -59,7 +59,7 @@ valuePayloadSize = \case
   B.String t -> 4 + BS.length (TE.encodeUtf8 t) + 1
   B.Document fs -> docSize fs
   B.Array vs -> arrayDocSize vs
-  B.Binary _ bs -> 4 + 1 + BS.length bs
+  B.Binary sub bs -> 4 + 1 + binaryWireSize sub bs
   B.Bool _ -> 1
   B.DateTime _ -> 8
   B.Null -> 0
@@ -78,6 +78,12 @@ valuePayloadSize = \case
   B.Timestamp _ -> 8
   B.Symbol t -> 4 + BS.length (TE.encodeUtf8 t) + 1
   B.Undefined -> 0
+
+
+-- Legacy binary wraps its payload in a second 32-bit length.
+binaryWireSize :: Word8 -> ByteString -> Int
+binaryWireSize sub bs = BS.length bs + if sub == 0x02 then 4 else 0
+{-# INLINE binaryWireSize #-}
 
 
 arrayDocSize :: V.Vector B.Value -> Int
@@ -169,10 +175,13 @@ writeValuePayload p off = \case
     let arrayFields = V.imap (\i v -> (T.pack (show i), v)) vs
     writeDocument p off arrayFields
   B.Binary sub bs -> do
-    let !len = BS.length bs
-    off1 <- writeLE32 p off (fromIntegral len)
+    off1 <- writeLE32 p off (fromIntegral (binaryWireSize sub bs))
     pokeByteOff p off1 sub
-    writeRawBytes p (off1 + 1) bs
+    start <-
+      if sub == 0x02
+        then writeLE32 p (off1 + 1) (fromIntegral (BS.length bs))
+        else pure (off1 + 1)
+    writeRawBytes p start bs
   B.Bool b -> do
     pokeByteOff p off (if b then 0x01 else 0x00 :: Word8)
     pure $! off + 1

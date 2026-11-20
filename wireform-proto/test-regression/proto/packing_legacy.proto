@@ -1,0 +1,66 @@
+syntax = "proto2";
+
+import public "json_collections.proto";
+import weak "google/protobuf/struct.proto";
+
+message PackingLegacy {
+  repeated int32 expanded = 16;
+  repeated int32 packed_override = 17 [packed = true];
+  extensions 100 to 199;
+}
+
+message State {}
+
+message ExtensionPayload {
+  enum State {
+    option allow_alias = true;
+    UNSPECIFIED = 0;
+    READY = 7;
+    ALIAS = 7;
+    RETIRED = -3;
+  }
+  optional int32 first = 1;
+  optional int32 second = 2;
+}
+
+message ClosedCases {
+  optional ExtensionPayload.State singular = 1;
+  repeated ExtensionPayload.State packed = 2 [packed = true];
+  oneof selection {
+    ExtensionPayload.State variant = 3;
+    int32 number = 4;
+  }
+  map<string, ExtensionPayload.State> entries = 5;
+  repeated ExtensionPayload.State expanded = 6;
+  optional ChoiceColor open = 7;
+}
+
+message RequiredCases {
+  required int32 count = 1;
+  required int64 large = 2;
+  required bool enabled = 3;
+  required bytes payload = 4;
+  required ExtensionPayload.State state = 5;
+  required ExtensionPayload child = 6;
+  optional bytes extra = 7;
+  required string name = 16;
+}
+
+message RequiredEnvelope {
+  optional RequiredCases value = 1;
+}
+
+extend PackingLegacy {
+  repeated int32 expanded_extra = 100;
+  repeated int32 packed_extra = 101 [packed = true];
+  optional int32 singular_extra = 102;
+  optional ExtensionPayload payload_extra = 103;
+  repeated fixed32 fixed32_extra = 104;
+  repeated fixed64 fixed64_extra = 105;
+  repeated string string_extra = 106;
+  optional ExtensionPayload.State state_extra = 107;
+  repeated ExtensionPayload.State packed_state_extra = 108 [packed = true];
+  repeated ExtensionPayload.State expanded_state_extra = 109;
+  optional ChoiceColor color_extra = 110;
+  optional .google.protobuf.NullValue null_extra = 111;
+}

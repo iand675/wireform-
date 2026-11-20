@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9421 §5.1 @Accept-Signature@ — HTTP Message Signatures negotiation.
 
@@ -22,6 +20,9 @@ It is a request-and-response field: a client may advertise the signatures it
 wants on a response, and a server may request signatures on subsequent
 requests.
 
+The @created@ and @expires@ parameters are Boolean flags requesting
+that the signer generate timestamps.
+
 Spec: <https://www.rfc-editor.org/rfc/rfc9421.html#name-the-accept-signature-field>
 
 See also: "Network.HTTP.Headers.Signature", "Network.HTTP.Headers.SignatureInput", "Network.HTTP.Headers.ContentDigest".
@@ -34,17 +35,14 @@ module Network.HTTP.Headers.AcceptSignature (
   renderAcceptSignature,
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
 import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptSignature)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Network.HTTP.Headers.Signature.Internal (renderSignatureInnerList, signatureInputDictionary)
 
 
 {- | A requested covered component identifier: an RFC 8941 String together
@@ -81,15 +79,7 @@ instance KnownHeader AcceptSignature where
   type Direction AcceptSignature = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers =
-    case runParser acceptSignatureParser (B.intercalate ", " (NE.toList headers)) of
-      OK v rest
-        | B.null (B.dropWhile isOwsByte rest) -> Right v
-        | otherwise -> Left ("Unconsumed input after parsing Accept-Signature header: " <> show rest)
-      Fail -> Left "Failed to parse Accept-Signature header"
-      Err e -> Left e
-    where
-      isOwsByte w = w == 0x20 || w == 0x09
+  parseFromHeaders _ = parseStructuredFieldLines "Accept-Signature" acceptSignatureParser
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderAcceptSignature
@@ -103,40 +93,12 @@ instance KnownHeader AcceptSignature where
 -- ---------------------------------------------------------------------------
 
 acceptSignatureParser :: ParserT st String AcceptSignature
-acceptSignatureParser = do
-  ows
-  AcceptSignature <$> rfc8941List1 entry
+acceptSignatureParser =
+  AcceptSignature
+    <$> signatureInputDictionary validTimestamp signatureLabel componentName componentParams AcceptSignatureComponent AcceptSignatureEntry
   where
-    entry = do
-      label <- dictionaryKey
-      $(char '=')
-      comps <- innerList
-      AcceptSignatureEntry label comps <$> rfc8941Parameters
-
-    innerList = do
-      $(char '(')
-      ows
-      cs <- component `sepBy` rws
-      ows
-      $(char ')')
-      pure cs
-
-    component = do
-      name <- rfc8941String
-      AcceptSignatureComponent name <$> rfc8941Parameters
-
-
-{- | An RFC 8941 dictionary @key@:
-@( lcalpha \/ "*" ) *( lcalpha \/ DIGIT \/ "_" \/ "-" \/ "." \/ "*" )@.
--}
-dictionaryKey :: ParserT st e ShortText
-dictionaryKey =
-  shortASCIIFromParser_ $
-    skipSatisfyAscii (`CharSet.member` keyFirst)
-      *> skipMany (skipSatisfyAscii (`CharSet.member` keyRest))
-  where
-    keyFirst = CharSet.range 'a' 'z' <> CharSet.singleton '*'
-    keyRest = CharSet.range 'a' 'z' <> CharSet.range '0' '9' <> "_-.*"
+    validTimestamp (Boolean True) = True
+    validTimestamp _ = False
 
 
 -- ---------------------------------------------------------------------------
@@ -146,26 +108,8 @@ dictionaryKey =
 renderAcceptSignature :: AcceptSignature -> M.Builder
 renderAcceptSignature (AcceptSignature entries) =
   M.intersperse ", " (renderEntry <$> entries)
-
-
-renderEntry :: AcceptSignatureEntry -> M.Builder
-renderEntry (AcceptSignatureEntry label comps params) =
-  R.shortText label
-    <> M.char7 '='
-    <> renderInnerList comps
-    <> renderParameters params
-
-
-renderInnerList :: [AcceptSignatureComponent] -> M.Builder
-renderInnerList comps =
-  M.char7 '(' <> M.intersperse " " (renderComponent <$> comps) <> M.char7 ')'
-
-
-renderComponent :: AcceptSignatureComponent -> M.Builder
-renderComponent (AcceptSignatureComponent name params) =
-  R.rfc8941String name <> renderParameters params
-
-
-renderParameters :: [(ShortText, Maybe ItemValue)] -> M.Builder
-renderParameters =
-  foldMap (uncurry (R.rfc8941Parameter R.IncludeIfEmpty R.rfc8941ItemValue))
+  where
+    renderEntry (AcceptSignatureEntry label components metadata) =
+      R.shortText label
+        <> M.char7 '='
+        <> renderSignatureInnerList componentName componentParams components metadata

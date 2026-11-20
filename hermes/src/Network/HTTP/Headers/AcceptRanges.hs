@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Accept-Ranges@ is a response header by which a server advertises whether
 it supports range requests on the target resource, naming the range units
@@ -25,7 +23,8 @@ module Network.HTTP.Headers.AcceptRanges (
   renderAcceptRanges,
 ) where
 
-import qualified Data.ByteString as B
+import Data.Bits ((.|.))
+import qualified Data.ByteString.Short as SBS
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
@@ -52,15 +51,8 @@ instance KnownHeader AcceptRanges where
   type Direction AcceptRanges = 'Response
 
 
-  parseFromHeaders _ headers = case runParser acceptRangesParser (NE.head headers) of
-    OK ar leftover
-      | B.null (dropOws leftover) -> Right ar
-      | otherwise ->
-          Left ("Unconsumed input after parsing Accept-Ranges: " <> show leftover)
-    Fail -> Left "Failed to parse Accept-Ranges header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ fields =
+    parseListFieldLines "Accept-Ranges" (httpList rfc9110Token) fields >>= classifyRanges
 
 
   renderToHeaders _ = M.toStrictByteString . renderAcceptRanges
@@ -71,16 +63,28 @@ instance KnownHeader AcceptRanges where
 
 acceptRangesParser :: ParserT st String AcceptRanges
 acceptRangesParser = do
-  ows
-  first <- rfc9110Token
-  if ST.toString first == "none"
-    then do
-      ows
-      pure AcceptRangesNone
-    else do
-      rest <- many (ows *> $(char ',') *> ows *> rfc9110Token)
-      ows
-      pure (AcceptRangesUnits (first :| rest))
+  tokens <- httpList rfc9110Token
+  either err pure (classifyRanges tokens)
+
+
+classifyRanges :: [ST.ShortText] -> Either String AcceptRanges
+classifyRanges [] = Left "Accept-Ranges requires at least one range unit"
+classifyRanges [unit] | isNone unit = Right AcceptRangesNone
+classifyRanges (unit : rest)
+  | isNone unit || any isNone rest = Left "Accept-Ranges none cannot be combined with a range unit"
+  | otherwise = Right (AcceptRangesUnits (unit :| rest))
+
+
+isNone :: ST.ShortText -> Bool
+isNone token =
+  SBS.length bytes == 4
+    && lowerAt 0 == 110
+    && lowerAt 1 == 111
+    && lowerAt 2 == 110
+    && lowerAt 3 == 101
+  where
+    bytes = ST.toShortByteString token
+    lowerAt i = SBS.index bytes i .|. 0x20
 
 
 renderAcceptRanges :: AcceptRanges -> M.Builder

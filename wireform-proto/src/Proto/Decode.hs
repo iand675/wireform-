@@ -58,16 +58,27 @@ module Proto.Decode (
   decodeFieldString,
   decodeFieldBytes,
   decodeFieldMessage,
+  decodeFieldMessageMerge,
+  decodeFieldGroup,
+  decodeFieldGroupMerge,
+  decodeLengthDelimitedWith,
+  decodeGroupWith,
   decodeFieldEnum,
+  decodeProtoEnum,
+  decodeFieldNullValue,
 
   -- * Packed repeated field decoding
   decodePackedVarint,
+  decodePackedEnum,
+  PackedProtoEnum (..),
+  decodePackedProtoEnum,
   decodePackedFixed32,
   decodePackedFixed64,
   decodePackedFloat,
   decodePackedDouble,
   decodePackedSVarint32,
   decodePackedSVarint64,
+  decodeAllVarints,
 
   -- * Submessage decoding
   decodeSubmessage,
@@ -80,6 +91,8 @@ module Proto.Decode (
   -- * Unknown field preservation
   UnknownField (..),
   captureUnknownField,
+  captureVerifiedStringExtension,
+  decodeUnknownFields,
   encodeUnknownFields,
 
   -- * Re-exports for generated code
@@ -103,6 +116,10 @@ module Proto.Decode (
 
   -- * Map entry decoding
   decodeMapEntry,
+  decodeMapEntryTyped,
+  decodeMessageMapEntry,
+  decodeMessageMapEntryTyped,
+  decodeProtoEnumMapField,
 
   -- * CPS failure
   decodeFail,
@@ -122,10 +139,10 @@ module Proto.Decode (
   -- * Monadic CPS tag dispatch (zero Tag allocation, for generated code)
   withTagM,
   skipWireType,
+  skipTaggedWireType,
 ) where
 
 import Control.DeepSeq (NFData (..))
-import Control.Monad qualified
 import Control.Monad.ST (runST)
 import Data.Bits (shiftL, (.&.), (.|.))
 import Data.ByteString (ByteString)
@@ -134,7 +151,10 @@ import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Int (Int32, Int64)
 import Data.List (foldl')
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
+import Data.Vector qualified as V
+import Data.Vector.Mutable qualified as MV
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Vector.Unboxed qualified as VU
@@ -146,9 +166,11 @@ import Foreign.Ptr (castPtr)
 import Foreign.Storable (Storable)
 import GHC.Exts (Int (I#))
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
-import Proto.Internal.Wire (Tag (..), WireType (..))
+import Proto.Encode qualified as PE
+import Proto.Internal.Wire (WireType (..))
 import Proto.Internal.Wire.Decode
 import Proto.Internal.Wire.Encode (putFixed32, putFixed64, putLengthDelimited, putTag, putVarint, tagSize, varintSize)
+import Proto.Schema (ProtoEnum (..))
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Wireform.Builder qualified as B
 import Wireform.FFI (countPackedVarints)
@@ -238,25 +260,63 @@ then runs the sub-decoder on that slice. The sub-decoder's end-of-input
 check naturally enforces the submessage boundary.
 -}
 decodeFieldMessage :: MessageDecode a => Decoder a
-decodeFieldMessage = Decoder $ \bs off ->
-  case runDecoder# getVarint bs off of
-    (# (# lenW, off' #) | #) ->
-      let !len = fromIntegral lenW :: Int
-      in if len < 0
-           then (# | NegativeLength #)
-           else
-             if I# off' + len > BS.length bs
-               then (# | UnexpectedEnd #)
-               else
-                 let !subBs = BSU.unsafeTake len (BSU.unsafeDrop (I# off') bs)
-                 in case runDecoder# messageDecoder subBs 0# of
-                      (# (# a, subOff #) | #)
-                        | I# subOff == len ->
-                            (# (# a, case I# off' + len of I# r -> r #) | #)
-                        | otherwise -> (# | SubMessageError ExtraBytes #)
-                      (# | e #) -> (# | SubMessageError e #)
-    (# | e #) -> (# | e #)
+decodeFieldMessage = decodeLengthDelimitedWith messageDecoder
 {-# INLINE decodeFieldMessage #-}
+
+
+-- | Run a decoder against exactly one length-delimited payload.
+decodeLengthDelimitedWith :: Decoder a -> Decoder a
+decodeLengthDelimitedWith = decodeMessagePayloadWith getLengthDelimited
+{-# INLINE decodeLengthDelimitedWith #-}
+
+
+decodeMessagePayloadWith :: Decoder ByteString -> Decoder a -> Decoder a
+decodeMessagePayloadWith payload decoder = Decoder $ \bs off ->
+  case runDecoder# payload bs off of
+    (# (# subBs, off' #) | #) ->
+      case runDecoder# decoder subBs 0# of
+        (# (# a, subOff #) | #)
+          | I# subOff == BS.length subBs -> (# (# a, off' #) | #)
+          | otherwise -> (# | SubMessageError ExtraBytes #)
+        (# | e #) -> (# | SubMessageError e #)
+    (# | e #) -> (# | e #)
+{-# INLINE decodeMessagePayloadWith #-}
+
+
+-- | Decode a singular submessage occurrence, merging it into the previous
+-- value when present. Keep the incoming bytes intact so explicit wire
+-- occurrences of implicit defaults can still clear an earlier value.
+decodeFieldMessageMerge :: (PE.MessageEncode a, MessageDecode a) => Maybe a -> Decoder a
+decodeFieldMessageMerge = decodeMessageMergeWith getLengthDelimited
+{-# INLINE decodeFieldMessageMerge #-}
+
+
+-- | Decode the message between the matching group tags.
+decodeFieldGroup :: MessageDecode a => Int -> Decoder a
+decodeFieldGroup fn = decodeGroupWith fn messageDecoder
+{-# INLINE decodeFieldGroup #-}
+
+-- | Decode a group body and consume its matching end tag.
+decodeGroupWith :: Int -> Decoder a -> Decoder a
+decodeGroupWith fn = decodeMessagePayloadWith (getGroupBody fn)
+{-# INLINE decodeGroupWith #-}
+
+
+decodeFieldGroupMerge :: (PE.MessageEncode a, MessageDecode a) => Int -> Maybe a -> Decoder a
+decodeFieldGroupMerge fn = decodeMessageMergeWith (getGroupBody fn)
+{-# INLINE decodeFieldGroupMerge #-}
+
+
+decodeMessageMergeWith :: (PE.MessageEncode a, MessageDecode a) => Decoder ByteString -> Maybe a -> Decoder a
+decodeMessageMergeWith payload Nothing = decodeMessagePayloadWith payload messageDecoder
+decodeMessageMergeWith payload (Just previous) = do
+  incoming <- payload
+  if BS.null incoming
+    then pure previous
+    else case decodeMessage (PE.encodeMessage previous <> incoming) of
+      Left err -> decodeFail (SubMessageError err)
+      Right merged -> pure merged
+{-# INLINE decodeMessageMergeWith #-}
 
 
 -- | CPS-compatible failure: calls the error continuation.
@@ -278,9 +338,86 @@ varint of @0xFF...FF7F@.
 -}
 decodeFieldEnum :: Enum a => Decoder a
 decodeFieldEnum =
-  toEnum . fromIntegral . (fromIntegral :: Word64 -> Int32)
-    <$> getVarint
+  enumFromVarint <$> getVarint
 {-# INLINE decodeFieldEnum #-}
+
+
+enumFromVarint :: Enum a => Word64 -> a
+enumFromVarint = toEnum . fromIntegral . (fromIntegral :: Word64 -> Int32)
+{-# INLINE enumFromVarint #-}
+
+
+protoEnumFromVarint :: ProtoEnum a => Word64 -> Maybe a
+protoEnumFromVarint = fromProtoEnumValue . fromIntegral . (fromIntegral :: Word64 -> Int32)
+{-# INLINE protoEnumFromVarint #-}
+
+
+-- | Decode a schema-backed enum field, preserving an unrecognized closed
+-- enum value as an unknown varint on the same field number.
+decodeProtoEnum
+  :: forall a r. (Enum a, ProtoEnum a)
+  => Int -> (a -> Decoder r) -> (UnknownField -> Decoder r) -> Decoder r
+decodeProtoEnum fn known unknown
+  | protoEnumIsOpen (Proxy :: Proxy a) = decodeFieldEnum >>= known
+  | otherwise = do
+      raw <- getVarint
+      case protoEnumFromVarint raw of
+        Just value -> known value
+        Nothing -> unknown (UnknownVarint fn raw)
+{-# INLINE decodeProtoEnum #-}
+
+
+-- | Decode a packed enum field into the boxed vector used by textual codecs.
+decodePackedEnum :: Enum a => Decoder (V.Vector a)
+decodePackedEnum = do
+  values <- decodePackedVarint
+  pure $! V.generate (VU.length values) (enumFromVarint . VU.unsafeIndex values)
+{-# INLINE decodePackedEnum #-}
+
+
+-- | Decoded values and the updated reverse-order unknown field accumulator.
+data PackedProtoEnum a = PackedProtoEnum !(V.Vector a) ![UnknownField]
+
+
+-- | Split a packed enum field into recognized values and unknown varints.
+decodePackedProtoEnum
+  :: forall a. (Enum a, ProtoEnum a)
+  => Int -> [UnknownField] -> Decoder (PackedProtoEnum a)
+decodePackedProtoEnum fn unknowns
+  | protoEnumIsOpen (Proxy :: Proxy a) =
+      flip PackedProtoEnum unknowns <$> decodePackedEnum
+  | otherwise = do
+      values <- decodePackedVarint
+      pure $! runST $ do
+        let len = VU.length values
+        output <- MV.unsafeNew len
+        let go !src !dst !rest
+              | src == len = do
+                  kept <-
+                    if dst == len
+                      then V.unsafeFreeze output
+                      else V.freeze (MV.unsafeSlice 0 dst output)
+                  pure (PackedProtoEnum kept rest)
+              | otherwise =
+                  let raw = VU.unsafeIndex values src
+                  in case protoEnumFromVarint raw of
+                       Just value -> do
+                         MV.unsafeWrite output dst value
+                         go (src + 1) (dst + 1) rest
+                       Nothing -> go (src + 1) dst (UnknownVarint fn raw : rest)
+        go 0 0 unknowns
+{-# INLINE decodePackedProtoEnum #-}
+
+
+-- | Read NullValue's varint, including the empty submessage written by older
+-- Wireform oneof codecs.
+decodeFieldNullValue :: Enum a => Int -> Decoder a
+decodeFieldNullValue 0 = decodeFieldEnum
+decodeFieldNullValue 2 = do
+  legacy <- getLengthDelimited
+  if BS.null legacy then pure (toEnum 0) else decodeFail ExtraBytes
+decodeFieldNullValue wt = decodeFail (InvalidWireType wt)
+{-# INLINE decodeFieldNullValue #-}
 
 
 -- | Decode a submessage from raw bytes.
@@ -309,70 +446,65 @@ Optimizations borrowed from hyperpb (mcyoung.xyz/2025/07/16/hyperpb):
     in one pass, then allocate the output vector to exact size upfront.
     This avoids grow-and-copy or list-reversal overhead.
 
- 2. Single-byte zero-copy: when every varint is one byte (values 0-127),
-    each byte IS the value. We skip varint parsing entirely and just
-    widen bytes to Word64. This is the common case for enum fields,
-    small indices, and boolean-like repeated fields.
-| Decode all varints from a packed buffer.
+ 2. Single-byte values need only widening to Word64.
 
-Adaptive 3-strategy decode from hyperpb's parsePackedVarint:
-
- 1. count == byteLength: every varint is 1 byte (values 0-127).
-    Zero-copy widening — each byte IS the value.
-
- 2. count >= byteLength/2: mostly 1-2 byte varints.
-    Inline 1-2 byte fast path with fallback for larger varints.
-    The 1-2 byte branches are well-predicted because they're common.
-
- 3. count < byteLength/2: many large varints.
-    Call full varint decoder (1-2 byte branches would mispredict often).
+ 3. For longer inputs, favor inline 1–2 byte decoding when terminators
+    are dense. For sparse terminators, use the general varint decoder.
 -}
 decodeAllVarints :: ByteString -> Either DecodeError (VU.Vector Word64)
 decodeAllVarints bs
+  | len == 0 = Right VU.empty
+  | n == len = Right $! VU.generate n (fromIntegral . BSU.unsafeIndex bs)
+  | n < len `quot` 2 = decodePackedElements getVarint bs n
+  | otherwise = runST $ do
+      mv <- MVU.unsafeNew n
+      let write !idx !off !v = do
+            MVU.unsafeWrite mv idx v
+            go (idx + 1) off
+          go !idx !off@(I# off#)
+            | off == len = Right <$> VU.unsafeFreeze mv
+            | otherwise =
+                let !b0 = fromIntegral (BSU.unsafeIndex bs off) :: Word64
+                in if b0 < 0x80
+                     then write idx (off + 1) b0
+                     else
+                       if off + 1 == len
+                         then pure (Left UnexpectedEnd)
+                         else
+                           let !b1 = fromIntegral (BSU.unsafeIndex bs (off + 1)) :: Word64
+                           in if b1 < 0x80
+                                then write idx (off + 2) ((b0 .&. 0x7F) .|. (b1 `shiftL` 7))
+                                else case runDecoder# getVarint bs off# of
+                                  (# (# v, next #) | #) -> write idx (I# next) v
+                                  (# | e #) -> pure (Left e)
+      go 0 0
+  where
+    len = BS.length bs
+    n = countPackedVarints bs
+
+
+-- Each successful element consumes exactly one of the counted terminators.
+-- A malformed element must leave the mutable vector private.
+decodePackedElements
+  :: VU.Unbox a
+  => Decoder a
+  -> ByteString
+  -> Int
+  -> Either DecodeError (VU.Vector a)
+decodePackedElements dec bs n
   | BS.null bs = Right VU.empty
-  | otherwise =
+  | otherwise = runST $ do
+      mv <- MVU.unsafeNew n
       let !len = BS.length bs
-          !n = countPackedVarints bs
-      in if n == len
-           -- Strategy 1: all single-byte
-           then Right $! VU.generate n (fromIntegral . BSU.unsafeIndex bs)
-           else Right $! runST $ do
-             mv <- MVU.unsafeNew n
-             if n >= len `quot` 2
-               -- Strategy 2: mostly small varints, inline 1-2 byte fast path
-               then do
-                 let go !idx !off
-                       | off >= len = pure ()
-                       | otherwise =
-                           let !b0 = fromIntegral (BSU.unsafeIndex bs off) :: Word64
-                           in if b0 < 0x80
-                                then do
-                                  MVU.unsafeWrite mv idx b0
-                                  go (idx + 1) (off + 1)
-                                else
-                                  Control.Monad.when (off + 1 < len) $
-                                    let !b1 = fromIntegral (BSU.unsafeIndex bs (off + 1)) :: Word64
-                                    in if b1 < 0x80
-                                         then do
-                                           MVU.unsafeWrite mv idx ((b0 .&. 0x7F) .|. (b1 `shiftL` 7))
-                                           go (idx + 1) (off + 2)
-                                         else case runDecoder' getVarint bs off of
-                                           DecodeOK v off' -> do
-                                             MVU.unsafeWrite mv idx v
-                                             go (idx + 1) off'
-                                           DecodeFail _ -> pure ()
-                 go 0 0
-               -- Strategy 3: many large varints, full decoder
-               else do
-                 let go !idx !off
-                       | off >= len = pure ()
-                       | otherwise = case runDecoder' getVarint bs off of
-                           DecodeOK v off' -> do
-                             MVU.unsafeWrite mv idx v
-                             go (idx + 1) off'
-                           DecodeFail _ -> pure ()
-                 go 0 0
-             VU.unsafeFreeze mv
+          go !idx !off@(I# off#)
+            | off == len = Right <$> VU.unsafeFreeze mv
+            | otherwise = case runDecoder# dec bs off# of
+                (# (# v, next #) | #) -> do
+                  MVU.unsafeWrite mv idx v
+                  go (idx + 1) (I# next)
+                (# | e #) -> pure (Left e)
+      go 0 0
+{-# INLINE decodePackedElements #-}
 
 
 -- | Decode packed fixed32 values.
@@ -474,58 +606,20 @@ unsafeBulkCopyToVectorU elemCount elemSize (BSI.BS fp _) =
 decodePackedSVarint32 :: Decoder (VU.Vector Int32)
 decodePackedSVarint32 = do
   bs <- getLengthDelimited
-  case decodeAllSVarint32 bs of
+  case decodePackedElements getSVarint32 bs (countPackedVarints bs) of
     Left e -> decodeFail e
     Right vs -> pure vs
 {-# INLINE decodePackedSVarint32 #-}
-
-
-decodeAllSVarint32 :: ByteString -> Either DecodeError (VU.Vector Int32)
-decodeAllSVarint32 bs
-  | BS.null bs = Right VU.empty
-  | otherwise =
-      let !n = countPackedVarints bs
-      in Right $! runST $ do
-           mv <- MVU.unsafeNew n
-           let len = BS.length bs
-               go !idx !off
-                 | off >= len = pure ()
-                 | otherwise = case runDecoder' getSVarint32 bs off of
-                     DecodeOK v off' -> do
-                       MVU.unsafeWrite mv idx v
-                       go (idx + 1) off'
-                     DecodeFail _ -> pure ()
-           go 0 0
-           VU.unsafeFreeze mv
 
 
 -- | Decode packed sint64 values.
 decodePackedSVarint64 :: Decoder (VU.Vector Int64)
 decodePackedSVarint64 = do
   bs <- getLengthDelimited
-  case decodeAllSVarint64 bs of
+  case decodePackedElements getSVarint64 bs (countPackedVarints bs) of
     Left e -> decodeFail e
     Right vs -> pure vs
 {-# INLINE decodePackedSVarint64 #-}
-
-
-decodeAllSVarint64 :: ByteString -> Either DecodeError (VU.Vector Int64)
-decodeAllSVarint64 bs
-  | BS.null bs = Right VU.empty
-  | otherwise =
-      let !n = countPackedVarints bs
-      in Right $! runST $ do
-           mv <- MVU.unsafeNew n
-           let len = BS.length bs
-               go !idx !off
-                 | off >= len = pure ()
-                 | otherwise = case runDecoder' getSVarint64 bs off of
-                     DecodeOK v off' -> do
-                       MVU.unsafeWrite mv idx v
-                       go (idx + 1) off'
-                     DecodeFail _ -> pure ()
-           go 0 0
-           VU.unsafeFreeze mv
 
 
 {- | A lazily-decoded submessage. The raw bytes are captured during the
@@ -581,6 +675,8 @@ data UnknownField
     UnknownFixed32 {-# UNPACK #-} !Int {-# UNPACK #-} !Word32
   | -- | A length-delimited unknown field (wire type 2).
     UnknownLenDelim {-# UNPACK #-} !Int !ByteString
+  | -- | A legacy group, with its raw body between the start and end tags.
+    UnknownGroup {-# UNPACK #-} !Int !ByteString
   deriving stock (Show, Eq)
 
 
@@ -589,6 +685,7 @@ instance NFData UnknownField where
   rnf (UnknownFixed64 a b) = rnf a `seq` rnf b
   rnf (UnknownFixed32 a b) = rnf a `seq` rnf b
   rnf (UnknownLenDelim a b) = rnf a `seq` rnf b
+  rnf (UnknownGroup a b) = rnf a `seq` rnf b
 
 
 -- | Capture an unknown field value during decoding.
@@ -598,7 +695,28 @@ captureUnknownField fn = \case
   Wire64Bit -> UnknownFixed64 fn <$> getFixed64
   Wire32Bit -> UnknownFixed32 fn <$> getFixed32
   WireLengthDelimited -> UnknownLenDelim fn <$> getLengthDelimited
-  wt -> skipField wt >> decodeFail (CustomError ("Unsupported unknown wire type: " <> show wt))
+  WireStartGroup -> UnknownGroup fn <$> getGroupBody fn
+  WireEndGroup -> decodeFail (InvalidWireType 4)
+
+
+-- | Capture a known length-delimited string extension after UTF-8 verification.
+-- Keep the original slice for the extension accessor and wire round-trips.
+captureVerifiedStringExtension :: Int -> Decoder UnknownField
+captureVerifiedStringExtension fn = do
+  bytes <- getLengthDelimited
+  if validateUtf8 bytes
+    then pure (UnknownLenDelim fn bytes)
+    else decodeFail InvalidUtf8
+{-# INLINE captureVerifiedStringExtension #-}
+
+
+-- | Read all wire records in a payload without a message schema.
+decodeUnknownFields :: ByteString -> Either DecodeError [UnknownField]
+decodeUnknownFields = runDecoder (go [])
+  where
+    go fields = withTagM (pure (reverse fields)) $ \number wire -> do
+      field <- captureUnknownField number (toEnum wire)
+      go (field : fields)
 
 
 -- | Compute the wire-format size of unknown fields.
@@ -613,6 +731,8 @@ unknownFieldsSize = foldl' (\acc uf -> acc + unknownFieldSize uf) 0
       tagSize fn + 4
     unknownFieldSize (UnknownLenDelim fn val) =
       tagSize fn + varintSize (fromIntegral (BS.length val)) + BS.length val
+    unknownFieldSize (UnknownGroup fn body) =
+      2 * tagSize fn + BS.length body
 
 
 -- | Re-encode unknown fields for round-trip preservation.
@@ -627,17 +747,79 @@ encodeUnknownFields = foldMap encodeOne
       putTag fn Wire32Bit <> putFixed32 val
     encodeOne (UnknownLenDelim fn val) =
       putTag fn WireLengthDelimited <> putLengthDelimited val
+    encodeOne (UnknownGroup fn body) =
+      putTag fn WireStartGroup <> B.byteStringCopy body <> putTag fn WireEndGroup
 
 
 -- | Decode a map entry (key=field1, value=field2) from a length-delimited chunk.
 decodeMapEntry :: Decoder k -> Decoder v -> k -> v -> Decoder (k, v)
-decodeMapEntry decK decV = loop
+decodeMapEntry decK decV = decodeMapEntryWith (const True) decK (const True) (const decV) id
+{-# INLINE decodeMapEntry #-}
+
+
+-- | Decode a map entry using its declared key and value wire types.
+-- Mismatched members are skipped as unknown members of the entry.
+decodeMapEntryTyped :: Int -> Decoder k -> Int -> Decoder v -> k -> v -> Decoder (k, v)
+decodeMapEntryTyped keyWire decK valueWire decV =
+  decodeMapEntryWith (== keyWire) decK (== valueWire) (const decV) id
+{-# INLINE decodeMapEntryTyped #-}
+
+
+-- | The final value field determines whether a closed-enum map entry is known.
+decodeProtoEnumMapField
+  :: forall k a r. (Enum a, ProtoEnum a)
+  => Int -> Int -> Decoder k -> k -> a
+  -> (k -> a -> Decoder r) -> (UnknownField -> Decoder r) -> Decoder r
+decodeProtoEnumMapField fn keyWire decK initialKey initialValue known unknown
+  | protoEnumIsOpen (Proxy :: Proxy a) = do
+      (key, value) <- decodeLengthDelimitedWith (decodeMapEntryTyped keyWire decK 0 decodeFieldEnum initialKey initialValue)
+      known key value
+  | otherwise = do
+      body <- getLengthDelimited
+      case runDecoder (decodeMapEntryWith (== keyWire) decK (== 0) readValue id initialKey (Just initialValue)) body of
+        Left e -> decodeFail (SubMessageError e)
+        Right (key, Just value) -> known key value
+        Right (_, Nothing) -> unknown (UnknownLenDelim fn body)
+  where
+    readValue _ = do
+      raw <- getVarint
+      pure (protoEnumFromVarint raw)
+{-# INLINE decodeProtoEnumMapField #-}
+
+
+-- | Merge repeated value fields inside a single message-valued map entry.
+-- When separate entries carry the same key, the caller still keeps the last.
+decodeMessageMapEntry :: (PE.MessageEncode v, MessageDecode v) => Decoder k -> k -> v -> Decoder (k, v)
+decodeMessageMapEntry decK initialKey initialValue =
+  decodeMessageMapEntryWith (const True) (const True) decK initialKey initialValue
+{-# INLINE decodeMessageMapEntry #-}
+
+
+-- | Decode a message-valued map entry with a declared key wire type.
+decodeMessageMapEntryTyped :: (PE.MessageEncode v, MessageDecode v) => Int -> Decoder k -> k -> v -> Decoder (k, v)
+decodeMessageMapEntryTyped keyWire = decodeMessageMapEntryWith (== keyWire) (== 2)
+{-# INLINE decodeMessageMapEntryTyped #-}
+
+
+decodeMessageMapEntryWith
+  :: (PE.MessageEncode v, MessageDecode v)
+  => (Int -> Bool) -> (Int -> Bool) -> Decoder k -> k -> v -> Decoder (k, v)
+decodeMessageMapEntryWith acceptsKey acceptsValue decK initialKey initialValue =
+  decodeMapEntryWith acceptsKey decK acceptsValue
+    (fmap Just . decodeFieldMessageMerge) (maybe initialValue id) initialKey Nothing
+{-# INLINE decodeMessageMapEntryWith #-}
+
+
+decodeMapEntryWith
+  :: (Int -> Bool) -> Decoder k -> (Int -> Bool) -> (acc -> Decoder acc) -> (acc -> v) -> k -> acc -> Decoder (k, v)
+decodeMapEntryWith acceptsKey decK acceptsValue decV finish = loop
   where
     loop !mk !mv =
       withTagM
-        (pure (mk, mv))
+        (pure (mk, finish mv))
         ( \fn wt -> case fn of
-            1 -> do kv <- decK; loop kv mv
-            2 -> do vv <- decV; loop mk vv
-            _ -> skipWireType wt >> loop mk mv
+            1 | acceptsKey wt -> do kv <- decK; loop kv mv
+            2 | acceptsValue wt -> do vv <- decV mv; loop mk vv
+            _ -> skipTaggedWireType fn wt >> loop mk mv
         )
+{-# INLINE decodeMapEntryWith #-}

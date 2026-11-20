@@ -4,12 +4,14 @@ module Test.Hermes.AcceptPatchPost (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.ContentNegotiation (MediaType (..))
+import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType (..))
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
 import qualified Network.HTTP.Headers.AcceptPatch as APatch
 import qualified Network.HTTP.Headers.AcceptPost as APost
 import qualified Network.HTTP.Headers.Mason as M
@@ -70,6 +72,20 @@ unit_patch_render =
     in renderPatch v `shouldBe` "application/json, text/plain"
 
 
+unit_patch_parameters :: Spec
+unit_patch_parameters = it "preserves parameters and rejects wildcard ranges" $ do
+  let fields = headerMapFromList [("Accept-Patch", " , "), ("accept-patch", "text/example;charset=utf-8,,application/merge-patch+json")]
+      value =
+        APatch.AcceptPatchRanges
+          (MediaRange (mt "text" "example") [("charset", "utf-8")] :| [MediaRange (mt "application" "merge-patch+json") []])
+  lookupHeader @APatch.AcceptPatch fields `shouldBe` Right (Just value)
+  APatch.acceptPatchMediaTypes value `shouldBe` (mt "text" "example" :| [mt "application" "merge-patch+json"])
+  headerMapToList (setHeader value (headerMapFromList []))
+    `shouldBe` [("accept-patch", "text/example;charset=utf-8, application/merge-patch+json")]
+  map (isLeft . parseOkPatch) ["*/*", "application/*", "*/json", "application/*+json", " , ", "text/plain;bad="]
+    `shouldBe` replicate 6 True
+
+
 -- Accept-Post ----------------------------------------------------------------
 
 unit_post_parse :: Spec
@@ -95,6 +111,26 @@ unit_post_render =
   it "renders media types and the literal star" $
     let v = APost.AcceptPost (APost.AcceptPostMediaType (mt "text" "turtle") :| [APost.AcceptPostAny])
     in renderPost v `shouldBe` "text/turtle, *"
+
+
+unit_post_parameters :: Spec
+unit_post_parameters = it "preserves parameters on media ranges and handles empty fields" $ do
+  let wire = "text/*;charset=utf-8, application/json;profile=\"one,two\", */*"
+      value =
+        APost.AcceptPost
+          ( APost.AcceptPostMediaRange (MediaRange (mt "text" "") [("charset", "utf-8")])
+              :| [ APost.AcceptPostMediaRange (MediaRange (mt "application" "json") [("profile", "one,two")])
+                 , APost.AcceptPostMediaType (mt "" "")
+                 ]
+          )
+      fields = headerMapFromList [("Accept-Post", ",,"), ("accept-post", wire)]
+  lookupHeader @APost.AcceptPost fields `shouldBe` Right (Just value)
+  headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("accept-post", wire)]
+  lookupHeader @APost.AcceptPost (headerMapFromList [("accept-post", ", , ")]) `shouldBe` Right (Just APost.AcceptPostEmpty)
+  lookupHeader @APost.AcceptPost (headerMapFromList []) `shouldBe` Right Nothing
+  APost.acceptPostEntryList APost.AcceptPostEmpty `shouldBe` []
+  headerMapToList (setHeader APost.AcceptPostEmpty (headerMapFromList [])) `shouldBe` [("accept-post", "")]
+  map (isLeft . parseOkPost) ["*/json", "application/*+json", "text/plain;bad="] `shouldBe` replicate 3 True
 
 
 -- Round-trip properties ------------------------------------------------------
@@ -151,6 +187,7 @@ tests =
           sequence_
             [ unit_patch_parse
             , unit_patch_render
+            , unit_patch_parameters
             , it "round-trips" prop_patch_roundtrip
             ]
       , describe "Accept-Post" $
@@ -158,6 +195,7 @@ tests =
             [ unit_post_parse
             , unit_post_parse_star_star
             , unit_post_render
+            , unit_post_parameters
             , it "round-trips" prop_post_roundtrip
             ]
       ]

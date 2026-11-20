@@ -67,10 +67,13 @@ module Network.HTTP.Connection (
   openConnectionVia,
   closeConnection,
   isPlaintextHttp1,
+  canReuseHttp1Connection,
 
   -- * Sending requests
   sendOn,
+  sendOnWithContinueTimeout,
   withResponseOn,
+  withResponseOnWithContinueTimeout,
   withResponseDeferredOn,
 
   -- * Errors
@@ -82,13 +85,14 @@ import Control.Exception (Exception, bracketOnError, throwIO)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
-import Data.CaseInsensitive qualified as CI
+import Data.List.NonEmpty qualified as NE
 import Data.Maybe qualified
 import Network.HTTP.Client.BodyStream (popperFromStrict)
 import Network.HTTP.Client.Protocol (
   Http2Info (..),
   ProtocolInfo (..),
   PushPromise (..),
+  withBufferedTrailers,
  )
 import Network.HTTP.Client.Proxy (Proxy (..))
 import Network.HTTP.Client.Proxy.Connect (connectThroughProxy)
@@ -345,6 +349,13 @@ isPlaintextHttp1 = \case
   Http2Connection _ _ -> False
 
 
+-- | Ask the HTTP/1 transport whether a drained response permits reuse.
+canReuseHttp1Connection :: Connection -> IO Bool
+canReuseHttp1Connection = \case
+  Http1Connection conn _ -> H1.clientConnectionCanReuse conn
+  Http2Connection _ _ -> pure False
+
+
 {- | Open a plaintext HTTP\/1.x connection without bracketing it.
 Returns 'Left' for configurations that need the bracketed
 'withConnection' path (TLS or HTTP\/2-preferred). Pair with
@@ -434,24 +445,19 @@ the input is ignored; the on-wire version is whatever
 'withConnection' negotiated.
 -}
 sendOn :: Connection -> Request -> IO Response
-sendOn (Http1Connection conn ver) req = do
+sendOn = sendOnWithContinueTimeout 1_000_000
+
+-- | Like 'sendOn', with a per-request continue timeout in microseconds.
+sendOnWithContinueTimeout :: Int -> Connection -> Request -> IO Response
+sendOnWithContinueTimeout timeoutUs (Http1Connection conn ver) req = do
   let req1 = (Conv.toHttp1Request req) {H1.requestVersion = Conv.toHttp1Version ver}
-  -- When the request carries @Expect: 100-continue@, use the
-  -- two-stage send: headers first, wait for 100, then body.
-  -- 1-second default timeout per RFC 9110 §10.1.1.
-  result <-
-    if hasExpect100Continue (requestHeaders req)
-      then H1.sendRequestOnWithExpect conn req1 1_000_000
-      else H1.sendRequestOn conn req1
+  result <- H1.sendRequestOnWithContinueTimeout timeoutUs conn req1
   case result of
     Left err -> throwIO (ConnectionParseError err)
     Right resp -> pure (Conv.fromHttp1Response resp)
-  where
-    hasExpect100Continue hdrs = case H.lookupHeader H.hExpect hdrs of
-      Nothing -> False
-      Just v -> CI.mk v == CI.mk "100-continue"
-sendOn (Http2Connection handle _) req = do
-  h2resp <- H2.sendRequest handle (requestToH2 req)
+sendOnWithContinueTimeout timeoutUs (Http2Connection handle _) req = do
+  h2req <- requestToH2 req
+  h2resp <- H2.sendRequestWithContinueTimeout timeoutUs handle h2req
   pure (h2ResponseToUnified h2resp)
 
 
@@ -467,15 +473,15 @@ throws we let the exception propagate and the surrounding
 'withConnection' bracket closes the connection.
 -}
 withResponseOn :: Connection -> Request -> (Response -> IO a) -> IO a
-withResponseOn (Http1Connection conn ver) req action = do
-  let req1 = (Conv.toHttp1Request req) {H1.requestVersion = Conv.toHttp1Version ver}
-  result <- H1.sendRequestOn conn req1
-  case result of
-    Left err -> throwIO (ConnectionParseError err)
-    Right resp -> action (Conv.fromHttp1Response resp)
-withResponseOn (Http2Connection handle _) req action = do
-  let h2req = requestToH2 req
-  H2.withResponse handle h2req $ \h2resp ->
+withResponseOn = withResponseOnWithContinueTimeout 1_000_000
+
+-- | Like 'withResponseOn', with a per-request continue timeout in microseconds.
+withResponseOnWithContinueTimeout :: Int -> Connection -> Request -> (Response -> IO a) -> IO a
+withResponseOnWithContinueTimeout timeoutUs conn@(Http1Connection _ _) req action =
+  sendOnWithContinueTimeout timeoutUs conn req >>= action
+withResponseOnWithContinueTimeout timeoutUs (Http2Connection handle _) req action = do
+  h2req <- requestToH2 req
+  H2.withResponseWithContinueTimeout timeoutUs handle h2req $ \h2resp ->
     action (h2ResponseToUnified h2resp)
 
 
@@ -506,25 +512,39 @@ withResponseDeferredOn conn@(Http1Connection _ _) req action = do
           resp <- sendOn conn req
           pure (Just resp, resp)
   action awaitResponse
-withResponseDeferredOn (Http2Connection handle _) req action =
-  H2.withResponseDeferred handle (requestToH2 req) $ \awaitH2 ->
+withResponseDeferredOn (Http2Connection handle _) req action = do
+  h2req <- requestToH2 req
+  H2.withResponseDeferred handle h2req $ \awaitH2 ->
     action (h2ResponseToUnified <$> awaitH2)
 
-requestToH2 :: Request -> H2.ClientRequest
-requestToH2 req =
-  H2.ClientRequest
-    { H2.crMethod = U.fromMethod (requestMethod req)
-    , H2.crPath = requestTarget req
-    , H2.crScheme = case requestScheme req of
-        SchemeHttp -> "http"
-        SchemeHttps -> "https"
-    , H2.crAuthority = Data.Maybe.fromMaybe "" (requestAuthority req)
-    , H2.crHeaders = Conv.toHttp2Headers (requestHeaders req)
-    , H2.crBody = case requestBody req of
-        U.BodyEmpty -> H2.ReqBodyNone
-        U.BodyBytes bs -> H2.ReqBodyBytes bs
-        U.BodyStream p -> H2.ReqBodyStream p
-    }
+requestToH2 :: Request -> IO H2.ClientRequest
+requestToH2 req = do
+  body <- case requestBody req of
+    U.BodyEmpty -> withFixedTrailers H2.ReqBodyNone BS.empty
+    U.BodyBytes bs -> withFixedTrailers (H2.ReqBodyBytes bs) bs
+    U.BodyStream produce -> pure (H2.ReqBodyStreamWithTrailers produce produceTrailers)
+  pure
+    H2.ClientRequest
+      { H2.crMethod = method
+      , H2.crPath = requestTarget req
+      , H2.crScheme = case requestScheme req of
+          SchemeHttp -> "http"
+          SchemeHttps -> "https"
+      , H2.crAuthority = Data.Maybe.fromMaybe fallbackAuthority (requestAuthority req)
+      , H2.crHeaders = Conv.toHttp2Headers (requestHeaders req)
+      , H2.crBody = body
+      }
+  where
+    method = U.fromMethod (requestMethod req)
+    fallbackAuthority
+      | method == "CONNECT" = requestTarget req
+      | otherwise = ""
+    produceTrailers = Conv.toHttp2Headers <$> requestTrailers req
+    withFixedTrailers plain bytes = do
+      trailers <- produceTrailers
+      pure $ case NE.nonEmpty trailers of
+        Nothing -> plain
+        Just fields -> H2.ReqBodyBytesWithTrailers bytes fields
 
 
 -- | Drain a 'U.Body' to a strict 'ByteString'.
@@ -548,13 +568,14 @@ materializePushResponse :: H2.ClientResponse -> IO RawResponse
 materializePushResponse cr = do
   let resp = h2ResponseToUnified cr
   bodyBs <- drainUnifiedBody (responseBody resp)
+  trailers <- responseTrailers resp
   popper <- popperFromStrict bodyBs
   pure
     RawResponse
       { statusCode = responseStatus resp
       , headers = responseHeaders resp
       , bodyPopper = popper
-      , protocolInfo = case responseVersion resp of
+      , protocolInfo = withBufferedTrailers trailers $ case responseVersion resp of
           U.HTTP2 ->
             HTTP2
               Http2Info

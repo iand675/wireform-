@@ -100,6 +100,7 @@ descrHook = mempty
 module Proto.TH (
   loadProto,
   loadProtoWith,
+  loadProtoWithTypeNames,
   LoadOpts (..),
   defaultLoadOpts,
   protoFileToDecls,
@@ -107,7 +108,6 @@ module Proto.TH (
   enumToDecls,
 ) where
 
-import Control.Applicative ((<|>))
 import Control.DeepSeq (NFData)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
@@ -116,8 +116,11 @@ import Data.Char qualified
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Maybe (mapMaybe)
 import Data.Maybe qualified
+import Data.Proxy (Proxy (..))
+import Data.Reflection qualified as Reflection
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -125,17 +128,39 @@ import Data.Text.Lazy qualified as TL
 import Data.Word (Word32, Word64)
 import GHC.Generics (Generic)
 import Language.Haskell.TH
-import Language.Haskell.TH.Syntax (addDependentFile, addModFinalizer)
-import System.Directory (doesFileExist)
-import System.FilePath ((</>))
+import Language.Haskell.TH.Syntax (addDependentFile, addModFinalizer, lift)
 import Proto.CodeGen (
+  ExtensionNames (..),
   FieldNaming (..),
-  escapeReserved,
+  NamedJSONField (..),
+  NamedJSONShape (..),
+  OneofBindingNames,
+  RecordBindingNames (..),
+  TypeInfo (tiHsName, tiKind, tiModule),
+  TypeKind (..),
+  TypeRegistry,
+  buildTypeRegistry,
+  builtinDescriptorTypes,
+  defaultGenerateOpts,
+  enumConstructorNames,
+  extensionBindingNames,
   hsTypeName,
-  lowerFirst,
+  fieldLabelNames,
+  lookupExtensionNames,
+  namedJSONFields,
+  oneofBindingNames,
+  oneofConstructorName,
+  oneofTypeName,
   protoJsonName,
+  recordBindingNames,
+  registryMessageNames,
+  resolveTypeKey,
+  restrictOptionImportTypes,
+  scopedFieldNameWith,
+  scopedTypeName,
+  scopedEnumCon,
   snakeToCamel,
-  snakeToPascal,
+  verifiedStringExtensions,
  )
 import Proto.CodeGen.Hooks
 import Proto.Decode qualified as Decode
@@ -148,32 +173,30 @@ import Proto.Google.Protobuf.Any qualified as WktAny
 import Proto.Google.Protobuf.Duration qualified as WktDuration
 import Proto.Google.Protobuf.Empty qualified as WktEmpty
 import Proto.Google.Protobuf.FieldMask qualified as WktFieldMask
+import Proto.Google.Protobuf.SourceContext qualified as WktSourceContext
 import Proto.Google.Protobuf.Struct qualified as WktStruct
 import Proto.Google.Protobuf.Timestamp qualified as WktTimestamp
 import Proto.Google.Protobuf.Wrappers qualified as WktWrappers
 import Proto.IDL.AST
-import Proto.IDL.Annotations (lookupSimpleOption, optionAsBool, optionAsString)
+import Proto.IDL.Annotations (lookupSimpleOption, optionAsString)
+import Proto.IDL.Descriptor (descriptorTypeDefinitions, serializeFileDescriptorWithImports)
 import Proto.IDL.Options.Custom (emptyCustomOptionRegistry, extractExtensionOptions, registerCustomOption)
 import Proto.IDL.Parser (parseProtoFile, renderParseError)
+import Proto.IDL.Parser.Resolver (ResolvedProto (..))
 import Proto.Internal.Derive qualified as PDI
+import Proto.Internal.FieldPresence (enumIsClosed, explicitFieldPresence, messageEncodingDelimited, repeatedFieldPacked, resolveFieldPresence)
+import Proto.Internal.JSON qualified as PJ
 import Proto.Internal.JSON.Extension qualified as PJExt
+import Proto.Internal.JSON.WellKnown qualified as WK
 import Proto.Repr
 import Proto.Schema qualified as PS
 import Proto.TH.Metadata qualified as PTM
+import System.Directory (doesFileExist)
+import System.FilePath ((</>))
 import Wireform.Derive.Modifier (MapKeyScalar (..))
 
 
-{- | Message-scoped field name, mirroring the convention the pure-
-text codegen in 'Proto.CodeGen.scopedFieldName' uses:
-
-@scopedHsFieldName \"Account\" \"acct_name\" = "accountAcctName"@
-
-Two messages in the same file with overlapping field names
-(@ConformanceRequest.protobuf_payload@ vs
-@ConformanceResponse.protobuf_payload@) would otherwise both
-emit a record selector @protobufPayload@ at the top level,
-which GHC rejects.
-| Scope-prefixed Haskell type name. Mirrors
+{- | Scope-prefixed Haskell type name. Mirrors
 'Proto.CodeGen.scopedTypeName': joins the parent chain
 with the message's own name using @'@. Empty parent list
 collapses to plain 'hsTypeName'.
@@ -182,20 +205,6 @@ scopedHsTypeName :: [Text] -> Text -> Text
 scopedHsTypeName parents nm = case parents of
   [] -> hsTypeName nm
   _ -> T.intercalate "'" (fmap hsTypeName (parents <> [nm]))
-
-
-{- | Scope-prefixed enum constructor name. Always qualifies
-the value with its enum's Haskell type name so two enums
-(in the same file or across files) can declare identical
-value names without colliding at the Haskell level. For
-top-level enums this gives @EnumName'ValueName@; for nested
-enums it gives @Parent'EnumName'ValueName@.
--}
-scopedHsEnumCon :: [Text] -> Text -> Text -> Text
-scopedHsEnumCon parents enumNm evNm =
-  scopedHsTypeName parents enumNm
-    <> T.singleton '\''
-    <> snakeToPascal evNm
 
 
 {- | The TH 'Name' of the synthetic @<EnumName>'Unknown !Int32@
@@ -211,18 +220,14 @@ unknownConNameFor parents enumNm =
     )
 
 
-scopedHsFieldName :: FieldNaming -> Text -> Text -> Text
-scopedHsFieldName PrefixedFields parentMsg fldName =
-  let prefix = lowerFirst (hsTypeName parentMsg)
-  in escapeReserved (prefix <> upperFirstT (snakeToCamel fldName))
-scopedHsFieldName UnprefixedFields _parentMsg fldName =
-  escapeReserved (snakeToCamel fldName)
-
-
-upperFirstT :: Text -> Text
-upperFirstT t = case T.uncons t of
-  Just (c, rest) -> T.cons (Data.Char.toUpper c) rest
-  Nothing -> t
+thFieldName :: ScopeCtx -> Text -> Name
+thFieldName scope name = mkName . T.unpack $
+  Map.findWithDefault
+    (scopedFieldNameWith (scFieldNaming scope) [scopedTypeName parents] name)
+    (parents, name)
+    (recordSelectorNames (scRecordNames scope))
+  where
+    parents = scParents scope
 
 
 {- | Enum constructor name. The proto-side value names already
@@ -315,7 +320,16 @@ loadProto = loadProtoWith defaultLoadOpts
 field naming, representations, hooks, and include paths.
 -}
 loadProtoWith :: LoadOpts -> FilePath -> Q [Dec]
-loadProtoWith opts path = do
+loadProtoWith opts = loadProtoWithTypeNames opts Map.empty
+
+
+{- | Load a schema with explicit Haskell names for imported types. Keys are
+fully qualified protobuf names, for example @example.Color@. Use this when
+multiple imported schemas generate the same Haskell name or when the type is
+in scope only under a custom module alias.
+-}
+loadProtoWithTypeNames :: LoadOpts -> Map Text Name -> FilePath -> Q [Dec]
+loadProtoWithTypeNames opts typeNames path = do
   addDependentFile path
   contents <- runIO (TIO.readFile path)
   case parseProtoFile path contents of
@@ -334,8 +348,8 @@ loadProtoWith opts path = do
               , fhcFileOptions = protoOptions pf
               , fhcCustomOptions = customOpts
               }
-      importedTLs <- resolveImportedTopLevels (loIncludeDirs opts) pf
-      decls <- protoFileToDeclsScoped (loFieldNaming opts) (loRepConfig opts) hooks importedTLs pf
+      imports <- resolveImportedFiles (loIncludeDirs opts) pf
+      decls <- protoFileToDeclsScoped path (loFieldNaming opts) (loRepConfig opts) hooks typeNames imports pf
       hookDecls <- thOnFile hooks fileCtx
       pure (decls <> hookDecls)
 
@@ -348,65 +362,92 @@ protoFileToDecls = protoFileToDecls' PrefixedFields defaultRepConfig defaultTHHo
 
 
 protoFileToDecls' :: FieldNaming -> RepConfig -> THHooks -> ProtoFile -> Q [Dec]
-protoFileToDecls' naming cfg hooks = protoFileToDeclsScoped naming cfg hooks []
+protoFileToDecls' naming cfg hooks = protoFileToDeclsScoped "" naming cfg hooks Map.empty []
 
 
-{- | Like 'protoFileToDecls'' but with extra top-level declarations from
-imported files folded into the resolution 'ScopeCtx'. Only the target
-file's own top-levels are generated; the imported ones exist solely so
-cross-file named-type references resolve correctly (enum vs. submessage
-classification via 'isEnumName', and the scoped Haskell type name via
-'resolveScopedHsType'). The target file's own top-levels take precedence
-on name clashes.
--}
-protoFileToDeclsScoped :: FieldNaming -> RepConfig -> THHooks -> [TopLevel] -> ProtoFile -> Q [Dec]
-protoFileToDeclsScoped naming cfg hooks importedTopLevels pf = do
+-- | Generate declarations with the source files of the schema's imports.
+protoFileToDeclsScoped
+  :: FilePath -> FieldNaming -> RepConfig -> THHooks
+  -> Map Text Name -> [(FilePath, ProtoFile)] -> ProtoFile -> Q [Dec]
+protoFileToDeclsScoped path naming cfg hooks typeNames imports sourceFile = do
+  pf <- either (fail . T.unpack) pure (resolveFieldPresence sourceFile)
+  verifiedStrings <- either (fail . T.unpack) pure (verifiedStringExtensions pf)
+  let importFiles = Map.fromList (map (\(importName, imported) -> (T.pack importName, imported)) imports)
+  types <- either (fail . T.unpack) pure $
+    restrictOptionImportTypes importFiles pf (thTypeRegistry ((path, pf) : imports))
+  -- Share one descriptor per file, with a distinct binding across file splices.
+  descriptorName <- case mapMaybe topMessage (protoTopLevels pf) of
+    first : _ -> Just <$> newName ("wireformFileDescriptor'" <> T.unpack (scopedHsTypeName [] (msgName first)))
+    [] -> pure Nothing
   let scope =
         ScopeCtx
           { scSyntax = protoSyntax pf
-          , scTopLevels = protoTopLevels pf <> importedTopLevels
+          , scFileOptions = protoOptions pf
+          , scFileDescriptorName = descriptorName
+          , scTypes = types
+          , scLocalTypes = Map.keysSet (descriptorTypeDefinitions pf)
+          , scTypeNames = typeNameIndex types
+          , scImportedTypeNames = Map.mapKeys (T.dropWhile (== '.')) typeNames
           , scPackage = Data.Maybe.fromMaybe T.empty (protoPackage pf)
           , scParents = []
           , scFieldNaming = naming
+          , scRecordNames = recordBindingNames naming (pure . scopedTypeName) (protoTopLevels pf)
+          , scOneofNames = oneofBindingNames (protoTopLevels pf)
+          , scExtensionNames = extensionBindingNames naming (protoPackage pf) (protoTopLevels pf)
+          , scVerifiedStringExtensions = verifiedStrings
+          , scRegistryMessages = registryMessageNames types
           }
-  concat <$> mapM (topLevelToDecls scope cfg hooks) (protoTopLevels pf)
-
-
-{- | Transitively resolve a parsed file's non-WKT @import@s against the
-'loIncludeDirs', returning the imported files' top-level declarations so
-the generator can see cross-file types. @google/protobuf/*@ imports are
-Well-Known Types resolved by 'lookupWkt', so those files are not read.
-Imports that cannot be located in the include dirs (or fail to parse)
-are skipped — the legacy leaf-name fallback still applies — so adding
-this resolution never hard-fails a build that worked before. Every file
-read is registered with 'addDependentFile' for correct recompilation.
--}
-resolveImportedTopLevels :: [FilePath] -> ProtoFile -> Q [TopLevel]
-resolveImportedTopLevels includeDirs pf0 = do
-  (tls, deps) <- runIO (go [] [] [] (nonWktImports pf0))
-  mapM_ addDependentFile deps
-  pure tls
+  decls <- concat <$> mapM (topLevelToDecls scope cfg hooks) (protoTopLevels pf)
+  case descriptorName of
+    Nothing -> pure decls
+    Just name -> do
+      let definitions = Map.restrictKeys
+            (Map.unions (builtinDescriptorTypes : map (descriptorTypeDefinitions . snd) imports))
+            (Map.keysSet types)
+      descriptor <- either (fail . T.unpack) pure (serializeFileDescriptorWithImports definitions path importFiles sourceFile)
+      bytes <- lift descriptor
+      pure (SigD name (ConT ''ByteString) : ValD (VarP name) (NormalB bytes) [] : decls)
   where
-    nonWktImports pf =
-      [importPath i | i <- protoImports pf, not (isWkt (importPath i))]
-    isWkt p = T.pack "google/protobuf/" `T.isPrefixOf` p
-    go _ accTL accDeps [] = pure (accTL, accDeps)
-    go visited accTL accDeps (ip : rest)
-      | ip `elem` visited = go visited accTL accDeps rest
+    topMessage (TLMessage msg) = Just msg
+    topMessage _ = Nothing
+
+
+{- | Transitively resolve a parsed file's @import@s against the
+'loIncludeDirs', returning the parsed files so the generator can see
+cross-file types and their packages. Built-in types can be resolved
+without their source files. Missing or invalid ordinary imports retain
+the legacy fallback. Option imports require their schema so that types
+defined there can be excluded from name resolution.
+-}
+resolveImportedFiles :: [FilePath] -> ProtoFile -> Q [(FilePath, ProtoFile)]
+resolveImportedFiles includeDirs pf0 = do
+  result <- runIO (go Set.empty [] [] (protoImports pf0))
+  (files, deps) <- either fail pure result
+  mapM_ addDependentFile deps
+  pure files
+  where
+    go _ accFiles accDeps [] = pure (Right (accFiles, accDeps))
+    go visited accFiles accDeps (imp : rest)
+      | Set.member path visited = go visited accFiles accDeps rest
       | otherwise = do
-          mfp <- findInclude includeDirs (T.unpack ip)
+          mfp <- findInclude includeDirs (T.unpack path)
           case mfp of
-            Nothing -> go (ip : visited) accTL accDeps rest
+            Nothing -> unavailable accDeps ("cannot find option import " <> T.unpack path <> " in loIncludeDirs")
             Just fp -> do
               src <- TIO.readFile fp
               case parseProtoFile fp src of
-                Left _ -> go (ip : visited) accTL accDeps rest
+                Left err -> unavailable (fp : accDeps) (renderParseError err)
                 Right ipf ->
                   go
-                    (ip : visited)
-                    (accTL <> protoTopLevels ipf)
+                    (Set.insert path visited)
+                    (accFiles <> [(T.unpack path, ipf)])
                     (fp : accDeps)
-                    (nonWktImports ipf <> rest)
+                    (protoImports ipf <> rest)
+      where
+        path = importPath imp
+        unavailable deps message
+          | importModifier imp == Just ImportOption = pure (Left message)
+          | otherwise = go visited accFiles deps rest
 
 
 -- | First existing @dir '</>' rel@ across the include dirs, if any.
@@ -429,7 +470,12 @@ broke on the wire.
 -}
 data ScopeCtx = ScopeCtx
   { scSyntax :: !Syntax
-  , scTopLevels :: ![TopLevel]
+  , scFileOptions :: ![OptionDef]
+  , scFileDescriptorName :: !(Maybe Name)
+  , scTypes :: !TypeRegistry
+  , scLocalTypes :: !(Set.Set Text)
+  , scTypeNames :: !(Map Text [Text])
+  , scImportedTypeNames :: !(Map Text Name)
   , scPackage :: !Text
   {- ^ Proto package as declared in the file (empty string when
   the file has no @package@ statement). Drives the
@@ -448,100 +494,82 @@ data ScopeCtx = ScopeCtx
   {- ^ How to name record fields (prefixed with message name
   or bare).
   -}
+  , scExtensionNames :: !(Map Text ExtensionNames)
+  , scRecordNames :: !RecordBindingNames
+  , scOneofNames :: !OneofBindingNames
+  , scVerifiedStringExtensions :: !(Map Text [Int])
+  , scRegistryMessages :: !(Set.Set Text)
   }
 
 
-{- | Resolve a referenced type name to the scope chain it
-lives under, so callers can compute the matching Haskell
-type name with 'scopedHsTypeName'. The lookup walks the
-file's top-level declarations, considering both top-level
-and nested messages \/ enums. If the name isn't found, we
-fall back to the empty scope (treats it as a top-level
-reference, which matches the legacy behaviour).
-
-Proto resolution rules want us to search the lexical scope
-inside-out, but for the conformance test (and most real
-schemas) the simple "find anywhere in this file" rule is
-sufficient: the upstream resolver has already de-aliased
-imports so the leaf name is unambiguous within a file.
--}
-findTypeScope :: ScopeCtx -> Text -> [Text]
-findTypeScope scope t =
-  let leaf = leafOf t
-      tryTopLevel (TLMessage m) = searchMessage [] m leaf
-      tryTopLevel (TLEnum e)
-        | enumName e == leaf = Just []
-        | otherwise = Nothing
-      tryTopLevel _ = Nothing
-
-      -- DFS, returning the parent path (excluding the matched
-      -- type's own name).
-      searchMessage parents m needle
-        | msgName m == needle = Just parents
-        | otherwise =
-            let parents' = parents <> [msgName m]
-                fromElts = foldr step Nothing (msgElements m)
-                step elt acc = acc <|> searchElt parents' elt needle
-            in fromElts
-      searchElt parents (MEMessage inner) needle =
-        searchMessage parents inner needle
-      searchElt parents (MEEnum e) needle
-        | enumName e == needle = Just parents
-        | otherwise = Nothing
-      searchElt _ _ _ = Nothing
-
-      -- First top-level that matches wins.
-      foldTL acc tl = acc <|> tryTopLevel tl
-  in Data.Maybe.fromMaybe [] (foldl foldTL Nothing (scTopLevels scope))
+thTypeRegistry :: [(FilePath, ProtoFile)] -> TypeRegistry
+thTypeRegistry = buildTypeRegistry defaultGenerateOpts . map resolved
   where
-    leafOf x = case T.splitOn (T.pack ".") x of
-      [] -> x
-      ps -> last ps
+    resolved (path, file) = (path, ResolvedProto file path Map.empty)
 
 
-{- | Compute the scoped Haskell type name for a referenced
-proto type, using 'findTypeScope' to discover its nesting
-and 'scopedHsTypeName' to assemble the Haskell identifier.
--}
-resolveScopedHsType :: ScopeCtx -> Text -> Text
-resolveScopedHsType scope t =
-  scopedHsTypeName (findTypeScope scope t) (leafOf t)
+lookupScopedType :: ScopeCtx -> Text -> Maybe (Text, TypeInfo)
+lookupScopedType scope name = do
+  let registry = scTypes scope
+      pkg = scPackage scope
+  fqn <- resolveTypeKey registry (if T.null pkg then Nothing else Just pkg) (scParents scope) name
+  info <- Map.lookup fqn registry
+  pure (fqn, info)
+
+
+resolveHsTypeName :: ScopeCtx -> Text -> Q Name
+resolveHsTypeName scope name = case lookupScopedType scope name of
+  Nothing
+    | any (`Set.member` scLocalTypes scope) fallbackTypes ->
+        fail ("Proto.TH: cannot resolve " <> T.unpack name
+          <> " without shadowing a local type. Add the defining schema's import root to loIncludeDirs.")
+    | otherwise -> pure (mkName (T.unpack fallback))
+  Just (fqn, info)
+    | Set.member fqn (scLocalTypes scope) -> pure (mkName (T.unpack (tiHsName info)))
+    | Just explicit <- Map.lookup fqn (scImportedTypeNames scope) -> pure explicit
+    | Just (wkt, _) <- lookupWkt fqn -> pure wkt
+    | otherwise -> do
+        let hsName = tiHsName info
+            qualified = tiModule info <> "." <> hsName
+            names = Map.findWithDefault [] hsName (scTypeNames scope)
+            others = filter (/= fqn) names
+            localCollision = any (`Set.member` scLocalTypes scope) others
+            importedCollision = any
+              (\other -> Set.notMember other (scLocalTypes scope) && Map.notMember other builtinDescriptorTypes)
+              others
+            ambiguous = fail ("Proto.TH: cannot identify imported type " <> T.unpack fqn
+              <> ". Supply its qualified Haskell name with loadProtoWithTypeNames.")
+        qualifiedName <- lookupTypeName (T.unpack qualified)
+        case qualifiedName of
+          Just resolved -> pure resolved
+          Nothing
+            | importedCollision -> ambiguous
+            | otherwise -> do
+                unqualified <- lookupTypeName (T.unpack hsName)
+                case unqualified of
+                  Just resolved -> pure resolved
+                  Nothing
+                    | localCollision -> ambiguous
+                    | otherwise -> pure (mkName (T.unpack hsName))
   where
-    leafOf x = case T.splitOn (T.pack ".") x of
-      [] -> x
-      ps -> last ps
+    fallback = hsTypeName (lastProtoSegment name)
+    fallbackTypes = Map.findWithDefault [] fallback (scTypeNames scope)
 
 
-{- | Walk a 'ScopeCtx' looking for an enum named @t@ at any
-nesting depth. Used by the bridge to decide PFEnum vs.
-PFSubmessage for an 'FTNamed' reference.
--}
+typeNameIndex :: TypeRegistry -> Map Text [Text]
+typeNameIndex =
+  Map.foldrWithKey (\fqn info -> Map.insertWith (<>) (tiHsName info) [fqn]) Map.empty
+
+
 isEnumName :: ScopeCtx -> Text -> Bool
-isEnumName scope t = anyTopLevel (scTopLevels scope)
-  where
-    -- Match either by short name (@Color@) or by fully-qualified
-    -- nested name (@MyMessage.Color@). The proto resolver upstream
-    -- has already de-aliased imports, so a literal Text comparison
-    -- is sufficient.
-    matchesEnumLeaf n = leafOf n == leafOf t
-    leafOf x = case T.splitOn (T.pack ".") x of
-      [] -> x
-      ps -> last ps
-    anyTopLevel = any topMatch
-    topMatch (TLEnum ed) = matchesEnumLeaf (enumName ed)
-    topMatch (TLMessage msg) = anyMessageElt msg
-    topMatch _ = False
-    anyMessageElt msg = any eltMatch (msgElements msg)
-    eltMatch (MEEnum ed) = matchesEnumLeaf (enumName ed)
-    eltMatch (MEMessage m) = anyMessageElt m
-    eltMatch _ = False
+isEnumName scope = maybe False ((== TKEnum) . tiKind . snd) . lookupScopedType scope
 
 
 topLevelToDecls :: ScopeCtx -> RepConfig -> THHooks -> TopLevel -> Q [Dec]
 topLevelToDecls scope cfg hooks = \case
   TLMessage msg -> messageToDecls'' scope cfg hooks msg
-  TLEnum ed -> enumToDecls'' (scPackage scope) (scParents scope) hooks ed
-  TLExtend owner fields -> extendToDecls (scPackage scope) owner fields
+  TLEnum ed -> enumToDeclsScoped scope hooks ed
+  TLExtend owner fields -> extendToDecls scope owner fields
   _ -> pure []
 
 
@@ -557,13 +585,24 @@ builds the scope from the whole file) for new call sites.
 -}
 messageToDecls' :: RepConfig -> THHooks -> MessageDef -> Q [Dec]
 messageToDecls' cfg hooks msg =
-  let scope =
-        ScopeCtx
+  let file = ProtoFile Proto3 Nothing [] [] [TLMessage msg] Nothing
+      types = thTypeRegistry [("", file)]
+      scope = ScopeCtx
           { scSyntax = Proto3
-          , scTopLevels = [TLMessage msg]
+          , scFileOptions = []
+          , scFileDescriptorName = Nothing
+          , scTypes = types
+          , scLocalTypes = Map.keysSet (descriptorTypeDefinitions file)
+          , scTypeNames = typeNameIndex types
+          , scImportedTypeNames = Map.empty
           , scPackage = T.empty
           , scParents = []
           , scFieldNaming = PrefixedFields
+          , scRecordNames = recordBindingNames PrefixedFields (pure . scopedTypeName) [TLMessage msg]
+          , scOneofNames = oneofBindingNames [TLMessage msg]
+          , scExtensionNames = extensionBindingNames PrefixedFields Nothing [TLMessage msg]
+          , scVerifiedStringExtensions = Map.empty
+          , scRegistryMessages = registryMessageNames types
           }
   in messageToDecls'' scope cfg hooks msg
 
@@ -590,21 +629,17 @@ messageToDecls'' scopeCtx cfg hooks msg = do
         , mhcFqProtoName = msgName msg
         , mhcOptions = messageOptions msg
         }
-    -- Push this message onto the scope chain for nested types.
+    -- Fields and nested declarations both resolve names inside this message.
     childScope = scopeCtx {scParents = scParents scopeCtx <> [msgName msg]}
+    fqName = T.intercalate "." (filter (not . T.null) (scPackage scopeCtx : scParents childScope))
 
   nestedDecls <-
     concat
       <$> mapM
         ( \case
             MEMessage inner -> messageToDecls'' childScope cfg hooks inner
-            MEEnum ed ->
-              enumToDecls''
-                (scPackage childScope)
-                (scParents childScope)
-                hooks
-                ed
-            MEExtend owner fields -> extendToDecls (scPackage childScope) owner fields
+            MEEnum ed -> enumToDeclsScoped childScope hooks ed
+            MEExtend owner fields -> extendToDecls childScope owner fields
             _ -> pure []
         )
         (msgElements msg)
@@ -613,9 +648,9 @@ messageToDecls'' scopeCtx cfg hooks msg = do
   -- declaration so that GHC's renamer sees the constructor names
   -- in scope when the wire codecs splice (the codec splice
   -- references @ovConstructor@ at the term level).
-  oneofDecs <- mkOneofDataDecs scopeCtx tyName fields
-  dataDec <- mkDataDec scopeCtx tyName fields
-  defaultDec <- mkDefaultDec scopeCtx tyName fields
+  oneofDecs <- mkOneofDataDecs childScope fields
+  dataDec <- mkDataDec childScope tyName fields
+  defaultDec <- mkDefaultDec childScope tyName fields
   -- All wire codecs (MessageEncode / MessageSize / MessageDecode)
   -- now come from 'Proto.Internal.Derive' via the IDL bridge,
   -- including oneofs (whose sum types are emitted by
@@ -624,50 +659,73 @@ messageToDecls'' scopeCtx cfg hooks msg = do
   -- impossible map key (which the parser shouldn't accept) the
   -- splice fails with a clear message rather than silently
   -- generating broken code.
-  pfs <- traverse (fieldSpecToProtoField scopeCtx tyName) fields
-  codecDecs <- messageCodecsViaBridge (scFieldNaming scopeCtx == UnprefixedFields) tyName pfs
-  hasExtDec <- mkHasExtensionsInstance (scFieldNaming scopeCtx == UnprefixedFields) tyName (msgName msg)
+  pfs <- traverse (fieldSpecToProtoField childScope) fields
+  codecDecs <- messageCodecsViaBridge childScope
+    (Map.findWithDefault [] fqName (scVerifiedStringExtensions scopeCtx)) tyName pfs
+  hasExtDec <- mkHasExtensionsInstance childScope tyName
   hookDecls <- thOnMessage hooks hookCtx
 
   let defName = mkName ("default" <> nameBase tyName)
-      fqName =
-        T.intercalate
-          (T.singleton '.')
-          (filter (not . T.null) ([scPackage scopeCtx] <> scParents scopeCtx <> [msgName msg]))
-      metaFields = fmap (fieldSpecToMetaField scopeCtx tyName) fields
+      metaFields = fmap (fieldSpecToMetaField childScope) fields
+      known = Data.Maybe.isJust . lookupScopedType childScope
+  canonicalAny <- usesCanonicalAnyJSON fqName fields
+  oneofMetadata <- case concatMap (oneofDescriptorE childScope) fields of
+    [] -> pure Nothing
+    oneofs -> Just . ListE <$> sequence oneofs
+  enumMetadata <- case mapMaybe (closedEnumFieldE childScope) fields of
+    [] -> pure Nothing
+    enums -> Just <$> [|Map.mapMaybe id (Map.fromList $(ListE <$> sequence enums))|]
+  childMetadata <- case concatMap (submessageEntriesE childScope) fields of
+    [] -> pure Nothing
+    children -> Just <$> [|Map.fromList $(ListE <$> sequence children)|]
+  mapMetadata <- case mapMaybe (mapValueDecoderE childScope) fields of
+    [] -> pure Nothing
+    validators -> Just <$> [|Map.fromList $(ListE <$> sequence validators)|]
+  jsonNormalize <-
+    if canonicalAny
+      then Just <$> [|WK.normalizeAnyEnumJSON WK.anyJsonRegistry|]
+      else case filter (known . njfType) (namedJSONFields (msgElements msg)) of
+        [] -> pure Nothing
+        named -> Just <$> [|PJ.normalizeEnumJSONFields $(ListE <$> traverse (namedJSONRule childScope) named)|]
   protoMsgDecs <-
     PTM.mkProtoMessageInstance
       tyName
       fqName
       (scPackage scopeCtx)
       defName
+      (scFileDescriptorName scopeCtx)
       metaFields
+      oneofMetadata
+      enumMetadata
+      childMetadata
+      mapMetadata
+      jsonNormalize
   -- The unknown-fields selector name (always present on
   -- TH-generated messages) — passing it through lets the JSON
   -- splice patch in proto2 extension entries via the runtime
   -- registry. We use the same naming convention as
   -- 'unknownFieldsName'.
-  let ufSelName = unknownFieldsName tyName
+  let ufSelName = unknownFieldsName childScope tyName
       hasExts = any isExt (msgElements msg)
         where
           isExt (MEExtensions _ _) = True
           isExt _ = False
       aesonUfSel = if hasExts then Just ufSelName else Nothing
+      registryContext =
+        if Set.member fqName (scRegistryMessages scopeCtx)
+          then [AppT (ConT ''Reflection.Given) (ConT ''PJExt.ExtensionRegistry)]
+          else []
   let recDot = scFieldNaming scopeCtx == UnprefixedFields
   aesonDecs <-
-    PTM.mkAesonInstancesForMessage
-      tyName
-      fqName
-      aesonUfSel
-      defName
-      recDot
-      metaFields
+    if canonicalAny
+      then PTM.mkAnyAesonInstances tyName
+      else PTM.mkAesonInstancesForMessage registryContext tyName fqName aesonUfSel defName recDot metaFields
   hashableDec <- PTM.mkHashableInstanceForMessage tyName metaFields
 
   -- Per-oneof carrier sum: ToJSON / FromJSON / Hashable. The data
   -- declaration was emitted by 'mkOneofDataDecs' just above, so
   -- the constructor names line up with what we splice here.
-  oneofSatellites <- fmap concat (mapM (oneofSatelliteDecs tyName) fields)
+  oneofSatellites <- fmap concat (mapM (oneofSatelliteDecs childScope) fields)
 
   addModFinalizer (putDoc (DeclDoc tyName) (messageHaddock msg fields))
   addModFinalizer
@@ -680,7 +738,7 @@ messageToDecls'' scopeCtx cfg hooks msg = do
     )
 
   -- HasField instances for lens-style access via Proto.Schema.HasField
-  hasFieldDecs <- mkHasFieldInstances scopeCtx tyName fields
+  hasFieldDecs <- mkHasFieldInstances childScope tyName fields
 
   -- Monoid: mempty = defaultFoo (must come after Semigroup in codecDecs)
   let monoidDec =
@@ -694,7 +752,7 @@ messageToDecls'' scopeCtx cfg hooks msg = do
   -- discovery splice. Must come AFTER protoMsgDecs and aesonDecs since
   -- IsMessage requires ProtoMessage / Aeson.ToJSON / Aeson.FromJSON as
   -- superclasses.
-  let ismDec = PDI.mkIsMessageInstance (ConT tyName)
+  let ismDec = PDI.mkIsMessageInstance registryContext (ConT tyName)
 
   pure
     ( nestedDecls
@@ -714,21 +772,47 @@ messageToDecls'' scopeCtx cfg hooks msg = do
     )
 
 
+-- Use the same canonical JSON shape as standalone codegen when splicing
+-- the well-known schema itself. Custom field representations still use
+-- the general record JSON emitter.
+usesCanonicalAnyJSON :: Text -> [FieldSpec] -> Q Bool
+usesCanonicalAnyJSON "google.protobuf.Any"
+  [FSField "type_url" 1 Nothing (FTScalar SString) urlRep _ _, FSField "value" 2 Nothing (FTScalar SBytes) valueRep _ _] =
+    (&&)
+      <$> ((== ConT ''Text) <$> stringType (fieldString urlRep))
+      <*> ((== ConT ''ByteString) <$> bytesType (fieldBytes valueRep))
+usesCanonicalAnyJSON _ _ = pure False
+
+
+namedJSONRule :: ScopeCtx -> NamedJSONField -> Q Exp
+namedJSONRule scope field = do
+  ty <- fieldTypeInnerScopedQ scope defaultFieldRep (FTNamed (njfType field))
+  let proxy = pure (SigE (ConE 'Proxy) (AppT (ConT ''Proxy) ty))
+      clean
+        | isEnumName scope (njfType field) = [|PJ.normalizeEnumJSONValue $proxy|]
+        | otherwise = [|Just . PS.protoJSONIgnoreUnknownEnumNames $proxy|]
+      transform = case njfShape field of
+        NamedJSONSingle -> clean
+        NamedJSONRepeated -> [|PJ.normalizeEnumJSONArray $clean|]
+        NamedJSONMap -> [|PJ.normalizeEnumJSONMap $clean|]
+  [|PJ.EnumJSONField $(textLitE (njfJsonName field)) $(textLitE (njfProtoName field)) $transform|]
+
+
 {- | Synthesise the @MessageEncode \/ MessageSize \/ MessageDecode@
 triple via 'Proto.Internal.Derive.synthesiseProtoInstancesWith'
 with unknown-field preservation enabled. Used for every
 'loadProto'-generated message.
 -}
-messageCodecsViaBridge :: Bool -> Name -> [PDI.ProtoField] -> Q [Dec]
-messageCodecsViaBridge recDot tyName pfs = do
+messageCodecsViaBridge :: ScopeCtx -> [Int] -> Name -> [PDI.ProtoField] -> Q [Dec]
+messageCodecsViaBridge scope verifiedStrings tyName pfs = do
   let meta =
         PDI.MessageMeta
-          { PDI.mmUnknownFieldsSel = Just (unknownFieldsName tyName)
-          , PDI.mmRecordDotReads = recDot
+          { PDI.mmUnknownFieldsSel = Just (unknownFieldsName scope tyName)
+          , PDI.mmRecordDotReads = scFieldNaming scope == UnprefixedFields
           }
   enc <- PDI.mkEncodeInstanceWith meta (ConT tyName) pfs
   siz <- PDI.mkSizeInstanceWith meta (ConT tyName) pfs
-  dec <- PDI.mkDecodeInstanceWith meta (ConT tyName) tyName pfs
+  dec <- PDI.mkDecodeInstanceWithVerifiedStrings verifiedStrings meta (ConT tyName) tyName pfs
   semi <- PDI.mkSemigroupInstanceWith meta (ConT tyName) tyName pfs
   pure [enc, siz, dec, semi]
 
@@ -743,7 +827,7 @@ messageHaddock msg fields =
 
 
 fieldHaddock :: FieldSpec -> String
-fieldHaddock (FSField name num lbl ft _ _) =
+fieldHaddock (FSField name num lbl ft _ _ _) =
   "* @"
     <> T.unpack name
     <> "@ ("
@@ -752,7 +836,7 @@ fieldHaddock (FSField name num lbl ft _ _) =
     <> ", field "
     <> show num
     <> ")\n"
-fieldHaddock (FSMap name num kt vt _) =
+fieldHaddock (FSMap name num kt vt _ _) =
   "* @"
     <> T.unpack name
     <> "@ (map<"
@@ -809,6 +893,7 @@ data FieldSpec
       , fsType :: FieldType
       , fsRep :: FieldRep
       , fsOptions :: [OptionDef]
+      , fsLegacyGroup :: Bool
       }
   | FSMap
       { fsName :: Text
@@ -820,6 +905,7 @@ data FieldSpec
       rep of the value type and the JSON helper choice, the
       same way 'fsRep' does for 'FSField'.
       -}
+      , fsOptions :: [OptionDef]
       }
   | FSOneof
       { fsName :: Text
@@ -835,8 +921,8 @@ data FieldSpec
 
 
 fsFieldName :: FieldSpec -> Text
-fsFieldName (FSField n _ _ _ _ _) = n
-fsFieldName (FSMap n _ _ _ _) = n
+fsFieldName (FSField n _ _ _ _ _ _) = n
+fsFieldName (FSMap n _ _ _ _ _) = n
 fsFieldName (FSOneof n _) = n
 
 
@@ -849,6 +935,7 @@ extractMessageFields cfg msgN = concatMap go
           , fsNum = unFieldNumber (fieldNumber fd)
           , fsLabel = fieldLabel fd
           , fsType = fieldType fd
+          , fsLegacyGroup = isLegacyGroupField fd
           , fsRep =
               ( if configUnboxedRepeated cfg
                   then autoUnboxRepeated (fieldLabel fd) (fieldType fd)
@@ -872,6 +959,7 @@ extractMessageFields cfg msgN = concatMap go
                 (configAdapterRegistry cfg)
                 (mapOptions mf)
                 (lookupFieldRep msgN (mapFieldName mf) cfg)
+          , fsOptions = mapOptions mf
           }
       ]
     go (MEOneof od) =
@@ -898,7 +986,7 @@ extractMessageFields cfg msgN = concatMap go
 mkDataDec :: ScopeCtx -> Name -> [FieldSpec] -> Q Dec
 mkDataDec scope tyName fields = do
   recFields <- fmap concat (mapM mkField fields)
-  let unknownFieldEntry = mkUnknownFieldsField tyName
+  let unknownFieldEntry = mkUnknownFieldsField scope tyName
   let con = recC tyName (fmap pure (recFields <> [unknownFieldEntry]))
   dataD
     (pure [])
@@ -910,21 +998,20 @@ mkDataDec scope tyName fields = do
     , derivClause (Just AnyclassStrategy) [conT ''NFData]
     ]
   where
-    parentName = T.pack (nameBase tyName)
     mkField :: FieldSpec -> Q [VarBangType]
-    mkField (FSField name _ lbl ft rep _) = do
-      let fname = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
+    mkField (FSField name _ lbl ft rep _ _) = do
+      let fname = thFieldName scope name
       ty <- fieldTypeToTH scope lbl ft rep
       pure [(fname, Bang NoSourceUnpackedness SourceStrict, ty)]
-    mkField (FSMap name _ kt vt rep) = do
-      let fname = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
+    mkField (FSMap name _ kt vt rep _) = do
+      let fname = thFieldName scope name
       kty <- scalarToTH kt
       vty <- fieldTypeInnerScopedQ scope rep vt
       t <- appT (appT (conT ''Map) (pure kty)) (pure vty)
       pure [(fname, Bang NoSourceUnpackedness SourceStrict, t)]
     mkField (FSOneof name _ofs) = do
-      let fname = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
-          oneofTyName = oneofSumName tyName name
+      let fname = thFieldName scope name
+          oneofTyName = oneofSumName scope name
       ty <- appT (conT ''Maybe) (conT oneofTyName)
       pure [(fname, Bang NoSourceUnpackedness SourceStrict, ty)]
 
@@ -937,27 +1024,25 @@ mkHasFieldInstances :: ScopeCtx -> Name -> [FieldSpec] -> Q [Dec]
 mkHasFieldInstances scope tyName fields =
   fmap concat (mapM mkOne fields)
   where
-    parentName = T.pack (nameBase tyName)
+    labels = fieldLabelNames (map fsFieldName fields)
+    label name = Map.findWithDefault (snakeToCamel name) name labels
     recDot = scFieldNaming scope == UnprefixedFields
     mkOne :: FieldSpec -> Q [Dec]
-    mkOne (FSField name _ lbl ft rep _) = do
-      let hsName = scopedHsFieldName (scFieldNaming scope) parentName name
-          fname = mkName (T.unpack hsName)
+    mkOne (FSField name _ lbl ft rep _ _) = do
+      let fname = thFieldName scope name
       ty <- fieldTypeToTH scope lbl ft rep
-      mkHasFieldDec recDot tyName (snakeToCamel name) fname ty
-    mkOne (FSMap name _ kt vt rep) = do
-      let hsName = scopedHsFieldName (scFieldNaming scope) parentName name
-          fname = mkName (T.unpack hsName)
+      mkHasFieldDec recDot tyName (label name) fname ty
+    mkOne (FSMap name _ kt vt rep _) = do
+      let fname = thFieldName scope name
       kty <- scalarToTH kt
       vty <- fieldTypeInnerScopedQ scope rep vt
       ty <- appT (appT (conT ''Map) (pure kty)) (pure vty)
-      mkHasFieldDec recDot tyName (snakeToCamel name) fname ty
+      mkHasFieldDec recDot tyName (label name) fname ty
     mkOne (FSOneof name _) = do
-      let hsName = scopedHsFieldName (scFieldNaming scope) parentName name
-          fname = mkName (T.unpack hsName)
-          oneofTyName = oneofSumName tyName name
+      let fname = thFieldName scope name
+          oneofTyName = oneofSumName scope name
       ty <- appT (conT ''Maybe) (conT oneofTyName)
-      mkHasFieldDec recDot tyName (snakeToCamel name) fname ty
+      mkHasFieldDec recDot tyName (label name) fname ty
 
 
 mkHasFieldDec :: Bool -> Name -> Text -> Name -> Type -> Q [Dec]
@@ -1006,31 +1091,22 @@ mkHasFieldDec recDot tyName fnameStr fname ty = do
 -- messages that share a oneof name (e.g. @oneof choice@ in two
 -- different messages).
 
-{- | Sum type 'Name' for one oneof. Mirrors 'Proto.CodeGen.scopedTypeName'
-conventions but uses the TH parent name as scope.
--}
-oneofSumName :: Name -> Text -> Name
-oneofSumName parentTy ooName =
-  mkName (nameBase parentTy <> "'" <> T.unpack (snakeToPascal ooName))
+-- | Sum type 'Name' for one oneof.
+oneofSumName :: ScopeCtx -> Text -> Name
+oneofSumName scope = mkName . T.unpack . oneofTypeName (scOneofNames scope) (scParents scope)
 
 
 -- | Constructor 'Name' for one variant of a oneof's sum type.
-oneofConTHName :: Name -> Text -> Text -> Name
-oneofConTHName parentTy ooName fieldN =
-  mkName
-    ( nameBase parentTy
-        <> "'"
-        <> T.unpack (snakeToPascal ooName)
-        <> "'"
-        <> T.unpack (snakeToPascal fieldN)
-    )
+oneofConTHName :: ScopeCtx -> Text -> Text -> Name
+oneofConTHName scope oneof =
+  mkName . T.unpack . oneofConstructorName (scOneofNames scope) (scParents scope) oneof
 
 
 {- | Emit the sum data declaration for every 'FSOneof' field on the
 supplied message.
 -}
-mkOneofDataDecs :: ScopeCtx -> Name -> [FieldSpec] -> Q [Dec]
-mkOneofDataDecs scope parentTy fields =
+mkOneofDataDecs :: ScopeCtx -> [FieldSpec] -> Q [Dec]
+mkOneofDataDecs scope fields =
   mapM oneofToDec (mapMaybe extractOneof fields)
   where
     extractOneof (FSOneof n ofs) = Just (n, ofs)
@@ -1038,7 +1114,7 @@ mkOneofDataDecs scope parentTy fields =
 
     oneofToDec :: (Text, [(OneofField, FieldRep)]) -> Q Dec
     oneofToDec (ooName, ofs) = do
-      let tyName = oneofSumName parentTy ooName
+      let tyName = oneofSumName scope ooName
       cons <- mapM (mkCon ooName) ofs
       dataD
         (pure [])
@@ -1052,7 +1128,7 @@ mkOneofDataDecs scope parentTy fields =
 
     mkCon :: Text -> (OneofField, FieldRep) -> Q Con
     mkCon ooName (f, rep) = do
-      let conName = oneofConTHName parentTy ooName (oneofFieldName f)
+      let conName = oneofConTHName scope ooName (oneofFieldName f)
       ty <- fieldTypeInnerScopedQ scope rep (oneofFieldType f)
       pure (NormalC conName [(Bang NoSourceUnpackedness SourceStrict, ty)])
 
@@ -1063,9 +1139,12 @@ lower-casing the leading character and appending
 @UnknownFields@ (matching the convention the pure-Doc
 codegen in "Proto.CodeGen" follows).
 -}
-unknownFieldsName :: Name -> Name
-unknownFieldsName tyName =
-  mkName (lowerFirstStr (nameBase tyName) <> "UnknownFields")
+unknownFieldsName :: ScopeCtx -> Name -> Name
+unknownFieldsName scope tyName =
+  mkName . T.unpack $
+    Map.findWithDefault fallback (scParents scope) (recordUnknownNames (scRecordNames scope))
+  where
+    fallback = T.pack (lowerFirstStr (nameBase tyName)) <> "UnknownFields"
 
 
 lowerFirstStr :: String -> String
@@ -1074,9 +1153,9 @@ lowerFirstStr [] = []
 
 
 -- | The VarBangType entry for a TH record's unknown-fields slot.
-mkUnknownFieldsField :: Name -> VarBangType
-mkUnknownFieldsField tyName =
-  ( unknownFieldsName tyName
+mkUnknownFieldsField :: ScopeCtx -> Name -> VarBangType
+mkUnknownFieldsField scope tyName =
+  ( unknownFieldsName scope tyName
   , Bang NoSourceUnpackedness SourceStrict
   , AppT ListT (ConT ''Decode.UnknownField)
   )
@@ -1085,7 +1164,7 @@ mkUnknownFieldsField tyName =
 fieldTypeToTH :: ScopeCtx -> Maybe FieldLabel -> FieldType -> FieldRep -> Q Type
 fieldTypeToTH scope lbl ft rep = case lbl of
   Just Repeated -> repeatedTypeQ (fieldRepeated rep) (fieldTypeInnerScopedQ scope rep ft)
-  Just Optional -> appT (conT ''Maybe) (fieldTypeInnerScopedQ scope rep ft)
+  _ | explicitFieldPresence lbl -> appT (conT ''Maybe) (fieldTypeInnerScopedQ scope rep ft)
   _ -> case ft of
     -- Singular submessage fields are implicitly optional in proto3
     -- (the sender can omit them, and consumers must distinguish
@@ -1111,18 +1190,14 @@ fieldTypeInnerScopedQ scope rep = \case
   FTScalar SString -> stringTypeQ (fieldString rep)
   FTScalar SBytes -> bytesTypeQ (fieldBytes rep)
   FTScalar s -> scalarToTH s
-  FTNamed n
-    | Just (tyN, _) <- lookupWkt n -> conT tyN
-    | otherwise ->
-        conT (mkName (T.unpack (resolveScopedHsType scope n)))
+  FTNamed n -> conT =<< resolveHsTypeName scope n
 
 
 {- | Well-Known-Type registry. Maps a fully-qualified proto name
 (@google.protobuf.Timestamp@) to the splice 'Name' of the
 pre-generated Haskell type plus the splice 'Name' of its
-@default<TypeName>@ value. Routes 'loadProto' through these
-existing modules whenever a @.proto@ file references a WKT
-(which @loadProto@ doesn't yet follow imports for).
+@default<TypeName>@ value. Routes imported well-known types to
+their existing generated modules.
 
 The returned 'Name's are fully-resolved (produced by the @''Type@ \/
 @'value@ name quotes against the imported @Wkt*@ modules above), so the
@@ -1132,12 +1207,13 @@ require the consumer to import the corresponding
 WKT is a one-line entry here plus the matching qualified import above.
 -}
 lookupWkt :: Text -> Maybe (Name, Name)
-lookupWkt n = case T.unpack n of
+lookupWkt n = case T.dropWhile (== '.') n of
   -- Single-message WKTs.
   "google.protobuf.Timestamp" -> Just (''WktTimestamp.Timestamp, 'WktTimestamp.defaultTimestamp)
   "google.protobuf.Duration" -> Just (''WktDuration.Duration, 'WktDuration.defaultDuration)
   "google.protobuf.Empty" -> Just (''WktEmpty.Empty, 'WktEmpty.defaultEmpty)
   "google.protobuf.FieldMask" -> Just (''WktFieldMask.FieldMask, 'WktFieldMask.defaultFieldMask)
+  "google.protobuf.SourceContext" -> Just (''WktSourceContext.SourceContext, 'WktSourceContext.defaultSourceContext)
   "google.protobuf.Any" -> Just (''WktAny.Any, 'WktAny.defaultAny)
   "google.protobuf.Struct" -> Just (''WktStruct.Struct, 'WktStruct.defaultStruct)
   "google.protobuf.Value" -> Just (''WktStruct.Value, 'WktStruct.defaultValue)
@@ -1197,19 +1273,18 @@ scalarToTH = \case
 mkDefaultDec :: ScopeCtx -> Name -> [FieldSpec] -> Q [Dec]
 mkDefaultDec scope tyName fields = do
   let defName = mkName ("default" <> nameBase tyName)
-      parentName = T.pack (nameBase tyName)
   sig <- sigD defName (conT tyName)
   defFields <-
     mapM
       ( \fs -> do
           val <- defaultValueExpr scope fs
-          pure (mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName (fsFieldName fs))), val)
+          pure (thFieldName scope (fsFieldName fs), val)
       )
       fields
   -- Every TH-generated record now carries an empty unknown-fields
   -- list. Proto2 extensions travel through this field; see
   -- "Proto.Extension" for the typed accessors.
-  let ufDefault = (unknownFieldsName tyName, ListE [])
+  let ufDefault = (unknownFieldsName scope tyName, ListE [])
   body <-
     valD
       (varP defName)
@@ -1219,9 +1294,9 @@ mkDefaultDec scope tyName fields = do
 
 
 defaultValueExpr :: ScopeCtx -> FieldSpec -> Q Exp
-defaultValueExpr scope (FSField _ _ lbl ft rep _) = case lbl of
+defaultValueExpr scope (FSField _ _ lbl ft rep _ _) = case lbl of
   Just Repeated -> emptyRepeatedQ (fieldRepeated rep)
-  Just Optional -> conE 'Nothing
+  _ | explicitFieldPresence lbl -> conE 'Nothing
   _ -> case ft of
     FTScalar SBool -> conE 'False
     FTScalar SString -> emptyStringQ (fieldString rep)
@@ -1235,52 +1310,10 @@ defaultValueExpr scope (FSField _ _ lbl ft rep _) = case lbl of
           -- instance's @toEnum@ catch-all returns the first
           -- declared constructor, which is the closest thing to a
           -- spec-compliant fallback.
-          enumZeroDefaultE scope n
+          [|toEnum 0|]
       | otherwise -> conE 'Nothing
 defaultValueExpr _ (FSMap {}) = [|Map.empty|]
 defaultValueExpr _ (FSOneof _ _) = conE 'Nothing
-
-
-{- | Default value for a singular enum-typed field. Looks up the
-enum definition in 'scTopLevels' and returns the constructor
-whose proto number is 0; falls back to @toEnum 0@ when no such
-constructor exists.
--}
-enumZeroDefaultE :: ScopeCtx -> Text -> Q Exp
-enumZeroDefaultE scope protoTy = case findEnum (scTopLevels scope) of
-  Just ed -> case lookupZero ed of
-    Just con -> conE (mkName (T.unpack con))
-    Nothing -> [|toEnum 0|]
-  Nothing -> [|toEnum 0|]
-  where
-    leaf t = case T.splitOn (T.pack ".") t of
-      [] -> t
-      ps -> last ps
-    matches t = leaf t == leaf protoTy
-    findEnum tls = case tls of
-      [] -> Nothing
-      (TLEnum ed : _)
-        | matches (enumName ed) -> Just ed
-      (TLEnum _ : rest) -> findEnum rest
-      (TLMessage m : rest) -> case findInMsg (msgElements m) of
-        Just ed -> Just ed
-        Nothing -> findEnum rest
-      (_ : rest) -> findEnum rest
-    findInMsg [] = Nothing
-    findInMsg (MEEnum ed : _) | matches (enumName ed) = Just ed
-    findInMsg (MEEnum _ : rest) = findInMsg rest
-    findInMsg (MEMessage m : rest) = case findInMsg (msgElements m) of
-      Just ed -> Just ed
-      Nothing -> findInMsg rest
-    findInMsg (_ : rest) = findInMsg rest
-
-    enumParents = findTypeScope scope protoTy
-
-    lookupZero ed =
-      let zeros = filter (\ev -> evNumber ev == 0) (enumValues ed)
-      in case zeros of
-           (ev : _) -> Just (scopedHsEnumCon enumParents (enumName ed) (evName ev))
-           [] -> Nothing
 
 
 emptyRepeatedQ :: RepeatedAdapter -> Q Exp
@@ -1311,7 +1344,13 @@ enumToDecls = enumToDecls' defaultTHHooks
 
 
 enumToDecls' :: THHooks -> EnumDef -> Q [Dec]
-enumToDecls' = enumToDecls'' T.empty []
+enumToDecls' = enumToDecls'' False T.empty []
+
+
+enumToDeclsScoped :: ScopeCtx -> THHooks -> EnumDef -> Q [Dec]
+enumToDeclsScoped scope hooks ed = do
+  closed <- either (fail . T.unpack) pure (enumIsClosed (scSyntax scope) (scFileOptions scope) (enumOptions ed))
+  enumToDecls'' closed (scPackage scope) (scParents scope) hooks ed
 
 
 {- | Enum splice with the proto package + parent-message scope
@@ -1320,15 +1359,17 @@ constructor names ('TestAllTypesProto3'NestedEnum' /
 'TestAllTypesProto3'NestedEnum'Foo') so two parent messages
 can declare identically-named inner enums without colliding.
 -}
-enumToDecls'' :: Text -> [Text] -> THHooks -> EnumDef -> Q [Dec]
-enumToDecls'' pkg parents hooks ed = do
+enumToDecls'' :: Bool -> Text -> [Text] -> THHooks -> EnumDef -> Q [Dec]
+enumToDecls'' closed pkg parents hooks ed = do
   let
     -- Scoped Haskell type name (collapses to plain
     -- 'hsTypeName' when 'parents' is empty).
     hsTy = scopedHsTypeName parents (enumName ed)
     tyName = mkName (T.unpack hsTy)
+    enumScope = parents <> [enumName ed]
+    names = enumConstructorNames enumScope ed
     conNameFor evName' =
-      mkName (T.unpack (scopedHsEnumCon parents (enumName ed) evName'))
+      mkName (T.unpack (Map.findWithDefault (scopedEnumCon enumScope evName') evName' names))
     -- An enum declared with @option allow_alias = true@ can
     -- repeat wire numbers; only the FIRST occurrence of each
     -- number becomes a distinct Haskell constructor. Aliases
@@ -1376,7 +1417,7 @@ enumToDecls'' pkg parents hooks ed = do
           ]
       , derivClause (Just AnyclassStrategy) [conT ''NFData]
       ]
-  enumInst <- mkEnumInstance tyName parents ed
+  enumInst <- mkEnumInstance tyName unknownConFullName (conNameFor . evName) primaryEvs
   let
     -- Map every declared enum value (alias or primary) to the
     -- /primary/ constructor for its wire number, so that the
@@ -1398,15 +1439,13 @@ enumToDecls'' pkg parents hooks ed = do
             in (con, evName ev, evNumber ev)
         )
         (enumValues ed)
-    fqEnumName =
-      if T.null pkg
-        then enumName ed
-        else pkg <> T.singleton '.' <> enumName ed
+    fqEnumName = T.intercalate "." (filter (not . T.null) (pkg : parents <> [enumName ed]))
   protoEnumDec <-
     PTM.mkProtoEnumInstance
       tyName
       fqEnumName
       values
+      closed
       unknownConFullName
   aesonDecs <- PTM.mkEnumAesonInstances tyName values unknownConFullName
   hashableDec <- PTM.mkEnumHashableInstance tyName
@@ -1428,16 +1467,10 @@ enum type. @fromEnum@ returns the @evNumber@ recorded in the
 declared value for unknown wire numbers (matches the open-enum
 behaviour proto3 mandates).
 -}
-mkEnumInstance :: Name -> [Text] -> EnumDef -> Q Dec
-mkEnumInstance tyName parents ed = do
-  -- Collapse aliases so multiple constructors with the same wire
-  -- number don't introduce overlapping @fromEnum@ clauses (proto
-  -- @allow_alias = true@ is rare but legal). The first occurrence
-  -- in declaration order wins, matching what the pure-text codegen
-  -- does in 'enumPrimaryValues'.
-  let primaryByNum = primaryValues (enumValues ed)
-      unknownCon = unknownConNameFor parents (enumName ed)
-      -- 'toEnum n -> ConName' clauses, one per distinct wire
+mkEnumInstance :: Name -> Name -> (EnumValue -> Name) -> [EnumValue] -> Q Dec
+mkEnumInstance tyName unknownCon enumConName primaryByNum = do
+  -- Only the first declared value for each wire number has a constructor.
+  let -- 'toEnum n -> ConName' clauses, one per distinct wire
       -- number. Catch-all wraps the input in the synthetic
       -- @<EnumName>'Unknown !Int32@ constructor (open-enum
       -- semantics — preserves an unrecognised wire value
@@ -1497,9 +1530,6 @@ mkEnumInstance tyName parents ed = do
       []
       (AppT (ConT ''Enum) (ConT tyName))
       [toEnumDec, fromEnumDec]
-  where
-    enumConName ev =
-      mkName (T.unpack (scopedHsEnumCon parents (enumName ed) (evName ev)))
 
 
 {- | Drop later occurrences of any wire number from an enum's
@@ -1539,9 +1569,10 @@ instance's two methods read and write the record's unknown-fields
 slot, which is where extension payloads (and any unrecognised tags)
 are preserved.
 -}
-mkHasExtensionsInstance :: Bool -> Name -> Text -> Q [Dec]
-mkHasExtensionsInstance recDot tyName _protoName = do
-  let ufName = unknownFieldsName tyName
+mkHasExtensionsInstance :: ScopeCtx -> Name -> Q [Dec]
+mkHasExtensionsInstance scope tyName = do
+  let ufName = unknownFieldsName scope tyName
+      recDot = scFieldNaming scope == UnprefixedFields
   msgVar <- newName "msg"
   ufsVar <- newName "ufs"
   -- Under 'UnprefixedFields' ('NoFieldSelectors') the bare unknown-fields
@@ -1585,16 +1616,18 @@ itself with the runtime JSON-extension registry so the
 generated FromJSON\/ToJSON instances pick up the bracket-quoted
 @[FQN]@ syntax automatically.
 -}
-extendToDecls :: Text -> Text -> [FieldDef] -> Q [Dec]
-extendToDecls pkg ownerProtoName fields =
-  concat <$> mapM (oneExtensionDec ownerHsName ownerPrefix parentFqn pkg) fields
+extendToDecls :: ScopeCtx -> Text -> [FieldDef] -> Q [Dec]
+extendToDecls scope ownerProtoName fields = do
+  ownerHsName <- resolveHsTypeName scope ownerProtoName
+  concat <$> mapM (oneExtensionDec scope ownerHsName ownerProtoName parentFqn) fields
   where
-    ownerHsName = mkName (T.unpack (hsTypeName (lastProtoSegment ownerProtoName)))
-    ownerPrefix = lowerFirst (hsTypeName (lastProtoSegment ownerProtoName))
-    parentFqn
+    pkg = scPackage scope
+    parentFqn = maybe unresolvedName fst (lookupScopedType scope ownerProtoName)
+    unresolvedName
+      | Just absolute <- T.stripPrefix "." ownerProtoName = absolute
       | T.null pkg = ownerProtoName
       | T.isInfixOf (T.singleton '.') ownerProtoName = ownerProtoName
-      | otherwise = pkg <> T.singleton '.' <> ownerProtoName
+      | otherwise = pkg <> "." <> ownerProtoName
 
 
 lastProtoSegment :: Text -> Text
@@ -1606,131 +1639,100 @@ lastProtoSegment t = case T.splitOn "." t of
 {- | Generate the declarations for one extension field. Singular
 fields produce a 'Ext.Extension' descriptor; repeated fields
 produce a 'Ext.RepeatedExtension' (with the
-'Ext.reIsPacked' flag set per the field's @[packed = ...]@
-option, defaulting to 'False' for proto2 / 'True' for fixed-width
-packable scalars in proto3).
+'Ext.reIsPacked' flag following the schema's repeated-field encoding).
 -}
-oneExtensionDec :: Name -> Text -> Text -> Text -> FieldDef -> Q [Dec]
-oneExtensionDec ownerHs ownerPrefix parentFqn pkg fd = case fieldLabel fd of
-  Just Repeated ->
-    case thExtensionPayloadCore (fieldType fd) of
-      Nothing -> pure []
-      Just (hsTy, extConName) -> do
-        let extName =
-              mkName
-                ( T.unpack
-                    ( escapeReserved
-                        (ownerPrefix <> upperFirst (snakeToCamel (fieldName fd)))
-                    )
-                )
-            num = unFieldNumber (fieldNumber fd)
-            extConE = conE (mkName ("Ext." <> T.unpack extConName))
-            packed = case fieldType fd of
-              FTScalar s -> packableScalar s
-              _ -> False
-        sig <-
-          sigD
-            extName
-            [t|Ext.RepeatedExtension $(conT ownerHs) $(pure hsTy)|]
-        body <-
-          valD
-            (varP extName)
-            ( normalB
-                [|
-                  Ext.RepeatedExtension
-                    { Ext.reNumber = $(litE (IntegerL (fromIntegral num)))
-                    , Ext.reType = $extConE
-                    , Ext.reIsPacked = $(if packed then [|True|] else [|False|])
-                    }
-                  |]
-            )
-            []
-        pure [sig, body]
-  _ ->
-    case thExtensionPayloadCore (fieldType fd) of
-      Nothing -> pure []
-      Just (hsTy, extConName) -> do
-        let extName =
-              mkName
-                ( T.unpack
-                    ( escapeReserved
-                        (ownerPrefix <> upperFirst (snakeToCamel (fieldName fd)))
-                    )
-                )
-            num = unFieldNumber (fieldNumber fd)
-            extConE = conE (mkName ("Ext." <> T.unpack extConName))
-        sig <-
-          sigD
-            extName
-            [t|Ext.Extension $(conT ownerHs) $(pure hsTy)|]
-        body <-
-          valD
-            (varP extName)
-            ( normalB
-                [|
-                  Ext.Extension
-                    { Ext.extNumber = $(litE (IntegerL (fromIntegral num)))
-                    , Ext.extType = $extConE
-                    }
-                  |]
-            )
-            []
-        regDecs <-
-          extensionJsonRegistrationDecs
-            parentFqn
-            pkg
-            (fieldName fd)
-            num
-            extConName
-        pure (sig : body : regDecs)
+oneExtensionDec :: ScopeCtx -> Name -> Text -> Text -> FieldDef -> Q [Dec]
+oneExtensionDec scope ownerHs ownerProtoName parentFqn fd = do
+  delimited <-
+    if isLegacyGroupField fd
+      then pure True
+      else messageDelimitedIn scope (fieldTypeToBridge scope (fieldType fd)) (fieldOptions fd)
+  payload <-
+    if delimited
+      then pure (Just (ConT ''ByteString, 'Ext.ExtGroup))
+      else thExtensionPayloadCore scope (fieldType fd)
+  let extFqn = T.intercalate "." (filter (not . T.null) (scPackage scope : scParents scope <> [fieldName fd]))
+      ExtensionNames valueName registration = lookupExtensionNames (scExtensionNames scope) extFqn ownerProtoName fd
+      extName = mkName (T.unpack valueName)
+      num = unFieldNumber (fieldNumber fd)
+  case fieldLabel fd of
+    Just Repeated ->
+      case payload of
+        Nothing -> pure []
+        Just (hsTy, extConName) -> do
+          let extConE = conE extConName
+              packable = case fieldType fd of
+                FTScalar s -> packableScalar s
+                FTNamed _ -> extConName == 'Ext.ExtEnum
+          packed <-
+            if packable
+              then either (fail . T.unpack) pure (repeatedFieldPacked (scSyntax scope) (scFileOptions scope) (fieldOptions fd))
+              else pure False
+          sig <-
+            sigD
+              extName
+              [t|Ext.RepeatedExtension $(conT ownerHs) $(pure hsTy)|]
+          body <-
+            valD
+              (varP extName)
+              ( normalB
+                  [|
+                    Ext.RepeatedExtension
+                      { Ext.reNumber = $(litE (IntegerL (fromIntegral num)))
+                      , Ext.reType = $extConE
+                      , Ext.reIsPacked = $(if packed then [|True|] else [|False|])
+                      }
+                    |]
+              )
+              []
+          pure [sig, body]
+    _ ->
+      case payload of
+        Nothing -> pure []
+        Just (hsTy, extConName) -> do
+          let extConE = conE extConName
+          sig <-
+            sigD
+              extName
+              [t|Ext.Extension $(conT ownerHs) $(pure hsTy)|]
+          body <-
+            valD
+              (varP extName)
+              ( normalB
+                  [|
+                    Ext.Extension
+                      { Ext.extNumber = $(litE (IntegerL (fromIntegral num)))
+                      , Ext.extType = $extConE
+                      }
+                    |]
+              )
+              []
+          regDecs <- extensionJsonRegistrationDecs (mkName (T.unpack registration)) parentFqn extFqn extName
+          pure (sig : body : regDecs)
 
 
-{- | Emit a top-level @register<ExtName>Json :: IO ()@ binding
-that, when called, registers the extension's JSON codec in
-the runtime registry from "Proto.Internal.JSON.Extension". The user
-calls 'forceLoadProtoExtensionRegistrations' (also generated
-by 'loadProto', collected per-file at the bottom) to drain
-the file's registrations on startup.
--}
+-- | Emit a registry value for a generated singular extension.
 extensionJsonRegistrationDecs
-  :: Text
+  :: Name
+  -- ^ Registration binding
+  -> Text
   -- ^ Parent message FQN
   -> Text
-  -- ^ Extension's own proto package (for the FQN)
-  -> Text
-  -- ^ Extension proto field name
-  -> Int
-  -- ^ Wire field number
-  -> Text
-  -- ^ ExtensionType constructor name (e.g. "ExtInt32")
+  -- ^ Extension FQN
+  -> Name
+  -- ^ Typed extension descriptor
   -> Q [Dec]
-extensionJsonRegistrationDecs parentFqn pkg extLeaf num extConName = do
-  let extFqn = (if T.null pkg then extLeaf else pkg <> T.singleton '.' <> extLeaf)
-      regName =
-        mkName
-          ( "registerExt_"
-              <> T.unpack (T.replace (T.singleton '.') (T.pack "_") extFqn)
-          )
-      extConE = ConE (mkName ("Ext." <> T.unpack extConName))
+extensionJsonRegistrationDecs regName parentFqn extFqn extName = do
   sig <- sigD regName [t|PJExt.ExtensionRegistry|]
   body <-
     valD
       (varP regName)
       ( normalB
           [|
-            PJExt.registerExtensionJson
+            PJExt.registerTypedExtensionJson
               $(textLitE parentFqn)
-              PJExt.ExtJsonCodec
-                { PJExt.ejcExtensionFqn = $(textLitE extFqn)
-                , PJExt.ejcFieldNumber = $(litE (IntegerL (fromIntegral num)))
-                , PJExt.ejcParseValue =
-                    PJExt.parseExtValueViaConstructor
-                      $(pure extConE)
-                      $(litE (IntegerL (fromIntegral num)))
-                , PJExt.ejcEncodeValue =
-                    PJExt.encodeExtValueViaConstructor
-                      $(pure extConE)
-                }
+              $(textLitE extFqn)
+              $(varE extName)
             |]
       )
       []
@@ -1745,27 +1747,28 @@ and the parser doesn't recognise them); callers treat
 'Nothing' as "skip this extension, the rest of the module
 still compiles".
 -}
-thExtensionPayloadCore :: FieldType -> Maybe (Type, Text)
-thExtensionPayloadCore (FTScalar s) = Just $ case s of
-  SDouble -> (ConT ''Double, "ExtDouble")
-  SFloat -> (ConT ''Float, "ExtFloat")
-  SInt32 -> (ConT ''Int32, "ExtInt32")
-  SInt64 -> (ConT ''Int64, "ExtInt64")
-  SUInt32 -> (ConT ''Word32, "ExtUInt32")
-  SUInt64 -> (ConT ''Word64, "ExtUInt64")
-  SSInt32 -> (ConT ''Int32, "ExtSInt32")
-  SSInt64 -> (ConT ''Int64, "ExtSInt64")
-  SFixed32 -> (ConT ''Word32, "ExtFixed32")
-  SFixed64 -> (ConT ''Word64, "ExtFixed64")
-  SSFixed32 -> (ConT ''Int32, "ExtSFixed32")
-  SSFixed64 -> (ConT ''Int64, "ExtSFixed64")
-  SBool -> (ConT ''Bool, "ExtBool")
-  SString -> (ConT ''Text, "ExtString")
-  SBytes -> (ConT ''ByteString, "ExtBytes")
-thExtensionPayloadCore (FTNamed _) =
-  -- Named-type extensions round-trip their raw encoded bytes;
-  -- callers decode lazily through the matching message decoder.
-  Just (ConT ''ByteString, "ExtMessage")
+thExtensionPayloadCore :: ScopeCtx -> FieldType -> Q (Maybe (Type, Name))
+thExtensionPayloadCore _ (FTScalar s) = pure . Just $ case s of
+  SDouble -> (ConT ''Double, 'Ext.ExtDouble)
+  SFloat -> (ConT ''Float, 'Ext.ExtFloat)
+  SInt32 -> (ConT ''Int32, 'Ext.ExtInt32)
+  SInt64 -> (ConT ''Int64, 'Ext.ExtInt64)
+  SUInt32 -> (ConT ''Word32, 'Ext.ExtUInt32)
+  SUInt64 -> (ConT ''Word64, 'Ext.ExtUInt64)
+  SSInt32 -> (ConT ''Int32, 'Ext.ExtSInt32)
+  SSInt64 -> (ConT ''Int64, 'Ext.ExtSInt64)
+  SFixed32 -> (ConT ''Word32, 'Ext.ExtFixed32)
+  SFixed64 -> (ConT ''Word64, 'Ext.ExtFixed64)
+  SSFixed32 -> (ConT ''Int32, 'Ext.ExtSFixed32)
+  SSFixed64 -> (ConT ''Int64, 'Ext.ExtSFixed64)
+  SBool -> (ConT ''Bool, 'Ext.ExtBool)
+  SString -> (ConT ''Text, 'Ext.ExtString)
+  SBytes -> (ConT ''ByteString, 'Ext.ExtBytes)
+thExtensionPayloadCore scope (FTNamed name)
+  | isEnumName scope name = do
+      tyName <- resolveHsTypeName scope name
+      pure (Just (ConT tyName, 'Ext.ExtEnum))
+  | otherwise = pure (Just (ConT ''ByteString, 'Ext.ExtMessage))
 
 
 -- | Whether a scalar is permitted to be packed on the wire.
@@ -1774,12 +1777,6 @@ packableScalar = \case
   SString -> False
   SBytes -> False
   _ -> True
-
-
-upperFirst :: Text -> Text
-upperFirst t = case T.uncons t of
-  Just (c, rest) -> T.cons (Data.Char.toUpper c) rest
-  Nothing -> t
 
 
 -- ===========================================================
@@ -1797,41 +1794,32 @@ The parent type 'Name' is required for 'FSOneof' so we can
 generate the matching sum-type 'Name' (see 'oneofSumName' and
 'oneofConTHName').
 -}
-fieldSpecToProtoField :: ScopeCtx -> Name -> FieldSpec -> Q PDI.ProtoField
-fieldSpecToProtoField scope parentTy (FSField name num lbl ft rep opts) = do
-  let parentName = T.pack (nameBase parentTy)
-      sel = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
+fieldSpecToProtoField :: ScopeCtx -> FieldSpec -> Q PDI.ProtoField
+fieldSpecToProtoField scope (FSField name num lbl ft rep opts legacyGroup) = do
+  let sel = thFieldName scope name
       pft = fieldTypeToBridge scope ft
-      mode = case (lbl, pft) of
-        (Just Repeated, PDI.PFScalar sc)
-          | PDI.scalarPackable sc -> packedModeFor scope opts
-        -- Enums are also packable in proto3 (the wire is a varint
-        -- per element); default-packed unless the user wrote
-        -- @[packed = false]@ explicitly.
-        (Just Repeated, PDI.PFEnum) -> packedModeFor scope opts
-        _ -> PDI.ModeUnpacked
-      -- Singular submessage fields are implicitly Maybe-wrapped at
-      -- the data-declaration layer (see 'fieldTypeToTH'), so they
-      -- decode/encode as 'FKMaybe' too. Singular enum fields stay
-      -- bare; enums have a zero value and follow scalar default-
-      -- skip semantics.
-      isImplicitOptional = case (lbl, pft) of
-        (Nothing, PDI.PFSubmessage) -> True
-        _ -> False
-      kind = case lbl of
+  delimited <- if legacyGroup then pure True else messageDelimitedIn scope pft opts
+  mode <- case (lbl, pft) of
+    (Just Repeated, PDI.PFScalar sc)
+      | PDI.scalarPackable sc -> packedModeFor scope opts
+    (Just Repeated, PDI.PFEnum) -> packedModeFor scope opts
+    _ -> pure PDI.ModeUnpacked
+  -- Singular submessages track presence even without an optional label.
+  let kind = case lbl of
         Just Repeated -> PDI.FKRepeated (fieldRepeated rep) mode
-        Just Optional -> PDI.FKMaybe
         _
-          | isImplicitOptional -> PDI.FKMaybe
+          | explicitFieldPresence lbl || pft == PDI.PFSubmessage -> PDI.FKMaybe
           | otherwise -> PDI.FKBare
-      inner = innerHsType scope ft rep
-      base = PDI.protoField sel num kind pft inner
+  inner <- innerHsType scope ft rep
+  let base = PDI.protoField sel num kind pft inner
   pure
     base
       { PDI.pfStringAdapter = fieldString rep
       , PDI.pfBytesAdapter = fieldBytes rep
+      , PDI.pfSchemaEnum = pft == PDI.PFEnum
+      , PDI.pfDelimited = delimited
       }
-fieldSpecToProtoField scope parentTy (FSMap name num kt vt rep) =
+fieldSpecToProtoField scope (FSMap name num kt vt rep _) =
   case scalarToBridgeMapKey kt of
     Nothing ->
       fail
@@ -1841,48 +1829,32 @@ fieldSpecToProtoField scope parentTy (FSMap name num kt vt rep) =
             <> scalarStr kt
             <> "). Proto3 only permits integral and string map keys."
         )
-    Just mks ->
-      let parentName = T.pack (nameBase parentTy)
-          sel = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
+    Just mks -> do
+      let sel = thFieldName scope name
           pft = fieldTypeToBridge scope vt
-          inner = innerHsType scope vt rep
-          base = PDI.protoField sel num (PDI.FKMap mks) pft inner
-      in pure
+      inner <- innerHsType scope vt rep
+      let base = PDI.protoField sel num (PDI.FKMap mks) pft inner
+      pure
            base
              { PDI.pfStringAdapter = fieldString rep
              , PDI.pfBytesAdapter = fieldBytes rep
+             , PDI.pfSchemaEnum = pft == PDI.PFEnum
              }
-fieldSpecToProtoField scope parentTy (FSOneof name ofs) = do
-  let parentName = T.pack (nameBase parentTy)
-      sel = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
-      sumTy = oneofSumName parentTy name
+fieldSpecToProtoField scope (FSOneof name ofs) = do
+  let sel = thFieldName scope name
+      sumTy = oneofSumName scope name
       carrier = AppT (ConT ''Maybe) (ConT sumTy)
-      variants = fmap (oneofVariantToBridge scope parentTy name) ofs
+  variants <- traverse (oneofVariantToBridge scope name) ofs
   -- @pfTag@/@pfType@/@pfInnerTy@ are documented as ignored
   -- by the body builders for FKOneof. The carrier type is
   -- still useful for clarity / future debugging.
   pure (PDI.protoField sel 0 (PDI.FKOneof variants) PDI.PFSubmessage carrier)
 
 
-{- | Pick packed vs. unpacked for a repeated packable scalar field.
-
-* Proto3: packed by default; @[packed = false]@ flips to unpacked.
-* Proto2: unpacked by default; @[packed = true]@ flips to packed.
-* Editions: defer to 'featureRepeatedFieldEncoding' on the
-  resolved feature set; the caller usually wants 'PackedEncoding'
-  (the post-2023 default) but @[packed = false]@ still wins.
--}
-packedModeFor :: ScopeCtx -> [OptionDef] -> PDI.RepeatedMode
-packedModeFor scope opts =
-  let explicit = lookupSimpleOption (T.pack "packed") opts >>= optionAsBool
-      defaultPacked = case scSyntax scope of
-        Proto3 -> True
-        Proto2 -> False
-        Editions ed -> case featureRepeatedFieldEncoding (featuresForEdition ed) of
-          PackedEncoding -> True
-          ExpandedEncoding -> False
-      packed = Data.Maybe.fromMaybe defaultPacked explicit
-  in if packed then PDI.ModePacked else PDI.ModeUnpacked
+packedModeFor :: ScopeCtx -> [OptionDef] -> Q PDI.RepeatedMode
+packedModeFor scope opts = do
+  packed <- either (fail . T.unpack) pure (repeatedFieldPacked (scSyntax scope) (scFileOptions scope) opts)
+  pure (if packed then PDI.ModePacked else PDI.ModeUnpacked)
 
 
 {- | Build the bridge's 'PDI.OneofVariant' for one arm of a oneof.
@@ -1893,18 +1865,28 @@ up in 'RepConfig' under @(parentMessage, oneofFieldName)@ in
 'extractMessageFields'), so per-variant overrides like \"this
 variant only is lazy ByteString\" cleanly survive the bridge.
 -}
-oneofVariantToBridge :: ScopeCtx -> Name -> Text -> (OneofField, FieldRep) -> PDI.OneofVariant
-oneofVariantToBridge scope parentTy ooName (f, rep) =
+oneofVariantToBridge :: ScopeCtx -> Text -> (OneofField, FieldRep) -> Q PDI.OneofVariant
+oneofVariantToBridge scope ooName (f, rep) = do
+  inner <- innerHsType scope (oneofFieldType f) rep
   let base =
         PDI.oneofVariant
-          (oneofConTHName parentTy ooName (oneofFieldName f))
+          (oneofConTHName scope ooName (oneofFieldName f))
           (unFieldNumber (oneofFieldNumber f))
-          (innerHsType scope (oneofFieldType f) rep)
+          inner
           (fieldTypeToBridge scope (oneofFieldType f))
-  in base
+  delimited <- messageDelimitedIn scope (PDI.ovType base) (oneofFieldOptions f)
+  pure base
        { PDI.ovStringAdapter = fieldString rep
        , PDI.ovBytesAdapter = fieldBytes rep
+       , PDI.ovSchemaEnum = PDI.ovType base == PDI.PFEnum
+       , PDI.ovDelimited = delimited
        }
+
+
+messageDelimitedIn :: ScopeCtx -> PDI.ProtoFieldType -> [OptionDef] -> Q Bool
+messageDelimitedIn scope PDI.PFSubmessage opts =
+  either (fail . T.unpack) pure (messageEncodingDelimited (scSyntax scope) (scFileOptions scope) opts)
+messageDelimitedIn _ _ _ = pure False
 
 
 -- | Project the AST 'ScalarType' onto the bridge's wire 'Scalar'.
@@ -1947,26 +1929,24 @@ fieldTypeToBridge scope = \case
 so the bridge's encoder can supply the matching @($var :: T)@
 ascription.
 -}
-innerHsType :: ScopeCtx -> FieldType -> FieldRep -> Type
-innerHsType scope ft rep = case ft of
-  FTScalar SString -> stringHsType (fieldString rep)
-  FTScalar SBytes -> bytesHsType (fieldBytes rep)
-  FTScalar SInt32 -> ConT ''Int32
-  FTScalar SInt64 -> ConT ''Int64
-  FTScalar SUInt32 -> ConT ''Word32
-  FTScalar SUInt64 -> ConT ''Word64
-  FTScalar SSInt32 -> ConT ''Int32
-  FTScalar SSInt64 -> ConT ''Int64
-  FTScalar SFixed32 -> ConT ''Word32
-  FTScalar SFixed64 -> ConT ''Word64
-  FTScalar SSFixed32 -> ConT ''Int32
-  FTScalar SSFixed64 -> ConT ''Int64
-  FTScalar SDouble -> ConT ''Double
-  FTScalar SFloat -> ConT ''Float
-  FTScalar SBool -> ConT ''Bool
-  FTNamed n
-    | Just (tyN, _) <- lookupWkt n -> ConT tyN
-    | otherwise -> ConT (mkName (T.unpack (resolveScopedHsType scope n)))
+innerHsType :: ScopeCtx -> FieldType -> FieldRep -> Q Type
+innerHsType scope (FTNamed n) _ = ConT <$> resolveHsTypeName scope n
+innerHsType _ (FTScalar scalar) rep = pure $ case scalar of
+  SString -> stringHsType (fieldString rep)
+  SBytes -> bytesHsType (fieldBytes rep)
+  SInt32 -> ConT ''Int32
+  SInt64 -> ConT ''Int64
+  SUInt32 -> ConT ''Word32
+  SUInt64 -> ConT ''Word64
+  SSInt32 -> ConT ''Int32
+  SSInt64 -> ConT ''Int64
+  SFixed32 -> ConT ''Word32
+  SFixed64 -> ConT ''Word64
+  SSFixed32 -> ConT ''Int32
+  SSFixed64 -> ConT ''Int64
+  SDouble -> ConT ''Double
+  SFloat -> ConT ''Float
+  SBool -> ConT ''Bool
 
 
 stringHsType :: StringAdapter -> Type
@@ -2018,10 +1998,10 @@ scalarToBridgeMapKey = \case
 shape consumed by the @ProtoMessage@ \/ JSON \/ Hashable
 emitters in "Proto.TH.Metadata".
 -}
-fieldSpecToMetaField :: ScopeCtx -> Name -> FieldSpec -> PTM.MetaField
-fieldSpecToMetaField scope parentTy fs = case fs of
-  FSField name num lbl ft rep opts ->
-    let sel = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
+fieldSpecToMetaField :: ScopeCtx -> FieldSpec -> PTM.MetaField
+fieldSpecToMetaField scope fs = case fs of
+  FSField name num lbl ft rep opts legacyGroup ->
+    let sel = thFieldName scope name
         jsonNm = jsonNameFromOpts opts (protoJsonName name)
         repeatedKind = case repeatedBaseRep (fieldRepeated rep) of
           VectorRep -> PTM.MFKVector
@@ -2029,7 +2009,7 @@ fieldSpecToMetaField scope parentTy fs = case fs of
           SeqRep -> PTM.MFKSeq
         kind = case lbl of
           Just Repeated -> repeatedKind
-          Just Optional -> PTM.MFKMaybe
+          _ | explicitFieldPresence lbl -> PTM.MFKMaybe
           _ -> case ft of
             FTNamed n
               | not (isEnumName scope n) -> PTM.MFKMaybe
@@ -2048,17 +2028,20 @@ fieldSpecToMetaField scope parentTy fs = case fs of
         jsonShape = case (lbl, ft) of
           (Just Repeated, FTScalar s) -> PTM.JSRepeatedScalar (jsScalarOf s)
           (Just Repeated, FTNamed n)
-            | Just w <- lookupWktShape n -> PTM.JSWktRepeated w
+            | Just w <- lookupScopedWktShape scope n -> PTM.JSWktRepeated w
             | isEnumName scope n -> PTM.JSRepeatedEnum
             | otherwise -> PTM.JSRepeatedMessage
-          (Just Optional, FTScalar s) -> PTM.JSMaybe (jsScalarOf s)
-          (Just Optional, FTNamed n)
-            | Just w <- lookupWktShape n -> PTM.JSWktMaybe w
-            | isEnumName scope n -> PTM.JSEnumMaybe
-            | otherwise -> PTM.JSMessage
+          (_, FTScalar s) | explicitFieldPresence lbl -> PTM.JSMaybe (jsScalarOf s)
+          (_, FTNamed n)
+            | explicitFieldPresence lbl
+            , Just w <- lookupScopedWktShape scope n -> PTM.JSWktMaybe w
+            | explicitFieldPresence lbl
+            , isEnumName scope n -> PTM.JSEnumMaybe
+            | explicitFieldPresence lbl -> PTM.JSMessage
           (_, FTScalar s) -> PTM.JSScalar (jsScalarOf s)
           (_, FTNamed n)
-            | Just w <- lookupWktShape n -> PTM.JSWkt w
+            | Just PTM.WktNullValue <- lookupScopedWktShape scope n -> PTM.JSEnum
+            | Just w <- lookupScopedWktShape scope n -> PTM.JSWkt w
             | isEnumName scope n -> PTM.JSEnum
             | otherwise -> PTM.JSMessage
     in PTM.MetaField
@@ -2066,7 +2049,7 @@ fieldSpecToMetaField scope parentTy fs = case fs of
          , PTM.mfProtoName = name
          , PTM.mfJsonName = jsonNm
          , PTM.mfNumber = num
-         , PTM.mfTypeDesc = fieldTypeDescE scope ft
+         , PTM.mfTypeDesc = wireFieldTypeDescE scope ft opts legacyGroup
          , PTM.mfLabel = protoLabelE lbl
          , PTM.mfKind = kind
          , PTM.mfJsonKind = jsonKind
@@ -2074,9 +2057,9 @@ fieldSpecToMetaField scope parentTy fs = case fs of
          , PTM.mfJsonShape = jsonShape
          , PTM.mfRecordDot = scFieldNaming scope == UnprefixedFields
          }
-  FSMap name num kt vt rep ->
-    let sel = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
-        jsonNm = protoJsonName name
+  FSMap name num kt vt rep opts ->
+    let sel = thFieldName scope name
+        jsonNm = jsonNameFromOpts opts (protoJsonName name)
         bytesShape = case bytesBaseRep (fieldBytes rep) of
           StrictBytesRep -> PTM.SBStrict
           LazyBytesRep -> PTM.SBLazy
@@ -2087,15 +2070,16 @@ fieldSpecToMetaField scope parentTy fs = case fs of
         jsonShape = case vt of
           FTScalar s -> PTM.JSMapScalar (jsScalarOf kt) (jsScalarOf s)
           FTNamed n
+            | Just PTM.WktNullValue <- lookupScopedWktShape scope n -> PTM.JSMapJSON (jsScalarOf kt)
             | isEnumName scope n -> PTM.JSMapEnum (jsScalarOf kt)
-            | otherwise -> PTM.JSMapMessage (jsScalarOf kt)
+            | otherwise -> PTM.JSMapJSON (jsScalarOf kt)
     in PTM.MetaField
          { PTM.mfSelector = sel
          , PTM.mfProtoName = name
          , PTM.mfJsonName = jsonNm
          , PTM.mfNumber = num
          , PTM.mfTypeDesc = mapTypeDescE scope kt vt
-         , PTM.mfLabel = [|PS.LabelOptional|]
+         , PTM.mfLabel = [|PS.LabelRepeated|]
          , PTM.mfKind = PTM.MFKMap
          , PTM.mfJsonKind = jsonKind
          , PTM.mfBytesShape = bytesShape
@@ -2103,14 +2087,17 @@ fieldSpecToMetaField scope parentTy fs = case fs of
          , PTM.mfRecordDot = scFieldNaming scope == UnprefixedFields
          }
   FSOneof name ofs ->
-    let sel = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
+    let sel = thFieldName scope name
         jsonNm = protoJsonName name
-        variants = fmap (oneofVariantJson scope parentTy name) ofs
+        variants = fmap (oneofVariantJson scope name) ofs
+        number = case ofs of
+          (field, _) : _ -> unFieldNumber (oneofFieldNumber field)
+          [] -> 0
     in PTM.MetaField
          { PTM.mfSelector = sel
          , PTM.mfProtoName = name
          , PTM.mfJsonName = jsonNm
-         , PTM.mfNumber = 0
+         , PTM.mfNumber = number
          , PTM.mfTypeDesc = [|PS.MessageType $(textLitE name)|]
          , PTM.mfLabel = [|PS.LabelOptional|]
          , PTM.mfKind = PTM.MFKOneof
@@ -2119,8 +2106,66 @@ fieldSpecToMetaField scope parentTy fs = case fs of
          , PTM.mfJsonShape = PTM.JSOneof variants
          , PTM.mfRecordDot = scFieldNaming scope == UnprefixedFields
          }
+
+
+oneofDescriptorE :: ScopeCtx -> FieldSpec -> [Q Exp]
+oneofDescriptorE scope (FSOneof name members) =
+  [[|PS.OneofDescriptor $(textLitE name) $(ListE <$> traverse member members)|]]
   where
-    parentName = T.pack (nameBase parentTy)
+    member (field, _) = do
+      let ft = oneofFieldType field
+          descriptor = case ft of
+            FTNamed enum | Just PTM.WktNullValue <- lookupScopedWktShape scope enum ->
+              [|PS.EnumType $(textLitE "google.protobuf.NullValue")|]
+            _ -> wireFieldTypeDescE scope ft (oneofFieldOptions field) False
+          allowed = Data.Maybe.fromMaybe [|Nothing|] (closedEnumValuesE scope ft)
+      [|PS.OneofFieldDescriptor
+          $(textLitE (oneofFieldName field))
+          $(litE (IntegerL (fromIntegral (unFieldNumber (oneofFieldNumber field)))))
+          $descriptor
+          $allowed|]
+oneofDescriptorE _ _ = []
+
+closedEnumFieldE :: ScopeCtx -> FieldSpec -> Maybe (Q Exp)
+closedEnumFieldE scope field = case field of
+  FSField {fsNum = number, fsType = ft} -> entry number ft
+  FSMap {fsNum = number, fsMapVal = ft} -> entry number ft
+  FSOneof {} -> Nothing
+  where
+    entry number ft =
+      fmap (\values -> [|($(litE (IntegerL (fromIntegral number))), $values)|]) (closedEnumValuesE scope ft)
+
+
+closedEnumValuesE :: ScopeCtx -> FieldType -> Maybe (Q Exp)
+closedEnumValuesE scope (FTNamed name) | isEnumName scope name = Just $ do
+  ty <- resolveHsTypeName scope name
+  let proxy = SigE (ConE 'Proxy) (AppT (ConT ''Proxy) (ConT ty))
+  [|if PS.protoEnumIsOpen $(pure proxy) then Nothing else Just (map snd (PS.protoEnumValues $(pure proxy)))|]
+closedEnumValuesE _ _ = Nothing
+
+
+submessageEntriesE :: ScopeCtx -> FieldSpec -> [Q Exp]
+submessageEntriesE scope field = case field of
+  FSField {fsNum = number, fsType = ft} -> maybe [] pure (entry number ft)
+  FSOneof _ members -> mapMaybe (\(arm, _) -> entry (unFieldNumber (oneofFieldNumber arm)) (oneofFieldType arm)) members
+  FSMap {} -> []
+  where
+    entry number (FTNamed name)
+      | Just (_, info) <- lookupScopedType scope name, tiKind info == TKMessage = Just $ do
+          ty <- resolveHsTypeName scope name
+          let proxy = SigE (ConE 'Proxy) (AppT (ConT ''Proxy) (ConT ty))
+          [|($(litE (IntegerL (fromIntegral number))), PS.SomeProtoMessage $(pure proxy))|]
+    entry _ _ = Nothing
+
+
+mapValueDecoderE :: ScopeCtx -> FieldSpec -> Maybe (Q Exp)
+mapValueDecoderE scope FSMap {fsNum = number, fsMapVal = FTNamed name}
+  | Just (_, info) <- lookupScopedType scope name
+  , tiKind info == TKMessage = Just $ do
+      ty <- resolveHsTypeName scope name
+      let decoder = SigE (VarE 'Decode.messageDecoder) (AppT (ConT ''Decode.Decoder) (ConT ty))
+      [|($(litE (IntegerL (fromIntegral number))), () <$ $(pure decoder))|]
+mapValueDecoderE _ _ = Nothing
 
 
 {- | Build the JSON-side shape for one oneof variant. The variant's
@@ -2130,31 +2175,26 @@ shape is dispatched on the variant's value type.
 -}
 oneofVariantJson
   :: ScopeCtx
-  -> Name
-  -- ^ Parent type name.
   -> Text
   -- ^ Oneof field name (used for naming only).
   -> (OneofField, FieldRep)
   -> PTM.OneofVariantJson
-oneofVariantJson scope parentTy _ooName (f, _rep) =
-  let conN = oneofConTHName parentTy _ooName (oneofFieldName f)
+oneofVariantJson scope ooName (f, _rep) =
+  let conN = oneofConTHName scope ooName (oneofFieldName f)
       jsonKey =
         jsonNameFromOpts
           (oneofFieldOptions f)
           (protoJsonName (oneofFieldName f))
       shape = case oneofFieldType f of
         FTScalar s -> PTM.OVScalar (jsScalarOf s)
-        FTNamed n
-          -- Special-case the NullValue WKT: in JSON it's a
-          -- bare 'null', not a quoted enum name, so the oneof
-          -- parser/encoder needs to know.
-          | Just PTM.WktNullValue <- lookupWktShape n ->
-              PTM.OVNullValue
-          | isEnumName scope n -> PTM.OVEnum
-          | otherwise -> PTM.OVMessage
+        FTNamed n -> PTM.OVNamed $ case lookupScopedWktShape scope n of
+          Just PTM.WktNullValue -> True
+          Just PTM.WktValue -> True
+          _ -> False
   in PTM.OneofVariantJson
        { PTM.ovjConstructor = conN
        , PTM.ovjJsonKey = jsonKey
+       , PTM.ovjProtoKey = oneofFieldName f
        , PTM.ovjShape = shape
        }
 
@@ -2163,26 +2203,26 @@ oneofVariantJson scope parentTy _ooName (f, _rep) =
 when the FQN names a Well-Known-Type the JSON splice has a
 canonical encoder for.
 -}
-lookupWktShape :: Text -> Maybe PTM.WktShape
-lookupWktShape n = case T.unpack n of
-  "google.protobuf.Timestamp" -> Just PTM.WktTimestamp
-  "google.protobuf.Duration" -> Just PTM.WktDuration
-  "google.protobuf.FieldMask" -> Just PTM.WktFieldMask
-  "google.protobuf.Struct" -> Just PTM.WktStruct
-  "google.protobuf.Value" -> Just PTM.WktValue
-  "google.protobuf.ListValue" -> Just PTM.WktListValue
-  "google.protobuf.Any" -> Just PTM.WktAny
-  "google.protobuf.Empty" -> Just PTM.WktEmpty
-  "google.protobuf.NullValue" -> Just PTM.WktNullValue
-  "google.protobuf.BoolValue" -> Just PTM.WktWrapBool
-  "google.protobuf.Int32Value" -> Just PTM.WktWrapInt32
-  "google.protobuf.Int64Value" -> Just PTM.WktWrapInt64
-  "google.protobuf.UInt32Value" -> Just PTM.WktWrapUInt32
-  "google.protobuf.UInt64Value" -> Just PTM.WktWrapUInt64
-  "google.protobuf.FloatValue" -> Just PTM.WktWrapFloat
-  "google.protobuf.DoubleValue" -> Just PTM.WktWrapDouble
-  "google.protobuf.StringValue" -> Just PTM.WktWrapString
-  "google.protobuf.BytesValue" -> Just PTM.WktWrapBytes
+lookupScopedWktShape :: ScopeCtx -> Text -> Maybe PTM.WktShape
+lookupScopedWktShape scope n = case fmap fst (lookupScopedType scope n) of
+  Just "google.protobuf.Timestamp" -> Just PTM.WktTimestamp
+  Just "google.protobuf.Duration" -> Just PTM.WktDuration
+  Just "google.protobuf.FieldMask" -> Just PTM.WktFieldMask
+  Just "google.protobuf.Struct" -> Just PTM.WktStruct
+  Just "google.protobuf.Value" -> Just PTM.WktValue
+  Just "google.protobuf.ListValue" -> Just PTM.WktListValue
+  Just "google.protobuf.Any" -> Just PTM.WktAny
+  Just "google.protobuf.Empty" -> Just PTM.WktEmpty
+  Just "google.protobuf.NullValue" -> Just PTM.WktNullValue
+  Just "google.protobuf.BoolValue" -> Just PTM.WktWrapBool
+  Just "google.protobuf.Int32Value" -> Just PTM.WktWrapInt32
+  Just "google.protobuf.Int64Value" -> Just PTM.WktWrapInt64
+  Just "google.protobuf.UInt32Value" -> Just PTM.WktWrapUInt32
+  Just "google.protobuf.UInt64Value" -> Just PTM.WktWrapUInt64
+  Just "google.protobuf.FloatValue" -> Just PTM.WktWrapFloat
+  Just "google.protobuf.DoubleValue" -> Just PTM.WktWrapDouble
+  Just "google.protobuf.StringValue" -> Just PTM.WktWrapString
+  Just "google.protobuf.BytesValue" -> Just PTM.WktWrapBytes
   _ -> Nothing
 
 
@@ -2206,6 +2246,14 @@ jsScalarOf = \case
   SBool -> PTM.JSBool
   SString -> PTM.JSString
   SBytes -> PTM.JSBytes
+
+
+wireFieldTypeDescE :: ScopeCtx -> FieldType -> [OptionDef] -> Bool -> Q Exp
+wireFieldTypeDescE scope ft opts legacy = do
+  delimited <- messageDelimitedIn scope (fieldTypeToBridge scope ft) opts
+  case ft of
+    FTNamed name | legacy || delimited -> [|PS.GroupType $(textLitE name)|]
+    _ -> fieldTypeDescE scope ft
 
 
 -- | Per-shape splice for 'PS.FieldTypeDescriptor'.
@@ -2267,14 +2315,14 @@ jsonNameFromOpts opts dflt = case lookupSimpleOption (T.pack "json_name") opts o
 @FromJSON@ \/ @Hashable@ instances on the carrier sum type. The
 sum's constructors were emitted by 'mkOneofDataDecs'.
 -}
-oneofSatelliteDecs :: Name -> FieldSpec -> Q [Dec]
-oneofSatelliteDecs parentTy = \case
+oneofSatelliteDecs :: ScopeCtx -> FieldSpec -> Q [Dec]
+oneofSatelliteDecs scope = \case
   FSOneof name ofs -> do
-    let sumTy = oneofSumName parentTy name
+    let sumTy = oneofSumName scope name
         cons =
           fmap
             ( \(f, _) ->
-                oneofConTHName parentTy name (oneofFieldName f)
+                oneofConTHName scope name (oneofFieldName f)
             )
             ofs
     aeson <- PTM.mkOneofAesonInstances sumTy

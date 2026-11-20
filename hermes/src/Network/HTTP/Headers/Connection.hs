@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9110 §7.6.1 @Connection@ — a hop-by-hop control field listing
 connection options for the current connection. Each option is either a
@@ -23,22 +21,25 @@ See also: "Network.HTTP.Headers.Close", "Network.HTTP.Headers.KeepAlive",
 -}
 module Network.HTTP.Headers.Connection (
   Connection (..),
+  connectionHasClose,
   connectionParser,
   renderConnection,
 ) where
 
-import Control.Monad.Combinators (sepBy1)
+import qualified Data.CaseInsensitive as CI
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hConnection)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedText, renderSeparated, shortText)
 
 
 -- | Connection header options (e.g., "keep-alive", "close" ...)
-newtype Connection = Connection {connectionOptions :: NE.NonEmpty ST.ShortText}
+data Connection
+  = Connection {connectionOptions :: NE.NonEmpty ST.ShortText}
+  | ConnectionEmpty
   deriving stock (Eq, Show)
 
 
@@ -48,25 +49,32 @@ instance KnownHeader Connection where
   type Direction Connection = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser connectionParser $ NE.head headers of
-    OK conn "" -> Right conn
-    OK _ rest -> Left $ "Unconsumed input after parsing Connection header: " <> show rest
-    Fail -> Left "Failed to parse Connection header"
-    Err e -> Left e
+  parseFromHeaders _ = fmap fromOptions . parseListFieldLines "Connection" (httpList rfc9110Token)
 
 
-  renderToHeaders _ = M.toStrictByteString . renderConnection
+  renderToHeaders _ ConnectionEmpty = ""
+  renderToHeaders _ (Connection opts) = encodeCommaSeparatedText opts
 
 
   headerName _ = hConnection
 
 
 connectionParser :: ParserT st String Connection
-connectionParser = do
-  firstOpt <- rfc9110Token
-  rest <- many (ows *> $(char ',') *> ows *> rfc9110Token)
-  pure $ Connection (firstOpt NE.:| rest)
+connectionParser = fromOptions <$> httpList rfc9110Token
+
+
+-- | The case-insensitive HTTP/1.1 connection tear-down option.
+connectionHasClose :: Connection -> Bool
+connectionHasClose ConnectionEmpty = False
+connectionHasClose (Connection opts) = any closes opts
+  where
+    closes opt = opt == "close" || CI.foldCase (ST.toByteString opt) == "close"
+
+
+fromOptions :: [ST.ShortText] -> Connection
+fromOptions = maybe ConnectionEmpty Connection . NE.nonEmpty
 
 
 renderConnection :: Connection -> M.Builder
-renderConnection (Connection opts) = M.intersperse ", " $ map shortText $ NE.toList opts
+renderConnection ConnectionEmpty = mempty
+renderConnection (Connection opts) = renderSeparated ", " shortText (NE.toList opts)

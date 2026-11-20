@@ -80,17 +80,18 @@ import Data.CaseInsensitive qualified as CI
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.Hashable (Hashable (..))
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List qualified as List
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text qualified as T
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.Void (Void)
 import GHC.Generics (Generic)
 import Network.HTTP.Client.BodyStream (
-  BodyStream,
-  bodyStreamBytes,
+  BodyStream (..),
   popperFromStrict,
  )
+import Network.HTTP.Client.Expect (hasExpectContinueHeader)
 import Network.HTTP.Client.Protocol
 import Network.HTTP.Client.Proxy (Proxy, ProxyConfig)
 import Network.HTTP.Client.Proxy qualified as Pxy
@@ -99,6 +100,7 @@ import Network.HTTP.Client.Response
 import Network.HTTP.Client.Transport
 import Network.HTTP.Client.URI qualified as WURI
 import Network.HTTP.Connection qualified as Conn
+import Network.HTTP.Internal.Convert qualified as Conv
 import Network.HTTP.Message qualified as Msg
 import Network.HTTP.Types.Body qualified as LB
 import Network.HTTP.Types.Header qualified as H
@@ -423,28 +425,42 @@ runWithSlot pool target cfg mProxy req = mask $ \restore -> do
           throwIO (PoolInvalidURI err)
   -- From here we own the connection; on success put it back idle,
   -- on failure close + decrement.
-  result <- restore (try (sendAndMaterialise conn req))
+  started <- if wasIdle && deferBody
+    then Just <$> newIORef False
+    else pure Nothing
+  let attempt = case started of
+        Nothing -> req
+        Just flag ->
+          let stream = WReq.body req
+          in req {WReq.body = stream {pull = writeIORef flag True >> pull stream}}
+  result <- restore (try (sendAndMaterialise conn attempt))
   case result of
-    Right raw
-      | responseWantsClose raw -> do
-          void (try @SomeException (Conn.closeConnection conn))
-          releaseDead pool target
-          pure raw
-      | otherwise -> do
+    Right raw -> do
+      reusable <- Conn.canReuseHttp1Connection conn
+      if reusable
+        then do
           now <- getCurrentTime
           releaseIdle pool target (Slot conn now created)
-          pure raw
+        else do
+          void (try @SomeException (Conn.closeConnection conn))
+          releaseDead pool target
+      pure raw
     Left (e :: SomeException)
       | wasIdle && isConnectionError e -> do
           -- Stale keep-alive: close the dead connection and retry
           -- once on a fresh one (§5.3 audit fix).
           void (try @SomeException (Conn.closeConnection conn))
           releaseDead pool target
-          runWithSlot pool target cfg mProxy req
+          producerStarted <- maybe (pure False) readIORef started
+          if producerStarted then throwIO e else runWithSlot pool target cfg mProxy req
       | otherwise -> do
           void (try @SomeException (Conn.closeConnection conn))
           releaseDead pool target
           throwIO e
+  where
+    deferBody =
+      hasExpectContinueHeader (WReq.headers req)
+        || isJust (protocolRequestTrailers (WReq.protocolHints req))
 
 
 {- | Heuristic: is this exception a connection-level transport error
@@ -526,8 +542,11 @@ sendAndMaterialise
   -> IO RawResponse
 sendAndMaterialise conn req = do
   lowReq <- toLowLevelRequest req
-  resp <- Conn.sendOn conn lowReq
+  let hints = WReq.protocolHints req
+  framed <- Conv.prepareRequestTrailers (Conn.negotiatedVersion conn) hints lowReq
+  resp <- Conn.sendOnWithContinueTimeout (continueTimeoutMicros hints) conn framed
   drained <- materialise (Msg.responseBody resp)
+  trailers <- Msg.responseTrailers resp
   popper <- popperFromStrict drained
   let pushPromisesIO = fmap toPushPromise <$> Msg.responsePushPromises resp
   pure
@@ -535,7 +554,7 @@ sendAndMaterialise conn req = do
       { statusCode = Msg.responseStatus resp
       , headers = Msg.responseHeaders resp
       , bodyPopper = popper
-      , protocolInfo = case Msg.responseVersion resp of
+      , protocolInfo = withBufferedTrailers trailers $ case Msg.responseVersion resp of
           LV.HTTP2 ->
             HTTP2
               Http2Info
@@ -560,28 +579,12 @@ sendAndMaterialise conn req = do
               | otherwise -> go (b : acc)
 
 
-{- | Check if the server indicated the connection should not be reused.
-Looks for the @close@ token in the @Connection@ header value
-(case-insensitive, comma-separated per RFC 9110 §7.6.1).
--}
-responseWantsClose :: RawResponse -> Bool
-responseWantsClose raw =
-  case H.lookupHeader H.hConnection (headers raw) of
-    Nothing -> False
-    Just v -> any isClose (BS8.split ',' v)
-  where
-    isClose tok =
-      let trimmed = BS.dropWhile isOWS (BS.reverse (BS.dropWhile isOWS (BS.reverse tok)))
-      in CI.mk trimmed == CI.mk "close"
-    isOWS w = w == 0x20 || w == 0x09
-
-
 toLowLevelRequest :: WReq.Request BodyStream -> IO Msg.Request
 toLowLevelRequest req = do
   uri_ <- case WURI.renderRequestURI (WReq.requestURI req) of
     Right u -> pure u
     Left err -> throwIO (PoolInvalidURI err)
-  bodyBytes <- bodyStreamBytes (WReq.body req)
+  prepared <- Conv.prepareRequestBody Conv.bufferedRequestBody req
   let lowScheme = case WURI.uriScheme uri_ of
         WURI.SchemeHttps -> Msg.SchemeHttps
         WURI.SchemeHttp -> Msg.SchemeHttp
@@ -600,11 +603,8 @@ toLowLevelRequest req = do
       , Msg.requestTarget = target
       , Msg.requestAuthority = authority
       , Msg.requestScheme = lowScheme
-      , Msg.requestHeaders = WReq.headers req
-      , Msg.requestBody =
-          if BS.null bodyBytes
-            then LB.BodyEmpty
-            else LB.BodyBytes bodyBytes
+      , Msg.requestHeaders = WReq.headers prepared
+      , Msg.requestBody = WReq.body prepared
       , Msg.requestVersion = VR.preferredVersion VR.preferHttp1
       , Msg.requestTrailers = pure []
       }

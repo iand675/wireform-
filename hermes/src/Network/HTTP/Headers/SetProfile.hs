@@ -1,40 +1,64 @@
-{- |
-Module      : Network.HTTP.Headers.SetProfile
-Description : The obsolete @SetProfile@ HTTP header (Open Profiling Standard).
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
-The @SetProfile@ header was defined by the Open Profiling Standard (OPS), a
-1997 W3C Note describing the exchange of user profile information over HTTP. A
-server emits @SetProfile@ to provide profile write operations to be stored in a
-user's profile. OPS was never standardized and was superseded by P3P; its value
-is an opaque, host-specific encoding.
+{- | @SetProfile@ is an OPS response field requesting a write to the user profile. It
+carries the escaped profile-update object.
+The OPS note describes the payload and leaves its wire encoding open.
+The codec validates the HTTP field and preserves its octets.
 
-Because the grammar is historic and effectively opaque, this module preserves
-the field value verbatim as a faithful raw newtype rather than fabricating a
-dead grammar.
-
-Spec: W3C Note \"Implementation of OPS over HTTP\" (NOTE-OPS-OverHTTP, 1997-06-02)
-<https://www.w3.org/TR/NOTE-OPS-OverHTTP>
+Spec: <https://www.w3.org/TR/NOTE-OPS-OverHTTP>
 
 See also: "Network.HTTP.Headers.GetProfile", "Network.HTTP.Headers.ProfileObject", "Network.HTTP.Headers.P3P".
 -}
 module Network.HTTP.Headers.SetProfile (
-  SetProfile (..),
+  SetProfile (SetProfile, setProfileValue),
+  setProfileBytes,
+  setProfileFromBytes,
   setProfileParser,
   renderSetProfile,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSetProfile)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.OpaqueField
 
 
--- | @SetProfile@ header value, preserved verbatim (opaque OPS profile write).
-newtype SetProfile = SetProfile {setProfileValue :: ST.ShortText}
-  deriving stock (Eq, Show)
+newtype SetProfile = SetProfileBytes ByteString
+  deriving stock (Eq)
+
+
+{- | Legacy text view. Use 'setProfileBytes' for exact wire data and
+'setProfileFromBytes' for checked authoring.
+-}
+pattern SetProfile :: ST.ShortText -> SetProfile
+pattern SetProfile {setProfileValue} <- (fieldText -> setProfileValue)
+  where
+    SetProfile text = SetProfileBytes (ST.toByteString text)
+
+
+{-# COMPLETE SetProfile #-}
+
+
+instance Show SetProfile where
+  showsPrec precedence (SetProfile text) =
+    showParen (precedence > 10) $ showString "SetProfile {setProfileValue = " . shows text . showChar '}'
+
+
+fieldText :: SetProfile -> ST.ShortText
+fieldText = opaqueFieldText . setProfileBytes
+
+
+-- | The original field bytes, including any received optional whitespace.
+setProfileBytes :: SetProfile -> ByteString
+setProfileBytes (SetProfileBytes wire) = wire
+
+
+setProfileFromBytes :: ByteString -> Either String SetProfile
+setProfileFromBytes = checkOpaqueField "SetProfile" SetProfileBytes
 
 
 instance KnownHeader SetProfile where
@@ -43,22 +67,18 @@ instance KnownHeader SetProfile where
   type Direction SetProfile = 'Response
 
 
-  parseFromHeaders _ headers = case runParser setProfileParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing SetProfile header: " <> show rest
-    Fail -> Left "Failed to parse SetProfile header"
-    Err e -> Left e
+  parseFromHeaders _ = parseOpaqueFieldLine "SetProfile" SetProfileBytes
 
 
-  renderToHeaders _ = M.toStrictByteString . renderSetProfile
+  renderToHeaders _ = setProfileBytes
 
 
   headerName _ = hSetProfile
 
 
 setProfileParser :: ParserT st String SetProfile
-setProfileParser = SetProfile <$> takeRestShortText
+setProfileParser = opaqueFieldParser "SetProfile" SetProfileBytes
 
 
 renderSetProfile :: SetProfile -> M.Builder
-renderSetProfile (SetProfile v) = shortText v
+renderSetProfile = M.byteString . setProfileBytes

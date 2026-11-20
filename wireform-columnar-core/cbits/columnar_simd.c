@@ -674,18 +674,23 @@ DEF_KEYS(hs_columnar_keys_in_range_u64, uint64_t, uint64_t, KEYS_LIMIT_NONE)
 DEF_LIST_VIEW(hs_columnar_list_view_i32, int32_t, ld_i32)
 DEF_LIST_VIEW(hs_columnar_list_view_i64, int64_t, ld_i64)
 
-/* Dense union: 0 <= types[i] < nchildren and 0 <= offs[i] < childLens[types[i]]. */
+/* Dense union: valid child indices and non-decreasing, in-bounds offsets per child. */
 int64_t hs_columnar_dense_union(const int8_t *types, const int32_t *offs, size_t n, const int64_t *childLens, size_t nchildren)
 {
+    /* Only non-negative int8_t type indices can reach this table. */
+    int32_t previous[128];
+    size_t count = nchildren < 128 ? nchildren : 128;
+    memset(previous, 0, count * sizeof(*previous));
     for (size_t i = 0; i < n; i++) {
         int t = ld_i8(types, i);
         if (t < 0 || (size_t)t >= nchildren) {
             return (int64_t)i;
         }
-        int64_t o = ld_i32(offs, i);
-        if (o < 0 || o >= ld_i64(childLens, (size_t)t)) {
+        int32_t o = ld_i32(offs, i);
+        if (o < previous[t] || o >= ld_i64(childLens, (size_t)t)) {
             return (int64_t)i;
         }
+        previous[t] = o;
     }
     return -1;
 }

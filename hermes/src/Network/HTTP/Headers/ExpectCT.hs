@@ -1,4 +1,6 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 {- |
 @Expect-CT@ — an /obsolete/ response header by which a host requested that
@@ -10,18 +12,16 @@ wire grammar is well specified, so this module captures it structurally.
 == Grammar
 
 @
-Expect-CT           = #expect-ct-directive
+Expect-CT           = 1#expect-ct-directive
 expect-ct-directive = directive-name [ "=" directive-value ]
 directive-name      = token
 directive-value     = token / quoted-string
 @
 
-Note that, unlike @Strict-Transport-Security@, @Expect-CT@ directives are
-separated by commas (it is an RFC 9110 @#@-list). The defined directives are
-@max-age=\<delta-seconds\>@ (REQUIRED), the valueless flag @enforce@, and the
-optional @report-uri="\<uri\>"@. Directive names are case-insensitive; the
-first occurrence of @max-age@ / @report-uri@ wins and unrecognised directives
-are ignored.
+Directives form one comma-separated list across field lines. The defined
+directives are @max-age=\<delta-seconds\>@ (required), the valueless flag
+@enforce@, and @report-uri="\<absolute-URI\>"@. Directive names are
+case-insensitive and unique. Unknown directives are ignored.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9163#section-2.1>
 
@@ -33,17 +33,16 @@ module Network.HTTP.Headers.ExpectCT (
   renderExpectCT,
 ) where
 
-import qualified Control.Applicative
-import Control.Monad (void)
-import qualified Data.ByteString as B
-import Data.Char (toLower)
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
+import Data.CaseInsensitive (CI)
+import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.Set as Set
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hExpectCT)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.TransportPolicy (directiveEnd, extension, policyAge, quoted, reportURI, valueless)
 
 
 -- | Parsed @Expect-CT@ policy.
@@ -64,15 +63,8 @@ instance KnownHeader ExpectCT where
   type Direction ExpectCT = 'Response
 
 
-  parseFromHeaders _ headers = case runParser expectCTParser (NE.head headers) of
-    OK ect leftover
-      | B.null (dropOws leftover) -> Right ect
-      | otherwise ->
-          Left ("Unconsumed input after parsing Expect-CT: " <> show leftover)
-    Fail -> Left "Failed to parse Expect-CT header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ (line :| []) = parseFieldLine "Expect-CT" expectCTParser line
+  parseFromHeaders _ lines' = parseListFieldLines "Expect-CT" directives lines' >>= applyDirectives
 
 
   renderToHeaders _ = M.toStrictByteString . renderExpectCT
@@ -81,62 +73,58 @@ instance KnownHeader ExpectCT where
   headerName _ = hExpectCT
 
 
--- | One parsed directive (internal).
 data Directive
-  = DMaxAge !Word
-  | DEnforce
-  | DReportUri !ST.ShortText
-  | DOther
+  = MaxAge !Word
+  | Enforce
+  | ReportURI !ST.ShortText
+  | Extension !(CI ByteString)
 
 
 expectCTParser :: ParserT st String ExpectCT
-expectCTParser = do
-  ows
-  first <- directive
-  rest <- many (ows *> $(char ',') *> ows *> directive)
-  ows
-  maybe failed pure (applyDirectives (first : rest))
-  where
-    directive = do
-      name <- rfc9110Token
-      case map toLower (ST.toString name) of
-        "max-age" -> DMaxAge <$> (ows *> $(char '=') *> ows *> maxAgeValue)
-        "enforce" -> pure DEnforce
-        "report-uri" -> DReportUri <$> (ows *> $(char '=') *> ows *> quotedString)
-        _ -> DOther <$ optional (ows *> $(char '=') *> ows *> directiveValue)
-    maxAgeValue =
-      ($(char '"') *> anyAsciiDecimalWord <* $(char '"'))
-        <|> anyAsciiDecimalWord
-    directiveValue = void quotedString <|> void rfc9110Token
+expectCTParser = directives >>= either err pure . applyDirectives
 
 
-{- | Fold parsed directives into the structured record. @max-age@ is required
-(first occurrence wins); the first @report-uri@ wins.
--}
-applyDirectives :: [Directive] -> Maybe ExpectCT
-applyDirectives = go Nothing False Nothing
+directives :: ParserT st String [Directive]
+directives =
+  httpList $
+    $( switchAsciiCI
+         [|
+           case _ of
+             "max-age" -> known (MaxAge <$> policyAge)
+             "enforce" -> known (Enforce <$ valueless)
+             "report-uri" -> known (ReportURI <$> reportURI)
+           |]
+     )
+      <|> (Extension <$> extension)
   where
-    go (Just ma) enf rpt [] = Just (ExpectCT ma enf rpt)
-    go Nothing _ _ [] = Nothing
-    go ma enf rpt (d : ds) = case d of
-      DMaxAge n -> go (ma Control.Applicative.<|> Just n) enf rpt ds
-      DEnforce -> go ma True rpt ds
-      DReportUri u -> go ma enf (rpt Control.Applicative.<|> Just u) ds
-      DOther -> go ma enf rpt ds
+    known action = directiveEnd *> (action <|> err "Invalid Expect-CT directive")
+
+
+applyDirectives :: [Directive] -> Either String ExpectCT
+applyDirectives = go Nothing False Nothing Set.empty
+  where
+    go !age !enforce !uri !seen = \case
+      [] -> case age of
+        Just n -> Right (ExpectCT n enforce uri)
+        Nothing -> Left "Expect-CT requires max-age"
+      d : ds -> case d of
+        MaxAge n -> case age of
+          Just _ -> Left "Duplicate max-age directive"
+          Nothing -> go (Just n) enforce uri seen ds
+        Enforce
+          | enforce -> Left "Duplicate enforce directive"
+          | otherwise -> go age True uri seen ds
+        ReportURI u -> case uri of
+          Just _ -> Left "Duplicate report-uri directive"
+          Nothing -> go age enforce (Just u) seen ds
+        Extension name
+          | Set.member name seen -> Left "Duplicate Expect-CT extension"
+          | otherwise -> go age enforce uri (Set.insert name seen) ds
 
 
 renderExpectCT :: ExpectCT -> M.Builder
-renderExpectCT (ExpectCT ma enf rpt) =
-  M.intersperse ", " parts
-  where
-    parts =
-      ["max-age=" <> M.wordDec ma]
-        ++ ["enforce" | enf]
-        ++ maybe [] (\u -> ["report-uri=" <> quoted u]) rpt
-
-
-{- | Render a value as an HTTP @quoted-string@ (no escaping; report URIs do not
-contain @\"@ or @\\@).
--}
-quoted :: ST.ShortText -> M.Builder
-quoted t = M.char7 '"' <> shortText t <> M.char7 '"'
+renderExpectCT (ExpectCT age enforce uri) =
+  "max-age="
+    <> M.wordDec age
+    <> (if enforce then ", enforce" else mempty)
+    <> maybe mempty (\u -> ", report-uri=" <> quoted u) uri

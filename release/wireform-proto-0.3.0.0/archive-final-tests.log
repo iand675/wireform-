@@ -1,0 +1,1172 @@
+Build profile: -w ghc-9.10.3 -O2
+In order, the following will be built (use -v for more details):
+ - wireform-proto-0.3.0.0 (lib) (configuration changed)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-test) (dependency rebuilt)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-regression-test) (dependency rebuilt)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-derive-test) (dependency rebuilt)
+ - wireform-proto-0.3.0.0 (test:protobuf-conformance-test) (dependency rebuilt)
+Configuring library for wireform-proto-0.3.0.0...
+Preprocessing library for wireform-proto-0.3.0.0...
+Building library for wireform-proto-0.3.0.0...
+[32 of 70] Compiling Proto.CodeGen    ( src/Proto/CodeGen.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen.dyn_o ) [Source file changed]
+[65 of 70] Compiling Proto.Setup      ( src/Proto/Setup.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Setup.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Setup.dyn_o ) [Proto.CodeGen changed]
+src/Proto/Setup.hs:72:34: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘ProtoFile'’ from module ‘Proto.IDL.AST’ is redundant
+   |
+72 | import Proto.IDL.AST (ProtoFile, ProtoFile' (..))
+   |                                  ^^^^^^^^^^^^^^^
+
+Preprocessing test suite 'wireform-proto-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-test' for wireform-proto-0.3.0.0...
+Preprocessing test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+<no location info>: warning: [GHC-32850] [-Wmissing-home-modules]
+    These modules are needed for compilation but not listed in your .cabal file's other-modules for ‘wireform-proto-0.3.0.0-inplace-wireform-proto-regression-test’ :
+        Generated.Integermaps
+
+[ 1 of 19] Compiling Test.CodeGen     ( test-integration/Test/CodeGen.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/CodeGen.o ) [Proto.CodeGen changed]
+[3 of 5] Compiling Generated.Integermaps ( test-regression/Generated/Integermaps.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Generated/Integermaps.o )
+test-regression/Generated/Integermaps.hs:106:111: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Word64 -> Word64
+      can probably be omitted
+    |
+106 |     <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 4 (encodeFieldString 1 k) ((encodeFieldVarint 2 . fromIntegral) v)) mempty msg.integerMapsUint64Values
+    |                                                                                                               ^^^^^^^^^^^^
+
+test-regression/Generated/Integermaps.hs:122:92: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Word64 -> Word64
+      can probably be omitted
+    |
+122 |     + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldVarintSize 2 (fromIntegral v) in acc + tagSize 4 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsUint64Values)
+    |                                                                                            ^^^^^^^^^^^^
+
+[ 4 of 19] Compiling Test.Hooks       ( test-integration/Test/Hooks.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Hooks.o ) [Proto.CodeGen changed]
+test-integration/Test/Hooks.hs:7:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.CodeGen.Hooks’ is redundant
+      except perhaps to import instances from ‘Proto.CodeGen.Hooks’
+    To import instances alone, use: import Proto.CodeGen.Hooks()
+  |
+7 | import Proto.CodeGen.Hooks
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/Hooks.hs:251:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h1’
+    |
+251 |                 let h1 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:252:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h2’
+    |
+252 |                     h2 = mempty :: THHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:256:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h1’
+    |
+256 |                 let h1 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:257:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h2’
+    |
+257 |                     h2 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:258:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘combined’
+    |
+258 |                     combined = h1 <> h2
+    |                     ^^^^^^^^
+
+test-integration/Test/Hooks.hs:261:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+261 |                 let hook = thOnMessageAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+test-integration/Test/Hooks.hs:265:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+265 |                 let hook = thOnEnumAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+test-integration/Test/Hooks.hs:269:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+269 |                 let hook = thOnFileAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+[20 of 20] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test [Objects changed]
+Running 1 test suites...
+Test suite wireform-proto-test: RUNNING...
+WARNING: Only one CPU core detected, make sure to compile your test suite with these ghc options:
+         -threaded -rtsopts -with-rtsopts=-N
+         (This is important for correctness as well as speed, as a parallel test suite can find thread safety problems.)
+Tests:
+
+wireform-proto
+  CodeGen Hooks
+    messageOptions extraction
+      ✓ extracts MEOption from message elements                                           0.65 ms
+    Hook context construction
+      ✓ message hook receives correct type name                                           1.12 ms
+      ✓ message hook receives FQ proto name                                               0.10 ms
+      ✓ enum hook receives correct type name                                              0.61 ms
+      ✓ file hook receives module name                                                    0.32 ms
+    Attribute query helpers
+      ✓ lookupAttribute returns Nothing for missing                                       6.68 ms
+      ✓ lookupAttribute finds extension option                                            0.01 ms
+      ✓ type mismatch returns Nothing                                                     0.00 ms
+      ✓ attributeAsFloat                                                                  0.03 ms
+      ✓ attributeAsBool                                                                   0.00 ms
+      ✓ attributeAsAggregate                                                              0.03 ms
+      ✓ attributeAsText                                                                   0.00 ms
+      ✓ attributeAsInt                                                                    0.01 ms
+      ✓ hasAttribute                                                                      0.00 ms
+    THHooks construction
+      ✓ defaultTHHooks is mempty                                                          0.01 ms
+      ✓ thOnEnumAttribute constructs without error                                        0.00 ms
+      ✓ thOnFileAttribute constructs without error                                        0.00 ms
+      ✓ thOnMessageAttribute constructs without error                                     0.01 ms
+      ✓ THHooks compose with <>                                                           0.00 ms
+    Hook composition
+      ✓ mempty produces no extra output                                                   0.18 ms
+      ✓ composed hooks both produce output                                                0.07 ms
+    Attribute-driven hooks
+      ✓ onMessageAttribute does not fire without attribute                                0.08 ms
+      ✓ onEnumAttribute fires with matching option                                        0.09 ms
+      ✓ onFileAttribute fires with matching file option                                   0.02 ms
+      ✓ onMessageAttribute fires when attribute present                                   0.08 ms
+  Well-Known Types
+    Timestamp
+      ✓ roundtrip                                                                         1.55 ms
+        passed for all of 100 inputs.
+      ✓ sized encoding matches                                                            0.01 ms
+      ✓ JSON with nanos                                                                   0.02 ms
+      ✓ JSON nanos trailing zeros trimmed                                                 0.03 ms
+      ✓ JSON canonical RFC 3339                                                           0.00 ms
+      ✓ default is zero-length                                                            0.01 ms
+    Empty
+      ✓ empty roundtrip                                                                   0.00 ms
+    Struct
+      ✓ list value roundtrip                                                              0.04 ms
+      ✓ value null roundtrip                                                              0.00 ms
+      ✓ value number roundtrip                                                            0.01 ms
+      ✓ empty struct roundtrip                                                            0.00 ms
+      ✓ value bool roundtrip                                                              0.00 ms
+      ✓ value string roundtrip                                                            0.01 ms
+    Hashable instances
+      ✓ Timestamp: equal values have equal hashes                                         1.06 ms
+        passed for all of 100 inputs.
+      ✓ Struct: hashable with map field                                                   0.54 ms
+        passed for all of 100 inputs.
+      ✓ Timestamp: different values have different hashes                                 0.02 ms
+      ✓ Duration: hashWithSalt works                                                      0.00 ms
+      ✓ Empty: hashable                                                                   0.00 ms
+      ✓ FieldMask: hashable with vector field                                             2.02 ms
+        passed for all of 100 inputs.
+    FieldMask
+      ✓ roundtrip                                                                         0.02 ms
+    Exact-size encoding
+      ✓ encodeMessageSized matches encodeMessage for Timestamp                            1.29 ms
+        passed for all of 100 inputs.
+      ✓ encodeMessageSized matches encodeMessage for Duration                             1.06 ms
+        passed for all of 100 inputs.
+    Duration
+      ✓ JSON negative                                                                     0.05 ms
+      ✓ JSON canonical seconds                                                            0.00 ms
+      ✓ roundtrip                                                                         1.07 ms
+        passed for all of 100 inputs.
+      ✓ JSON with nanos                                                                   0.01 ms
+    Any
+      ✓ TypeRegistry unknown type returns Nothing                                         0.05 ms
+      ✓ packAnyWithPrefix custom prefix                                                   0.01 ms
+      ✓ unpackAny type mismatch returns Nothing                                           0.00 ms
+      ✓ packAny Timestamp roundtrip                                                       1.28 ms
+        passed for all of 100 inputs.
+      ✓ isMessageType                                                                     0.01 ms
+      ✓ TypeRegistry codec lookup                                                         0.13 ms
+      ✓ packAny Empty                                                                     0.00 ms
+      ✓ packAny Duration roundtrip                                                        1.20 ms
+        passed for all of 100 inputs.
+      ✓ Any wire roundtrip preserves content                                              0.02 ms
+      ✓ typeNameFromUrl strips prefix                                                     0.03 ms
+      ✓ raw Any roundtrip                                                                 7.56 ms
+        passed for all of 100 inputs.
+    Wrappers
+      ✓ BytesValue roundtrip                                                              6.78 ms
+        passed for all of 100 inputs.
+      ✓ DoubleValue roundtrip                                                             1.16 ms
+        passed for all of 100 inputs.
+      ✓ Int32Value roundtrip                                                              1.19 ms
+        passed for all of 100 inputs.
+      ✓ StringValue roundtrip                                                             7.32 ms
+        passed for all of 100 inputs.
+      ✓ FloatValue roundtrip                                                              1.24 ms
+        passed for all of 100 inputs.
+      ✓ Int64Value roundtrip                                                              1.19 ms
+        passed for all of 100 inputs.
+      ✓ BoolValue roundtrip                                                               1.03 ms
+        passed for all of 100 inputs.
+      ✓ UInt64Value roundtrip  [4 of 5] Compiling THFixtures       ( test-regression/THFixtures.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/THFixtures.o ) [Source file changed]
+                                                           0.85 ms
+        passed for all of 100 inputs.
+    SourceContext
+      ✓ roundtrip                                                                         9.16 ms
+        passed for all of 100 inputs.
+  JSON representation helpers
+    Strict Text
+      ✓ .=: / parseFieldMaybe roundtrip                                                   7.39 ms
+        passed for all of 100 inputs.
+    ShortByteString (base64)
+      ✓ roundtrip via Value                                                               7.92 ms
+        passed for all of 100 inputs.
+      ✓ field helper roundtrip                                                            9.52 ms
+        passed for all of 100 inputs.
+    Missing / null field handling
+      ✓ parseShortTextFieldMaybe missing -> Nothing                                       0.01 ms
+      ✓ parseLazyTextFieldMaybe missing -> Nothing                                        0.04 ms
+      ✓ parseShortBytesFieldMaybe missing -> Nothing                                      0.00 ms
+      ✓ parseLazyBytesFieldMaybe missing -> Nothing                                       0.00 ms
+      ✓ parseBytesFieldMaybe null -> Nothing                                              0.04 ms
+      ✓ parseBytesFieldMaybe missing -> Nothing                                           0.00 ms
+      ✓ parseHsStringFieldMaybe missing -> Nothing                                        0.00 ms
+    Strict ByteString (base64)
+      ✓ field helper roundtrip                                                            9.63 ms
+        passed for all of 100 inputs.
+      ✓ encodes as base64 string                                                          0.01 ms
+      ✓ roundtrip via Value                                                               7.46 ms
+        passed for all of 100 inputs.
+    Haskell String
+      ✓ field helper roundtrip                                                           11.07 ms
+        passed for all of 100 inputs.
+    Map representations
+      HashMap
+        ✓ hashMapToJSON preserves entries                                                 0.08 ms
+        ✓ hashMapToJSON roundtrip                                                         5.38 ms
+          passed for all of 100 inputs.
+        ✓ hashMapToJSON empty                                                             0.01 ms
+      Cross-representation consistency
+        ✓ ordMap JSON parses as hashMap and vice versa                                    6.94 ms
+          passed for all of 100 inputs.
+        ✓ ordMap and hashMap produce same JSON                                            4.01 ms
+          passed for all of 100 inputs.
+      ✓ parseHashMapFromJSON non-object -> fail                                           0.05 ms
+      Ordered Map (Map.Map)
+        ✓ ordMapToJSON roundtrip                                                          4.76 ms
+          passed for all of 100 inputs.
+        ✓ ordMapToJSON empty                                                              0.03 ms
+        ✓ ordMapToJSON preserves entries                                                  0.07 ms
+      ✓ parseOrdMapFromJSON non-object -> fail                                            0.00 ms
+    Cross-representation consistency
+      ✓ all bytes reps produce same base64                                                8.10 ms
+        passed for all of 100 inputs.
+      ✓ all text reps produce same JSON string                                            7.29 ms
+        passed for all of 100 inputs.
+    Lazy Text
+      ✓ field helper roundtrip                                                            7.09 ms
+        passed for all of 100 inputs.
+    ShortByteString as text (UTF-8)
+      ✓ field helper roundtrip                                                            6.99 ms
+        passed for all of 100 inputs.
+    Type mismatch errors
+      ✓ parseHsStringFieldMaybe non-string -> fail                                        0.01 ms
+      ✓ parseBytesFieldMaybe non-string -> fail                                           0.03 ms
+      ✓ parseShortTextFieldMaybe non-string -> fail                                       0.03 ms
+      ✓ parseLazyTextFieldMaybe non-string -> fail                                        0.00 ms
+    Lazy ByteString (base64)
+      ✓ roundtrip via Value                                                               5.48 ms
+        passed for all of 100 inputs.
+      ✓ field helper roundtrip                                                            5.47 ms
+        passed for all of 100 inputs.
+  Print & Inspect
+    Exact printing
+      ✓ field options roundtrip                                                           0.14 ms
+      ✓ editions reserved identifiers print unquoted                                      0.05 ms
+      ✓ service roundtrip                                                                 0.11 ms
+      ✓ public import                                                                     0.01 ms
+      ✓ option with extension name roundtrip                                              0.06 ms
+      ✓ oneof roundtrip                                                                   0.10 ms
+      ✓ package declaration                                                               0.02 ms
+      ✓ proto3 reserved names still print quoted                                          0.03 ms
+      ✓ aggregate with list / extension-key values roundtrip                              0.11 ms
+      ✓ syntax proto2                                                                     0.02 ms
+      ✓ reserved roundtrip                                                                0.06 ms
+      ✓ nested message roundtrip                                                          0.07 ms
+      ✓ enum roundtrip                                                                    0.05 ms
+      ✓ map field roundtrip                                                               0.08 ms
+      ✓ streaming rpc roundtrip                                                           0.04 ms
+      ✓ syntax declaration                                                                0.00 ms
+      ✓ editions reserved identifiers roundtrip                                           0.04 ms
+      ✓ nested extend roundtrip                                                           0.05 ms
+      ✓ simple message roundtrip                                                          0.04 ms
+      ✓ extensions with options roundtrip                                                 0.08 ms
+      ✓ import                                                                            0.01 ms
+      ✓ proto2 group roundtrip (desugared to message + field)                             0.06 ms
+      ✓ roundtrip: parse -> print -> parse yields same AST                                0.41 ms
+    AST inspection
+      ✓ allTypeNames                                                                      0.05 ms
+      ✓ referencedTypes                                                                   0.00 ms
+      ✓ nestedMessages                                                                    0.00 ms
+      ✓ messageOneofs                                                                     0.00 ms
+      ✓ allServices                                                                       0.01 ms
+      ✓ findMessage                                                                       0.00 ms
+      ✓ messageFields                                                                     0.00 ms
+      ✓ messageMapFields                                                                  0.01 ms
+      ✓ allMessages finds top-level and nested                                            0.00 ms
+      ✓ summarize                                                                         0.01 ms
+      ✓ allEnums                                                                          0.00 ms
+    Exact printing (byte-for-byte)
+      ✓ preserves a trailing ';' after a message block                                    0.03 ms
+      ✓ preserves extensions options source verbatim                                      0.03 ms
+      ✓ preserves proto2 group source verbatim                                            0.03 ms
+      ✓ preserves stray ';' between and inside declarations                               0.02 ms
+      ✓ reproduces a complex file byte-for-byte                                           0.21 ms
+      ✓ preserves a trailing ';' after enum and service blocks                            0.03 ms
+  RingSink (sendBuilderDirect)
+    ✓ generated StringValue with mixed-width UTF-8 matches the reference encoding        27.16 ms
+      passed for all of 100 inputs.
+    ✓ string field at ring boundaries matches the reference encoding                     66.13 ms
+      passed for all of 100 inputs.
+  Streaming & Lazy Codecs
+    Lazy encoding
+      ✓ encodeMessageLazy matches strict                                                  4.44 ms
+        passed for all of 100 inputs.
+      ✓ encodeMessageLazy matches strict                                                  3.40 ms
+        passed for all of 100 inputs.
+      ✓ encodeMessageLazy matches encodeMessageLazy                                       4.05 ms
+        passed for all of 100 inputs.
+    Incremental decoder
+      ✓ single message fed byte-by-byte                                                   4.19 ms
+        passed for all of 100 inputs.
+      ✓ split at arbitrary byte boundary                                                  6.18 ms
+        passed for all of 100 inputs.
+      ✓ Nothing at start yields IFail                                                     0.05 ms
+      ✓ two messages fed together                                                         7.46 ms
+        passed for all of 100 inputs.
+      ✓ truncated payload                                                                 0.02 ms
+      ✓ truncated varint                                                                  0.04 ms
+      ✓ empty message                                                                     0.02 ms
+      ✓ preserves leftover bytes                                                          6.53 ms
+        passed for all of 100 inputs.
+      ✓ single message fed all at once                                                    4.80 ms
+        passed for all of 100 inputs.
+    Lazy decoding
+      ✓ decodeMessageLazy roundtrip                                                       4.10 ms
+        passed for all of 100 inputs.
+      ✓ decodeMessageLazy empty                                                           0.01 ms
+      ✓ decodeMessageLazy multi-chunk                                                     0.06 ms
+    Stream framing roundtrip
+      ✓ stream decode truncated payload                                                   0.00 ms
+      ✓ stream decode truncated length                                                    0.00 ms
+      ✓ stream roundtrip (no size)                                                       23.51 ms
+        passed for all of 100 inputs.
+      ✓ single-message stream                                                             0.06 ms
+      ✓ empty stream                                                                      0.00 ms
+      ✓ sized stream matches non-sized stream                                            22.72 ms
+        passed for all of 100 inputs.
+      ✓ stream roundtrip (sized)                                                         22.94 ms
+        passed for all of 100 inputs.
+      ✓ stream framing matches manual framing                                            13.13 ms
+        passed for all of 100 inputs.
+  Schema (generated record fields)
+    ✓ generated field names                                                               0.02 ms
+    ✓ record update                                                                       0.03 ms
+    ✓ default value                                                                       0.00 ms
+  Parser
+    Syntax declaration
+      ✓ proto3 syntax                                                                     0.02 ms
+      ✓ default syntax is proto3                                                          0.00 ms
+      ✓ proto2 syntax                                                                     0.02 ms
+    Oneof
+      ✓ oneof definition                                                                  0.05 ms
+    Lexical & grammar conformance
+      ✓ two-hex-digit escape still works (\x41)                                           0.02 ms
+      ✓ identifier prefixed by 'inf' is an identifier, not infinity                       0.03 ms
+      ✓ bare 'true' is still a boolean                                                    0.01 ms
+      ✓ BMP unicode escape (\u00e9)                                                       0.01 ms
+      ✓ bare 'inf' is still infinity                                                      0.01 ms
+      ✓ bare 'nan' is still NaN                                                           0.02 ms
+      ✓ single-hex-digit escape (\xA)                                                     0.05 ms
+      ✓ enum reserved numeric ranges (to / to max)                                        0.05 ms
+      ✓ negative leading-dot float (-.25)                                                 0.07 ms
+      ✓ identifier prefixed by 'true' is an identifier, not a bool                        0.02 ms
+      ✓ trailing-dot float (5.)                                                           0.02 ms
+      ✓ nested extension option name (a).(b).c                                            0.03 ms
+      ✓ leading-dot float (.5)                                                            0.02 ms
+      ✓ full unicode escape (\U0001F600)                                                  0.04 ms
+    Complex proto files
+      ✓ full proto file                                                                   0.25 ms
+    Comments
+      ✓ line comments                                                                     0.04 ms
+      ✓ block comments                                                                    0.03 ms
+    Message definitions
+      ✓ simple message with scalar fields                                                 0.04 ms
+      ✓ repeated fields                                                                   0.03 ms
+      ✓ nested message                                                                    0.02 ms
+      ✓ map fields                                                                        0.03 ms
+      ✓ message with all scalar types                                                     0.09 ms
+    Rich aggregate option values
+      ✓ extension keys keep their brackets                                                0.03 ms
+      ✓ Any-URL keys are accepted                                                         0.04 ms
+      ✓ angle-bracket message values are accepted                                         0.02 ms
+      ✓ list values desugar to repeated key/value pairs                                   0.02 ms
+    Reserved
+      ✓ reserved field names                                                              0.03 ms
+      ✓ reserved field numbers                                                            0.02 ms
+    Service definitions
+      ✓ streaming rpc                                                                     0.03 ms
+      ✓ simple service                                                                    0.10 ms
+    Enum definitions
+      ✓ enum with allow_alias option                                                      0.03 ms
+      ✓ simple enum                                                                       0.02 ms
+    Options and annotations
+      ✓ file-level option                                                                 0.08 ms
+      ✓ aggregate option value                                                            0.03 ms
+      ✓ field options                                                                     0.03 ms
+      ✓ custom extension option                                                           0.03 ms
+    Editions reserved identifiers
+      ✓ message reserved accepts bare identifiers                                         0.02 ms
+      ✓ enum reserved accepts a bare identifier                                           0.01 ms
+    Package declaration
+      ✓ dotted package                                                                    0.02 ms
+      ✓ simple package                                                                    0.08 ms
+    Nested extends
+      ✓ group inside a top-level extend hoists a top-level message                        0.03 ms
+      ✓ group inside a nested extend hoists the group message                             0.09 ms
+      ✓ extend inside a message body is retained as MEExtend                              0.03 ms
+    Empty statements (trailing/stray semicolons)
+      ✓ trailing ';' after an extend block                                                0.02 ms
+      ✓ stray ';' inside a service body and after an rpc block                            0.04 ms
+      ✓ trailing ';' after a service block                                                0.02 ms
+      ✓ trailing ';' after an enum block                                                  0.02 ms
+      ✓ stray ';' between top-level declarations                                          0.03 ms
+      ✓ stray ';' between message elements                                                0.02 ms
+      ✓ trailing ';' after a oneof block                                                  0.02 ms
+      ✓ trailing ';' after a message block (protoc tolerates '};')                        0.02 ms
+      ✓ stray ';' inside an enum body                                                     0.02 ms
+      ✓ trailing ';' after a nested message inside a message body                         0.03 ms
+      ✓ still rejects a genuinely missing closing brace                                   0.02 ms
+    Groups and extension-range options
+      ✓ extensions without options still parse (empty option list)                        0.04 ms
+      ✓ extensions with a verification option                                             0.04 ms
+      ✓ unlabeled group parses                                                            0.04 ms
+      ✓ extensions with a declaration aggregate option                                    0.03 ms
+      ✓ proto2 group desugars to a nested message plus a field                            0.02 ms
+      ✓ a field whose name starts with 'group' is still a field                           0.02 ms
+    Error message quality
+      ✓ invalid syntax version gives clear message                                        0.01 ms
+      ✓ error messages include source context with line numbers                           0.04 ms
+      ✓ missing message name gives clear message                                          0.02 ms
+      ✓ missing field number gives helpful message                                        0.05 ms
+      ✓ error output rejects invalid inputs                                               0.02 ms
+      ✓ missing comma in map type gives clear message                                     0.03 ms
+      ✓ unclosed string literal gives clear message                                       0.01 ms
+      ✓ missing equals sign gives helpful message                                         0.08 ms
+      ✓ missing semicolon points to correct location                                      0.03 ms
+      ✓ unexpected token at top level gives clear message                                 0.02 ms
+    Import declarations
+      ✓ public import                                                                     0.01 ms
+      ✓ simple import                                                                     0.02 ms
+  Proto.Decode.Collect
+    ✓ clean message: no issues, value decoded                                             0.01 ms
+    ✓ truncated top-level field is reported structurally                                  0.00 ms
+    ✓ invalid UTF-8 string field is reported with its path                                0.03 ms
+  Proto.IDL.Parser.Resolver
+    ✓ circular import detected                                                            1.60 ms
+    ✓ missing import returns FileNotFound                                                 1.17 ms
+    ✓ getBundledIncludeDir returns valid path                                             0.04 ms
+    ✓ resolve proto with subdirectory import                                              1.87 ms
+    ✓ resolve simple proto with no imports                                                0.88 ms
+    ✓ resolve proto with local import                                                     1.70 ms
+    ✓ types from imported files available via registry                                    1.38 ms
+    ✓ well-known import google/protobuf/timestamp.proto resolves                          1.06 ms
+  Well-Known Type Utilities
+    Duration.Util
+      ✓ absDuration of negative                                                           0.04 ms
+      ✓ fromNanos . toNanos is identity                                                   1.37 ms
+        passed for all of 100 inputs.
+      ✓ durationFromSeconds                                                               0.03 ms
+      ✓ isValidDuration valid                                                             0.00 ms
+      ✓ addDurations                                                                      0.00 ms
+      ✓ Ord is consistent with compareDuration                                            2.82 ms
+        passed for all of 100 inputs.
+      ✓ durationToMicros                                                                  0.00 ms
+      ✓ durationFromMillis                                                                0.02 ms
+      ✓ durationFromMillis negative                                                       0.00 ms
+      ✓ NominalDiffTime roundtrip                                                         1.47 ms
+        passed for all of 100 inputs.
+      ✓ durationToMillis                                                                  0.04 ms
+      ✓ isValidDuration invalid range                                                     0.00 ms
+      ✓ durationToNanos                                                                   0.00 ms
+      ✓ normalizeDuration                                                                 0.02 ms
+      ✓ isValidDuration invalid sign mismatch                                             0.00 ms
+      ✓ durationFromMicros                                                                0.02 ms
+      ✓ durationFromNanos                                                                 0.00 ms
+      ✓ negateDuration                                                                    0.00 ms
+    Wrappers.Util
+      ✓ UInt32Value roundtrip                                                             1.08 ms
+        passed for all of 100 inputs.
+      ✓ DoubleValue roundtrip                                                             0.90 ms
+        passed for all of 100 inputs.
+      ✓ BytesValue roundtrip                                                              3.54 ms
+        passed for all of 100 inputs.
+      ✓ Maybe conversions                                                                 0.01 ms
+      ✓ StringValue roundtrip                                                             7.20 ms
+        passed for all of 100 inputs.
+      ✓ FloatValue roundtrip                                                              0.91 ms
+        passed for all of 100 inputs.
+      ✓ BoolValue roundtrip                                                               0.89 ms
+        passed for all of 100 inputs.
+      ✓ Int32Value roundtrip                                                              0.95 ms
+        passed for all of 100 inputs.
+      ✓ Int64Value roundtrip                                                              1.03 ms
+        passed for all of 100 inputs.
+      ✓ UInt64Value roundtrip                                                             0.99 ms
+        passed for all of 100 inputs.
+    Timestamp.Util
+      ✓ epoch is zero                                                                     0.01 ms
+      ✓ specific POSIX time                                                               0.06 ms
+      ✓ addDuration then subtract gives identity                                          1.61 ms
+        passed for all of 100 inputs.
+      ✓ isValidTimestamp valid                                                            0.00 ms
+      ✓ addDuration                                                                       0.02 ms
+      ✓ POSIXTime roundtrip                                                               1.60 ms
+        passed for all of 100 inputs.
+      ✓ subtractTimestamps                                                                0.01 ms
+      ✓ isValidTimestamp invalid nanos                                                    0.02 ms
+      ✓ UTCTime roundtrip                                                                 1.82 ms
+        passed for all of 100 inputs.
+      ✓ Ord is consistent with compareTimestamp                                           1.97 ms
+        passed for all of 100 inputs.
+    FieldMask.Util
+      ✓ isEmpty                                                                           0.02 ms
+      ✓ contains parent covers child                                                      0.03 ms
+      ✓ union deduplicates                                                                0.01 ms
+      ✓ intersection with parent coverage                                                 0.00 ms
+      ✓ toSnakeCase                                                                       0.01 ms
+      ✓ normalize sorts and deduplicates                                                  0.00 ms
+      ✓ contains direct                                                                   0.00 ms
+      ✓ isValid accepts sub-paths when top-level matches                                  0.00 ms
+      ✓ allFieldMask for Timestamp                                                        0.00 ms
+      ✓ toCamelCase                                                                       0.01 ms
+      ✓ canonicalForm                                                                     0.00 ms
+      ✓ fromPaths / toPaths                                                               0.00 ms
+      ✓ subtractMask                                                                      0.01 ms
+      ✓ union removes sub-paths                                                           0.00 ms
+      ✓ isValid against Timestamp                                                         0.00 ms
+      ✓ intersection                                                                      0.01 ms
+      ✓ normalize removes sub-paths                                                       0.00 ms
+    Struct.Util
+      ✓ Aeson roundtrip via Value                                                         0.02 ms
+      ✓ fromPairs / toMap                                                                 0.01 ms
+      ✓ stringValue extraction                                                            0.00 ms
+      ✓ listValue extraction                                                              0.00 ms
+      ✓ numberValue extraction                                                            0.00 ms
+      ✓ nullValue extraction                                                              0.00 ms
+      ✓ structValue extraction                                                            0.00 ms
+      ✓ boolValue extraction                                                              0.00 ms
+      ✓ Aeson roundtrip via Struct                                                        0.02 ms
+  Roundtrip Encoding/Decoding
+    Packed encoding helpers
+      ✓ packed fixed32 roundtrip                                                          2.84 ms
+        passed for all of 100 inputs.
+      ✓ packed sint32 roundtrip                                                           2.80 ms
+        passed for all of 100 inputs.
+      ✓ packed double roundtrip                                                           2.55 ms
+        passed for all of 100 inputs.
+      ✓ packed varint roundtrip                                                           2.94 ms
+        passed for all of 100 inputs.
+    Multi-field message roundtrip
+      ✓ multi-field roundtrip                                                             5.14 ms
+        passed for all of 100 inputs.
+    Hand-crafted message roundtrip
+      ✓ nested message encode/decode                                                      0.01 ms
+      ✓ message with missing optional fields                                              0.00 ms
+      ✓ packed repeated field                                                             0.03 ms
+      ✓ simple message encode/decode                                                      0.02 ms
+      ✓ message with repeated field                                                       0.00 ms
+      ✓ message with unknown fields                                                       0.01 ms
+    Unknown field preservation
+      ✓ capture and re-encode unknown fields                                              0.01 ms
+    Size calculation
+      ✓ tagSize correct                                                                   1.22 ms
+        passed for all of 100 inputs.
+      ✓ varintSize correct                                                                0.98 ms
+        passed for all of 100 inputs.
+    Field type roundtrips
+      ✓ fixed32 field roundtrip                                                           0.99 ms
+        passed for all of 100 inputs.
+      ✓ bytes field roundtrip                                                            15.47 ms
+        passed for all of 100 inputs.
+      ✓ string field roundtrip                                                           27.77 ms
+        passed for all of 100 inputs.
+      ✓ int32 field roundtrip                                                             1.06 ms
+        passed for all of 100 inputs.
+    MessageEncode/MessageDecode typeclass roundtrip
+      ✓ TestMsg roundtrip                                                                 4.68 ms
+        passed for all of 100 inputs.
+      ✓ TestMsg size always matches                                                       7.97 ms
+        passed for all of 100 inputs.
+      ✓ TestMsg with submessage roundtrip                                                 3.37 ms
+        passed for all of 100 inputs.
+      ✓ TestMsg size calculation matches encoding                                         0.01 ms
+    Lazy submessage decoding
+      ✓ lazy message captures bytes                                                       0.01 ms
+    SizedBuilder (fused size+builder)
+      ✓ sizedFieldString size matches                                                     8.37 ms
+        passed for all of 100 inputs.
+      ✓ sizedFieldVarint size matches                                                     1.29 ms
+        passed for all of 100 inputs.
+      ✓ sizedFieldDouble size matches                                                     1.27 ms
+        passed for all of 100 inputs.
+      ✓ sizedFieldBool size matches                                                       1.13 ms
+        passed for all of 100 inputs.
+      ✓ sizedFieldMessage size matches                                                    2.60 ms
+        passed for all of 100 inputs.
+  Dynamic Schema-Driven Decoder
+    Packed field optimizations
+      ✓ packed sint64 pre-allocated path                                                  5.64 ms
+        passed for all of 100 inputs.
+      ✓ packed varint single-byte fast path                                               6.98 ms
+        passed for all of 100 inputs.
+      ✓ packed double bulk memcpy path                                                    6.70 ms
+        passed for all of 100 inputs.
+      ✓ packed sint32 pre-allocated path                                                  4.74 ms
+        passed for all of 100 inputs.
+      ✓ packed varint multi-byte values                                                   4.24 ms
+        passed for all of 100 inputs.
+      ✓ packed float bulk memcpy path                                                     6.09 ms
+        passed for all of 100 inputs.
+      ✓ packed fixed32 bulk memcpy path                                                   7.53 ms
+        passed for all of 100 inputs.
+      ✓ packed fixed64 bulk memcpy path                                                   7.22 ms
+        passed for all of 100 inputs.
+    withTagM CPS dispatch
+      ✓ withTagM at EOF returns kEOF                                                      0.05 ms
+      ✓ map entry decode via withTagM                                                     0.01 ms
+      ✓ map entry with reversed field order                                               0.01 ms
+      ✓ withTagM dispatches correctly on wire type                                        0.00 ms
+      ✓ withTagM on varint field                                                          0.00 ms
+    SWAR UTF-8 validation
+      ✓ empty is valid                                                                    0.01 ms
+      ✓ valid 3-byte UTF-8                                                                0.00 ms
+      ✓ long ASCII string                                                                 0.01 ms
+      ✓ invalid: bare continuation byte                                                   0.00 ms
+      ✓ invalid: truncated 3-byte                                                         0.00 ms
+      ✓ invalid: truncated 2-byte                                                         0.01 ms
+      ✓ all generated unicode text is valid                                              29.07 ms
+        passed for all of 100 inputs.
+      ✓ invalid: overlong 2-byte                                                          0.04 ms
+      ✓ invalid: byte 0xFF                                                                0.00 ms
+      ✓ invalid: surrogate                                                                0.00 ms
+      ✓ valid 4-byte UTF-8                                                                0.01 ms
+      ✓ ASCII is valid                                                                    0.00 ms
+      ✓ valid 2-byte UTF-8                                                                0.01 ms
+      ✓ mixed ASCII and multibyte                                                         0.00 ms
+    Core interpreter
+      ✓ last value wins for scalar fields                                                 0.03 ms
+      ✓ single varint field                                                               0.00 ms
+      ✓ unknown fields are skipped                                                        0.01 ms
+      ✓ fields out of order                                                               0.00 ms
+      ✓ multiple fields in order                                                          0.00 ms
+      ✓ fixed32 field                                                                     0.01 ms
+      ✓ empty message                                                                     0.00 ms
+      ✓ multiple varint fields roundtrip                                                  1.90 ms
+        passed for all of 100 inputs.
+      ✓ fixed64 field                                                                     0.04 ms
+      ✓ varint field roundtrip through TDP                                                1.18 ms
+        passed for all of 100 inputs.
+    Compilation from schema
+      ✓ compiled table decodes matching wire data                                         0.06 ms
+      ✓ compileParseTable produces non-empty table                                        0.00 ms
+      ✓ compiled table roundtrips with encodeMessage                                      3.80 ms
+        passed for all of 100 inputs.
+      ✓ TagLUT has entries for small field numbers                                        0.05 ms
+    Wire FFI (SWAR)
+      ✓ countPackedVarints single byte                                                    0.00 ms
+      ✓ countPackedVarints matches manual count                                           5.25 ms
+        passed for all of 100 inputs.
+      ✓ countPackedVarints empty                                                          0.01 ms
+      ✓ countPackedVarints mixed                                                          0.04 ms
+      ✓ countPackedVarints all single byte                                                0.01 ms
+      ✓ packedAllSingleByte all small                                                     0.01 ms
+      ✓ packedAllSingleByte correct for small values                                      6.53 ms
+        passed for all of 100 inputs.
+      ✓ packedAllSingleByte false when large varint present                               2.94 ms
+        passed for all of 100 inputs.
+      ✓ packedAllSingleByte empty                                                         0.04 ms
+      ✓ countPackedVarints two-byte varints                                               0.00 ms
+      ✓ packedAllSingleByte has continuation                                              0.00 ms
+  Standard Options
+    Cross-language packages
+      ✓ extractLanguagePackages                                                           0.18 ms
+    Deprecation helpers
+      ✓ deprecatedFields                                                                  0.06 ms
+      ✓ isDeprecated                                                                      0.00 ms
+    Field options
+      ✓ json_name                                                                         0.06 ms
+      ✓ deprecated field                                                                  0.02 ms
+    File options
+      ✓ defaults when no options                                                          0.01 ms
+      ✓ optimize_for                                                                      0.03 ms
+      ✓ deprecated file                                                                   0.01 ms
+      ✓ java_package                                                                      0.01 ms
+      ✓ go_package                                                                        0.02 ms
+    Enum options
+      ✓ allow_alias                                                                       0.03 ms
+  Code Generation
+    Annotations
+      ✓ lookup simple option                                                              0.01 ms
+      ✓ extension option lookup                                                           0.02 ms
+      ✓ hasOption check                                                                   0.04 ms
+      ✓ typed option extraction                                                           0.02 ms
+      ✓ extract custom annotation                                                         0.05 ms
+    Code generation from parsed proto
+      ✓ generates enum                                                                    0.09 ms
+      ✓ proto3 optional scalar gets Maybe wrapper                                         0.21 ms
+      ✓ generates module for simple message                                               0.18 ms
+    Type name conversion
+      ✓ field name no underscore                                                          0.00 ms
+      ✓ enum constructor                                                                  0.02 ms
+      ✓ simple name                                                                       0.00 ms
+      ✓ field name conversion                                                             0.00 ms
+      ✓ already capitalized                                                               0.01 ms
+      ✓ module name                                                                       0.00 ms
+  Wire Format
+    Error handling
+      ✓ unexpected end on fixed64                                                         0.00 ms
+      ✓ unexpected end on varint                                                          0.00 ms
+      ✓ extra bytes after decode                                                          0.01 ms
+      ✓ unexpected end on fixed32                                                         0.00 ms
+    ZigZag encoding
+      ✓ sint64 roundtrip                                                                  1.20 ms
+        passed for all of 100 inputs.
+      ✓ zigzag 1                                                                          0.03 ms
+      ✓ zigzag32 roundtrip                                                                0.98 ms
+        passed for all of 100 inputs.
+      ✓ zigzag -1                                                                         0.00 ms
+      ✓ sint32 roundtrip                                                                  1.13 ms
+        passed for all of 100 inputs.
+      ✓ zigzag -2                                                                         0.01 ms
+      ✓ zigzag64 roundtrip                                                                0.99 ms
+        passed for all of 100 inputs.
+      ✓ zigzag 0                                                                          0.05 ms
+    Length-delimited
+      ✓ text roundtrip                                                                   10.84 ms
+        passed for all of 100 inputs.
+      ✓ zero-copy bytestring                                                              0.02 ms
+      ✓ bytestring roundtrip                                                             26.72 ms
+        passed for all of 100 inputs.
+    Protobuf spec conformance vectors
+      Nested messages (length-delimited)
+        ✓ 3-level nesting roundtrip                                                       0.01 ms
+      Unknown field skipping
+        ✓ skip unknown length-delimited                                                   0.05 ms
+        ✓ skip unknown fixed64                                                            0.00 ms
+        ✓ skip unknown fixed32                                                            0.00 ms
+        ✓ skip unknown varint field                                                       0.01 ms
+      Tag format correctness
+        ✓ field 1 32-bit = 0x0D                                                           0.00 ms
+        ✓ field 2 varint = 0x10                                                           0.00 ms
+        ✓ field 1 64-bit = 0x09                                                           0.00 ms
+        ✓ field 1 length-delimited = 0x0A                                                 0.00 ms
+        ✓ field 16 varint = 0x80 0x01 (2-byte tag)                                        0.00 ms
+        ✓ field 15 varint = 0x78                                                          0.00 ms
+        ✓ field 1 varint = 0x08                                                           0.00 ms
+      ZigZag spec compliance
+        ✓ zigzag(1) = 2                                                                   0.00 ms
+        ✓ zigzag(-2) = 3                                                                  0.01 ms
+        ✓ zigzag64(1) = 2                                                                 0.00 ms
+        ✓ zigzag(-1) = 1                                                                  0.00 ms
+        ✓ zigzag(0) = 0                                                                   0.01 ms
+        ✓ zigzag(-2147483648) = 4294967295                                                0.00 ms
+        ✓ zigzag64(max int64) roundtrip                                                   0.00 ms
+        ✓ zigzag64(0) = 0                                                                 0.01 ms
+        ✓ zigzag(2147483647) = 4294967294                                                 0.00 ms
+        ✓ zigzag64(-1) = 1                                                                0.00 ms
+        ✓ zigzag64(min int64) roundtrip                                                   0.04 ms
+      Varint edge cases
+        ✓ varint 1 = [0x01]                                                               0.01 ms
+        ✓ negative int32 -150 via zigzag                                                  0.00 ms
+        ✓ negative int32 as 10-byte varint                                                0.02 ms
+        ✓ varint 0 = [0x00]                                                               0.00 ms
+        ✓ varint 150 = [0x96, 0x01]                                                       0.01 ms
+        ✓ varint max uint64 (10 bytes)                                                    0.00 ms
+      Packed repeated fields
+        ✓ packed fixed32 [1,2]                                                            0.00 ms
+        ✓ packed varints [1,2,3]                                                          0.00 ms
+        ✓ empty packed = just length 0                                                    0.00 ms
+      Fixed-width exact bytes
+        ✓ fixed32 little-endian 1                                                         0.00 ms
+        ✓ fixed32 little-endian 256                                                       0.00 ms
+        ✓ fixed64 little-endian 1                                                         0.01 ms
+        ✓ double 0.0 = 8 zero bytes                                                       0.00 ms
+        ✓ float 0.0 = [0,0,0,0]                                                           0.00 ms
+    Fixed-width encoding
+      ✓ double roundtrip                                                                  1.04 ms
+        passed for all of 100 inputs.
+      ✓ fixed32 roundtrip                                                                 1.07 ms
+        passed for all of 100 inputs.
+      ✓ float roundtrip                                                                   1.07 ms
+        passed for all of 100 inputs.
+      ✓ fixed64 roundtrip                                                                 1.18 ms
+        passed for all of 100 inputs.
+    Skip unknown fields
+      ✓ skip varint                                                                       0.01 ms
+      ✓ skip fixed64                                                                      0.04 ms
+      ✓ skip fixed32                                                                      0.00 ms
+      ✓ skip length-delimited                                                             0.01 ms
+    Tag encoding
+      ✓ tag field 1 varint                                                                0.00 ms
+      ✓ tag field 2 varint                                                                0.00 ms
+      ✓ tag field 1 length-delimited                                                      0.01 ms
+      ✓ tag roundtrip                                                                     1.28 ms
+        passed for all of 100 inputs.
+    Varint encoding/decoding
+      ✓ decode 300                                                                        0.01 ms
+      ✓ encode 127                                                                        0.02 ms
+      ✓ decode 1                                                                          0.00 ms
+      ✓ varint size bound                                                                 1.06 ms
+        passed for all of 100 inputs.
+      ✓ varint roundtrip                                                                  0.99 ms
+        passed for all of 100 inputs.
+      ✓ encode 16384                                                                      0.01 ms
+      ✓ encode 128                                                                        0.03 ms
+      ✓ encode 0                                                                          0.00 ms
+      ✓ decode 0                                                                          0.00 ms
+      ✓ encode 300                                                                        0.01 ms
+      ✓ encode 1                                                                          0.00 ms
+  Proto.Lens (record field access)
+    ✓ update via record syntax                                                            0.00 ms
+    ✓ read timestampNanos                                                                 0.01 ms
+    ✓ read timestampSeconds                                                               0.00 ms
+    ✓ default values                                                                      0.01 ms
+  Schema Compatibility
+    Transitive compatibility
+      ✓ checkCompatAll with multiple versions                                             0.11 ms
+      ✓ transitive fails if any version is incompatible                                   0.07 ms
+    Enum compatibility
+      ✓ removing enum value breaks backward                                               0.05 ms
+      ✓ adding enum value warns for forward                                               0.03 ms
+      ✓ renaming enum value warns                                                         0.03 ms
+    NONE level
+      ✓ NONE always passes                                                                0.01 ms
+    FULL compatibility
+      ✓ adding optional field is full compatible                                          0.03 ms
+      ✓ removing field without reserving breaks full                                      0.03 ms
+    Field name changes
+      ✓ renaming a field warns                                                            0.04 ms
+    Complex schema evolution
+      ✓ safe evolution: add fields, reserve removed                                       0.11 ms
+    FORWARD compatibility
+      ✓ adding field is forward compatible (old ignores new)                              0.02 ms
+      ✓ removing field is forward compatible                                              0.07 ms
+      ✓ type change (incompatible wire) breaks forward                                    0.04 ms
+    BACKWARD compatibility
+      ✓ changing between wire-compatible types warns                                      0.03 ms
+      ✓ adding required field breaks backward                                             0.02 ms
+      ✓ removing field with reservation is backward compatible                            0.08 ms
+      ✓ adding optional field is backward compatible                                      0.03 ms
+      ✓ removing field without reserving breaks backward                                  0.02 ms
+      ✓ changing field type (incompatible wire) breaks backward                           0.03 ms
+      ✓ identical schemas are compatible                                                  0.02 ms
+
+  Examples:                     11715
+  Passed:                       528
+  Failed:                       0
+  Sum of test runtimes:         0.69 seconds
+  Test suite took:              0.69 seconds
+
+Test suite wireform-proto-test: PASS
+Test suite logged to:
+/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/test/wireform-proto-0.3.0.0-wireform-proto-test.log
+1 of 1 test suites (1 of 1 test cases) passed.
+Preprocessing test suite 'wireform-proto-derive-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-derive-test' for wireform-proto-0.3.0.0...
+[ 2 of 19] Compiling Test.Proto.Derive.AutoInstances ( test/Test/Proto/Derive/AutoInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/AutoInstances.o ) [/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/libHSwireform-proto-0.3.0.0-inplace-ghc9.10.3.dylib changed]
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:11:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘ov’
+   |
+11 | $(loadProto "test-regression/proto/json_numbers.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:11:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+11 | $(loadProto "test-regression/proto/json_numbers.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:14:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+14 | $(loadProto "test-regression/proto/integerMaps.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:14:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+14 | $(loadProto "test-regression/proto/integerMaps.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:14:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+14 | $(loadProto "test-regression/proto/integerMaps.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:14:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+14 | $(loadProto "test-regression/proto/integerMaps.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[ 4 of 19] Compiling Test.Proto.Derive.OneofInstances ( test/Test/Proto/Derive/OneofInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/OneofInstances.o ) [/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/libHSwireform-proto-0.3.0.0-inplace-ghc9.10.3.dylib changed]
+[ 7 of 19] Compiling Test.Proto.Derive.RegressionInstances ( test/Test/Proto/Derive/RegressionInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RegressionInstances.o ) [/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/libHSwireform-proto-0.3.0.0-inplace-ghc9.10.3.dylib changed]
+[10 of 19] Compiling Test.Proto.Derive.RichInstances ( test/Test/Proto/Derive/RichInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RichInstances.o ) [/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/libHSwireform-proto-0.3.0.0-inplace-ghc9.10.3.dylib changed]
+[11 of 19] Compiling Test.Proto.Derive.TopEnumInstances ( test/Test/Proto/Derive/TopEnumInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TopEnumInstances.o ) [/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/libHSwireform-proto-0.3.0.0-inplace-ghc9.10.3.dylib changed]
+test/Test/Proto/Derive/TopEnumInstances.hs:26:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Given ExtensionRegistry
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+   |
+26 | instance Given ExtensionRegistry where
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[15 of 19] Compiling Test.Proto.Derive.TranslatedInstances ( test/Test/Proto/Derive/TranslatedInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TranslatedInstances.o ) [/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/libHSwireform-proto-0.3.0.0-inplace-ghc9.10.3.dylib changed]
+[17 of 19] Compiling Test.Proto.Derive.Instances ( test/Test/Proto/Derive/Instances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Instances.o ) [/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/libHSwireform-proto-0.3.0.0-inplace-ghc9.10.3.dylib changed]
+[20 of 20] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test [Objects changed]
+[5 of 5] Compiling Main             ( test-regression/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Main.o ) [Source file changed]
+Running 1 test suites...
+Test suite wireform-proto-derive-test: RUNNING...
+WARNING: Only one CPU core detected, make sure to compile your test suite with these ghc options:
+         -threaded -rtsopts -with-rtsopts=-N
+         (This is important for correctness as well as speed, as a parallel test suite can find thread safety problems.)
+Tests:
+
+wireform-proto:Derive
+  Proto.TH.Derive
+    ✓ Profile (oneof): unset oneof round-trips                                     0.08 ms
+    ✓ regression: single RegItem matches BridgeRegItem bytes                       0.07 ms
+    ✓ Tagged (map<string, string>): three entries round-trip                       0.15 ms
+    ✓ Profile (oneof): AvatarBlob variant round-trips                              0.09 ms
+    ✓ regression: empty RegInventory matches BridgeRegInventory bytes              0.62 ms
+    ✓ Profile (oneof): later variant wins on the wire                              0.01 ms
+    ✓ Inventory (Vector-repeated submessages): empty round-trips                   0.05 ms
+    ✓ Maybe Address absent skips field                                             0.02 ms
+    ✓ Profile (oneof): AvatarSeed variant round-trips                              0.00 ms
+    ✓ Painting (enum field): zero-valued enum is skipped                           0.03 ms
+    ✓ Painting (enum field): non-default round-trips                               0.00 ms
+    ✓ regression: name-only RegInventory matches                                   0.02 ms
+    ✓ Profile (oneof): AvatarUrl variant round-trips                               0.01 ms
+    ✓ ZigZag override on negative sint32                                           0.01 ms
+    ✓ Tagged (map<string, string>): empty map round-trips                          0.00 ms
+    ✓ LooseInventory (list-repeated strings): preserves order                      0.06 ms
+    ✓ scalar fields round-trip                                                     0.01 ms
+    ✓ default User round-trips                                                     0.00 ms
+    ✓ deriveProtoFromTranslated: round-trip preserves UserT                        0.08 ms
+    ✓ deriveProtoFromTranslated: byte-identical to deriveProto                     0.00 ms
+    ✓ Painting (enum field): default round-trips                                   0.00 ms
+    ✓ regression: repeated submessages produce identical bytes                     0.01 ms
+    ✓ fixed32 override on uint32                                                   0.00 ms
+    ✓ Inventory (Vector-repeated submessages): three elements                      0.01 ms
+    ✓ Maybe Address present round-trips                                            0.00 ms
+  Proto.TH oneof bridge
+    ✓ later variant on the wire wins (proto3 oneof semantics)                      0.02 ms
+    ✓ choice_url variant round-trips                                               0.02 ms
+    ✓ choice_seed variant round-trips                                              0.00 ms
+    ✓ choice_blob variant round-trips                                              0.01 ms
+    ✓ no choice variant set: round-trips empty payload                             0.01 ms
+    ✓ choice_inner submessage variant round-trips                                  0.01 ms
+    ✓ label only: round-trips                                                      0.01 ms
+  loadProto satellite instances
+    ProtoEnum (Status)
+      ✓ primary names round-trip through to/fromProtoEnumValue                     0.01 ms
+      ✓ protoEnumValues lists every declared value                                 0.01 ms
+      ✓ fully qualified protoEnumName                                              0.02 ms
+    Aeson.ToJSON / FromJSON for messages (camelCase keys)
+      ✓ Status enum FromJSON accepts both name and number                          0.02 ms
+      ✓ Account ToJSON / FromJSON round-trip                                       0.10 ms
+      ✓ non-default Account emits both fields with camelCase keys                  0.01 ms
+      ✓ Status enum encodes as its primary name string                             0.01 ms
+      ✓ PackedBag with empty bagNums encodes to {} (proto3-canonical)              0.02 ms
+      ✓ default Account encodes to {} (proto3 canonical: defaults skipped)         0.01 ms
+      ✓ PackedBag ToJSON / FromJSON round-trip                                     0.15 ms
+    Hashable
+      ✓ different Accounts hash differently (sanity)                               0.00 ms
+      ✓ equal Accounts hash equal                                                  0.01 ms
+      ✓ PackedBag hashes survive vector permutation differences                    0.00 ms
+      ✓ Status hashes match its proto wire number                                  0.00 ms
+    ProtoMessage
+      ✓ Account field descriptors expose names + numbers                           0.01 ms
+      ✓ PackedBag schema describes a repeated int32                                0.03 ms
+      ✓ Account name + package + default                                           0.01 ms
+      ✓ Account field descriptor by name returns acct_status                       0.02 ms
+  Proto.TH top-level enum + packed scalar
+    packed scalar (proto3 spec default for repeated int32)
+      ✓ decoder still accepts unpacked encoding                                    0.03 ms
+      ✓ empty bag encodes to 0 bytes                                               0.00 ms
+      ✓ encoded length stays small as element count grows                          0.00 ms
+      ✓ Vector [1,2,3] is one length-delimited block                               0.01 ms
+    top-level enum field encodes as varint, not submessage
+      ✓ enum decoder truncates oversized varint to int32                           0.00 ms
+      ✓ Status = STATUS_BANNED round-trips                                         0.00 ms
+      ✓ Status = STATUS_ACTIVE encodes as varint 1, not as a submessage            0.03 ms
+      ✓ default Status (UNSPECIFIED = 0) is skipped                                0.00 ms
+      ✓ all four Status values round-trip                                          0.00 ms
+  Proto.TH.Derive byte-exact golden vectors
+    ✓ RegItem { regi_count = 1 } skips empty name                                  0.01 ms
+    ✓ RegInventory { name = "warehouse-7" }                                        0.00 ms
+    ✓ RegItem { regi_name = "widget", regi_count = 99 }                            0.00 ms
+    ✓ empty RegInventory encodes to 0 bytes                                        0.00 ms
+    ✓ RegInventory { name = "depot", items = 3 entries }                           0.00 ms
+    ✓ empty RegItem encodes to 0 bytes                                             0.02 ms
+  Proto.TH.Derive auto-detection (analyseField)
+    auto-detected oneof (sum of tagged single-arg constructors)
+      ✓ later variant on wire wins (proto3 oneof semantics)                        0.03 ms
+      ✓ no variant set: round-trips empty payload                                  0.00 ms
+      ✓ AutoSeed variant round-trips                                               0.01 ms
+      ✓ AutoUrl variant round-trips                                                0.03 ms
+    auto-detected list-repeated string (FKRepeated RepList)
+      ✓ preserves order                                                            0.01 ms
+      ✓ empty list round-trips                                                     0.00 ms
+    auto-detected Vector Int32 — packed encoding by default
+      ✓ empty vector encodes to 0 bytes                                            0.01 ms
+      ✓ packed bytes have only one tag for the whole vector                        0.03 ms
+      ✓ decoder accepts unpacked encoding (proto3 spec)                            0.00 ms
+      ✓ Vector [1,2,3] encodes as a packed length-delimited block                  0.00 ms
+      ✓ Vector with a tag field also round-trips                                   0.01 ms
+    auto-detected enum (Maybe AutoColor)
+      ✓ Just AutoRed (zero-valued enum) still encodes                              0.00 ms
+      ✓ default round-trips                                                        0.00 ms
+      ✓ Just AutoBlue round-trips                                                  0.00 ms
+    auto-detected map (FKMap MapKeyString)
+      ✓ empty map round-trips                                                      0.01 ms
+      ✓ two entries round-trip                                                     0.02 ms
+
+  Passed:                       81
+  Failed:                       0
+  Sum of test runtimes:         0.00 seconds
+  Test suite took:              0.00 seconds
+
+Test suite wireform-proto-derive-test: PASS
+Test suite logged to:
+/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/test/wireform-proto-0.3.0.0-wireform-proto-derive-test.log
+1 of 1 test suites (1 of 1 test cases) passed.
+Preprocessing test suite 'protobuf-conformance-test' for wireform-proto-0.3.0.0...
+Building test suite 'protobuf-conformance-test' for wireform-proto-0.3.0.0...
+[2 of 3] Compiling Test.Conformance.Schema ( test-conformance/Test/Conformance/Schema.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/protobuf-conformance-test/opt/build/protobuf-conformance-test/protobuf-conformance-test-tmp/Test/Conformance/Schema.o ) [/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/libHSwireform-proto-0.3.0.0-inplace-ghc9.10.3.dylib changed]
+test-conformance/Test/Conformance/Schema.hs:132:2: warning: [GHC-62412] [-Wsimplifiable-class-constraints]
+    • The constraint ‘Given ExtensionRegistry’ matches
+        instance Given ExtensionRegistry
+          -- Defined at test-conformance/Test/Conformance/Schema.hs:115:10
+      This makes type inference for inner bindings fragile;
+        either use MonoLocalBinds, or simplify it using the instance
+    • In the instance declaration for
+        ‘aeson-2.2.3.0:Data.Aeson.Types.ToJSON.ToJSON TestAllTypesProto2’
+    |
+132 | $(loadProto "test-conformance/protos/test_messages_proto2.proto")
+    |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-conformance/Test/Conformance/Schema.hs:132:2: warning: [GHC-62412] [-Wsimplifiable-class-constraints]
+    • The constraint ‘Given ExtensionRegistry’ matches
+        instance Given ExtensionRegistry
+          -- Defined at test-conformance/Test/Conformance/Schema.hs:115:10
+      This makes type inference for inner bindings fragile;
+        either use MonoLocalBinds, or simplify it using the instance
+    • In the instance declaration for
+        ‘aeson-2.2.3.0:Data.Aeson.Types.FromJSON.FromJSON TestAllTypesProto2’
+    |
+132 | $(loadProto "test-conformance/protos/test_messages_proto2.proto")
+    |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+<no location info>: warning: [GHC-32850] [-Wmissing-home-modules]
+    These modules are needed for compilation but not listed in your .cabal file's other-modules for ‘wireform-proto-0.3.0.0-inplace-wireform-proto-regression-test’ :
+        Generated.Integermaps
+
+[6 of 6] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test [Objects changed]
+Running 1 test suites...
+Test suite wireform-proto-regression-test: RUNNING...
+WARNING: Only one CPU core detected, make sure to compile your test suite with these ghc options:
+         -threaded -rtsopts -with-rtsopts=-N
+         (This is important for correctness as well as speed, as a parallel test suite can find thread safety problems.)
+Tests:
+
+Standalone integer maps
+  ✓ sint32 and sint64 map values use canonical ZigZag and exact sizes              0.27 ms
+  ✓ integer value functions compile and agree with TH for limits and zero          0.41 ms
+ProtoJSON quoted numbers
+  ✓ optional and oneof floating fields use the same number grammar                 0.40 ms
+  ✓ generated Float and Double accept e/E and signed exponents                     0.06 ms
+  ✓ retains canonical NaN/Infinity strings                                         0.57 ms
+  ✓ runtime float/double and int64 helpers accept quoted exponents                 0.04 ms
+  ✓ rejects whitespace, trailing junk, noncanonical sentinels and overflow         0.02 ms
+Editions field presence
+  ✓ standalone codegen preserves every explicitly present scalar default           0.09 ms
+  ✓ loadProto preserves every explicitly present scalar default                    0.13 ms
+  ✓ repeated, map, oneof and nested fields retain their wire shapes                0.17 ms
+  ✓ file and field overrides, aggregate options and nested messages agree          0.15 ms
+  ✓ committed standalone fixtures exactly match the generator                      6.86 ms
+  ✓ absent and explicitly zero fields remain distinct in both generators           0.10 ms
+  ✓ merge preserves an explicitly present zero over a nonzero value                0.03 ms
+  ✓ does not silently accept unsupported LEGACY_REQUIRED presence                  0.10 ms
+
+  Passed:                       15
+  Failed:                       0
+  Sum of test runtimes:         0.01 seconds
+  Test suite took:              0.01 seconds
+
+Test suite wireform-proto-regression-test: PASS
+Test suite logged to:
+/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/test/wireform-proto-0.3.0.0-wireform-proto-regression-test.log
+1 of 1 test suites (1 of 1 test cases) passed.
+[4 of 4] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/protobuf-conformance-test/opt/build/protobuf-conformance-test/protobuf-conformance-test [Objects changed]
+Running 1 test suites...
+Test suite protobuf-conformance-test: RUNNING...
+
+wireform-proto conformance suite skipped.
+
+To enable, build the upstream protobuf conformance_test_runner:
+
+    bash wireform-proto/test-conformance/scripts/build-conformance-runner.sh
+
+or point CONFORMANCE_TEST_RUNNER at a pre-built copy and re-run
+    cabal test wireform-proto:protobuf-conformance-test
+
+WARNING: Only one CPU core detected, make sure to compile your test suite with these ghc options:
+         -threaded -rtsopts -with-rtsopts=-N
+         (This is important for correctness as well as speed, as a parallel test suite can find thread safety problems.)
+Tests:
+
+protobuf-conformance
+  ✓ skipped (no upstream runner)                                           1.82 ms
+
+  Passed:                       1
+  Failed:                       0
+  Sum of test runtimes:         0.00 seconds
+  Test suite took:              0.00 seconds
+
+Test suite protobuf-conformance-test: PASS
+Test suite logged to:
+/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/protobuf-conformance-test/opt/test/wireform-proto-0.3.0.0-protobuf-conformance-test.log
+1 of 1 test suites (1 of 1 test cases) passed.

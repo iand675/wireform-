@@ -1,36 +1,56 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 {- |
 @Content-Style-Type@ — HTML 4.01 entity-header that names the default style
 sheet language (a media type, e.g. @text/css@) for the served document, when no
 @META http-equiv=\"Content-Style-Type\"@ declaration is present.
 
-== Value
-
-A single media type token such as @text/css@. Per the depth guidance for
-obsolete/host-specific values this is a faithful raw-preserving newtype: the
-media-type string is kept verbatim and re-emitted unchanged.
+A media type such as @text/css@, with optional parameters. On repeated
+field lines the last value takes precedence. The wire spelling is preserved.
 
 Spec: <https://www.w3.org/TR/html401/present/styles.html#h-14.2.1>
 
 See also: "Network.HTTP.Headers.ContentScriptType", "Network.HTTP.Headers.DefaultStyle", "Network.HTTP.Headers.ContentType".
 -}
 module Network.HTTP.Headers.ContentStyleType (
-  ContentStyleType (..),
+  ContentStyleType (ContentStyleType, contentStyleType),
+  contentStyleTypeBytes,
+  contentStyleMediaType,
   contentStyleTypeParser,
   renderContentStyleType,
 ) where
 
+import qualified Data.ByteString.Short as SBS
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
+import Network.HTTP.Headers.ContentType (ContentType, MediaTypeField, mediaTypeFieldBytes, mediaTypeFieldContentType, mediaTypeFieldFromText, mediaTypeFieldParser, mediaTypeFieldText)
 import Network.HTTP.Headers.HeaderFieldName (hContentStyleType)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | @Content-Style-Type@ value: the default style sheet media type, verbatim.
-newtype ContentStyleType = ContentStyleType {contentStyleType :: ST.ShortText}
+-- | The default style sheet media type and its wire spelling.
+newtype ContentStyleType = ContentStyleTypeField MediaTypeField
   deriving stock (Eq, Show)
+
+
+pattern ContentStyleType :: ST.ShortText -> ContentStyleType
+pattern ContentStyleType {contentStyleType} <- ContentStyleTypeField (mediaTypeFieldText -> contentStyleType)
+  where
+    ContentStyleType value = ContentStyleTypeField (mediaTypeFieldFromText value)
+
+
+{-# COMPLETE ContentStyleType #-}
+
+
+contentStyleTypeBytes :: ContentStyleType -> SBS.ShortByteString
+contentStyleTypeBytes (ContentStyleTypeField value) = mediaTypeFieldBytes value
+
+
+contentStyleMediaType :: ContentStyleType -> Either String ContentType
+contentStyleMediaType (ContentStyleTypeField value) = mediaTypeFieldContentType value
 
 
 instance KnownHeader ContentStyleType where
@@ -39,22 +59,18 @@ instance KnownHeader ContentStyleType where
   type Direction ContentStyleType = 'Response
 
 
-  parseFromHeaders _ headers = case runParser contentStyleTypeParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Content-Style-Type header: " <> show rest
-    Fail -> Left "Failed to parse Content-Style-Type header"
-    Err e -> Left e
+  parseFromHeaders _ = parseFieldLine "Content-Style-Type" contentStyleTypeParser . NE.last
 
 
-  renderToHeaders _ = M.toStrictByteString . renderContentStyleType
+  renderToHeaders _ = SBS.fromShort . contentStyleTypeBytes
 
 
   headerName _ = hContentStyleType
 
 
 contentStyleTypeParser :: ParserT st String ContentStyleType
-contentStyleTypeParser = ContentStyleType <$> takeRestShortText
+contentStyleTypeParser = ContentStyleTypeField <$> mediaTypeFieldParser
 
 
 renderContentStyleType :: ContentStyleType -> M.Builder
-renderContentStyleType (ContentStyleType mediaType) = shortText mediaType
+renderContentStyleType = M.shortByteString . contentStyleTypeBytes

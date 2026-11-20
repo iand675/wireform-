@@ -9,9 +9,8 @@ entity (the role later filled by @Content-Location@ / the @<base>@ element).
 Content-Base = \"Content-Base\" \":\" absoluteURI
 @
 
-The value is a single opaque @absoluteURI@. Per the depth guidance this is a
-faithful raw-preserving newtype: the URI is captured verbatim and re-emitted
-unchanged, which round-trips exactly without fabricating a URI grammar.
+The codec checks the absolute-URI grammar of RFC 3986 and keeps the
+original spelling of the URI, including its percent escapes.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc2068#section-14.11>
 
@@ -23,8 +22,8 @@ module Network.HTTP.Headers.ContentBase (
   renderContentBase,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (absoluteURI)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentBase)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,21 +42,17 @@ instance KnownHeader ContentBase where
   type Direction ContentBase = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser contentBaseParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Content-Base header: " <> show rest
-    Fail -> Left "Failed to parse Content-Base header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Content-Base" contentBaseParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderContentBase
+  renderToHeaders _ = ST.toByteString . contentBaseUri
 
 
   headerName _ = hContentBase
 
 
 contentBaseParser :: ParserT st String ContentBase
-contentBaseParser = ContentBase <$> takeRestShortText
+contentBaseParser = ContentBase <$> absoluteURI
 
 
 renderContentBase :: ContentBase -> M.Builder

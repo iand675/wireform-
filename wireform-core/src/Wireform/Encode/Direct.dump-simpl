@@ -1,0 +1,714 @@
+
+==================== Tidy Core ====================
+
+Result size of Tidy Core
+  = {terms: 1,185, types: 1,021, coercions: 238, joins: 5/13}
+
+$trModule4 = "main"#
+
+$trModule3 = TrNameS $trModule4
+
+$trModule2 = "Wireform.Encode.Direct"#
+
+$trModule1 = TrNameS $trModule2
+
+$trModule = Module $trModule3 $trModule1
+
+dFixed64Field
+  = (\ p_axWp off_axWq tag_axWr val_axWs eta_B0 ->
+       case p_axWp of { Ptr ipv_sygD ->
+       case off_axWq of { I# ipv1_sygF ->
+       case tag_axWr of { W8# ipv2_sygH ->
+       case val_axWs of { W64# ipv3_sygJ ->
+       case writeWord8OffAddr#
+              (plusAddr# ipv_sygD ipv1_sygF) 0# ipv2_sygH eta_B0
+       of s2_ayh3
+       { __DEFAULT ->
+       case writeWord64OffAddr#
+              (plusAddr# ipv_sygD (+# ipv1_sygF 1#)) 0# ipv3_sygJ s2_ayh3
+       of s1_avLV
+       { __DEFAULT ->
+       (# s1_avLV, I# (+# ipv1_sygF 9#) #)
+       }
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+dDoubleField
+  = (\ p_axWx off_axWy tag_axWz val_axWA eta_B0 ->
+       case p_axWx of { Ptr ipv_syhe ->
+       case off_axWy of { I# ipv1_syhg ->
+       case tag_axWz of { W8# ipv2_syhi ->
+       case val_axWA of { D# ipv3_syhk ->
+       case writeWord8OffAddr#
+              (plusAddr# ipv_syhe ipv1_syhg) 0# ipv2_syhi eta_B0
+       of s2_ayh3
+       { __DEFAULT ->
+       case writeWord64OffAddr#
+              (plusAddr# ipv_syhe (+# ipv1_syhg 1#))
+              0#
+              (castDoubleToWord64# ipv3_syhk)
+              s2_ayh3
+       of s1_avLV
+       { __DEFAULT ->
+       (# s1_avLV, I# (+# ipv1_syhg 9#) #)
+       }
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+dFixed32Field
+  = (\ p_axWl off_axWm tag_axWn val_axWo eta_B0 ->
+       case p_axWl of { Ptr ipv_syhy ->
+       case off_axWm of { I# ipv1_syhA ->
+       case tag_axWn of { W8# ipv2_syhC ->
+       case val_axWo of { W32# ipv3_syhE ->
+       case writeWord8OffAddr#
+              (plusAddr# ipv_syhy ipv1_syhA) 0# ipv2_syhC eta_B0
+       of s2_ayh3
+       { __DEFAULT ->
+       case writeWord32OffAddr#
+              (plusAddr# ipv_syhy (+# ipv1_syhA 1#)) 0# ipv3_syhE s2_ayh3
+       of s1_avLk
+       { __DEFAULT ->
+       (# s1_avLk, I# (+# ipv1_syhA 5#) #)
+       }
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+dFloatField
+  = (\ p_axWt off_axWu tag_axWv val_axWw eta_B0 ->
+       case p_axWt of { Ptr ipv_syhQ ->
+       case off_axWu of { I# ipv1_syhS ->
+       case tag_axWv of { W8# ipv2_syhU ->
+       case val_axWw of { F# ipv3_syhW ->
+       case writeWord8OffAddr#
+              (plusAddr# ipv_syhQ ipv1_syhS) 0# ipv2_syhU eta_B0
+       of s2_ayh3
+       { __DEFAULT ->
+       case writeWord32OffAddr#
+              (plusAddr# ipv_syhQ (+# ipv1_syhS 1#))
+              0#
+              (castFloatToWord32# ipv3_syhW)
+              s2_ayh3
+       of s1_avLk
+       { __DEFAULT ->
+       (# s1_avLk, I# (+# ipv1_syhS 5#) #)
+       }
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+dBytesField
+  = (\ p_axWe off_axWf tag_axWg ds_dyeO eta_B0 ->
+       case p_axWe of { Ptr ipv_syia ->
+       case off_axWf of { I# ipv1_syic ->
+       case tag_axWg of { W8# ipv2_syie ->
+       case ds_dyeO of { BS bx_dygn bx1_dygo bx2_dygp ->
+       keepAlive#
+         bx1_dygo
+         eta_B0
+         (\ s_aec9 ->
+            case {__ffi_static_ccall_unsafe main:hs_proto_encode_length_delimited :: Addr#
+                                                                    -> Word64#
+                                                                    -> Word8#
+                                                                    -> Addr#
+                                                                    -> Word64#
+                                                                    -> State# RealWorld
+                                                                    -> (# State# RealWorld,
+                                                                          Word64# #)}_iyiz
+                   ipv_syia
+                   (int64ToWord64# (intToInt64# ipv1_syic))
+                   ipv2_syie
+                   bx_dygn
+                   (int64ToWord64# (intToInt64# bx2_dygp))
+                   realWorld#
+            of
+            { (# ds6_iyiD, ds7_iyiE #) ->
+            (# s_aec9,
+               I# (+# ipv1_syic (word2Int# (word64ToWord# ds7_iyiE))) #)
+            })
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+dStringField
+  = (\ p_axW6 off_axW7 tag_axW8 t_axW9 eta_B0 ->
+       case p_axW6 of { Ptr ipv_syiS ->
+       case off_axW7 of { I# ipv1_syiU ->
+       case tag_axW8 of { W8# ipv2_syiW ->
+       case t_axW9 of { Text ipv3_syiY ipv4_syiZ ipv5_syj0 ->
+       case ipv5_syj0 of wild_avU2 {
+         __DEFAULT ->
+           runRW#
+             (\ s_avU3 ->
+                case newPinnedByteArray# wild_avU2 s_avU3 of
+                { (# ipv6_avU5, ipv7_avU6 #) ->
+                case copyByteArray#
+                       ipv3_syiY ipv4_syiZ ipv7_avU6 0# wild_avU2 ipv6_avU5
+                of
+                { __DEFAULT ->
+                case lazy
+                       (case unsafeEqualityProof of { UnsafeRefl v2_avUa ->
+                        BS
+                          (byteArrayContents# (ipv7_avU6 `cast` <Co:2> :: ...))
+                          (PlainPtr ipv7_avU6)
+                          wild_avU2
+                        })
+                of
+                { BS ipv8_syj2 ipv9_syj3 ipv10_syj4 ->
+                keepAlive#
+                  ipv9_syj3
+                  eta_B0
+                  (\ s1_aec9 ->
+                     case {__ffi_static_ccall_unsafe main:hs_proto_encode_length_delimited :: Addr#
+                                                                    -> Word64#
+                                                                    -> Word8#
+                                                                    -> Addr#
+                                                                    -> Word64#
+                                                                    -> State# RealWorld
+                                                                    -> (# State# RealWorld,
+                                                                          Word64# #)}_iyiz
+                            ipv_syiS
+                            (int64ToWord64# (intToInt64# ipv1_syiU))
+                            ipv2_syiW
+                            ipv8_syj2
+                            (int64ToWord64# (intToInt64# ipv10_syj4))
+                            realWorld#
+                     of
+                     { (# ds6_iyiD, ds7_iyiE #) ->
+                     (# s1_aec9,
+                        I# (+# ipv1_syiU (word2Int# (word64ToWord# ds7_iyiE))) #)
+                     })
+                }
+                }
+                });
+         0# ->
+           keepAlive#
+             FinalPtr
+             eta_B0
+             (\ s_aec9 ->
+                case {__ffi_static_ccall_unsafe main:hs_proto_encode_length_delimited :: Addr#
+                                                                    -> Word64#
+                                                                    -> Word8#
+                                                                    -> Addr#
+                                                                    -> Word64#
+                                                                    -> State# RealWorld
+                                                                    -> (# State# RealWorld,
+                                                                          Word64# #)}_iyiz
+                       ipv_syiS
+                       (int64ToWord64# (intToInt64# ipv1_syiU))
+                       ipv2_syiW
+                       __NULL
+                       0#Word64
+                       realWorld#
+                of
+                { (# ds6_iyiD, ds7_iyiE #) ->
+                (# s_aec9,
+                   I# (+# ipv1_syiU (word2Int# (word64ToWord# ds7_iyiE))) #)
+                })
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+dBoolField
+  = (\ p_axW2 off_axW3 tag_axW4 val_axW5 eta_B0 ->
+       case p_axW2 of { Ptr ipv_syjq ->
+       case off_axW3 of { I# ipv1_syjs ->
+       case tag_axW4 of { W8# ipv2_syju ->
+       case val_axW5 of {
+         False ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_encode_bool_field :: Addr#
+                                                              -> Word64#
+                                                              -> Word8#
+                                                              -> Int32#
+                                                              -> State# RealWorld
+                                                              -> (# State# RealWorld, Word64# #)}_iyjL
+                  ipv_syjq
+                  (int64ToWord64# (intToInt64# ipv1_syjs))
+                  ipv2_syju
+                  0#Int32
+                  realWorld#
+           of
+           { (# ds4_iyjO, ds5_iyjP #) ->
+           (# eta_B0, I# (+# ipv1_syjs 2#) #)
+           };
+         True ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_encode_bool_field :: Addr#
+                                                              -> Word64#
+                                                              -> Word8#
+                                                              -> Int32#
+                                                              -> State# RealWorld
+                                                              -> (# State# RealWorld, Word64# #)}_iyjR
+                  ipv_syjq
+                  (int64ToWord64# (intToInt64# ipv1_syjs))
+                  ipv2_syju
+                  1#Int32
+                  realWorld#
+           of
+           { (# ds4_iyjU, ds5_iyjV #) ->
+           (# eta_B0, I# (+# ipv1_syjs 2#) #)
+           }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+dVarintField
+  = (\ p_axVX off_axVY tag_axVZ val_axW0 eta_B0 ->
+       case p_axVX of { Ptr ipv_syk5 ->
+       case off_axVY of { I# ipv1_syk7 ->
+       case tag_axVZ of { W8# ipv2_syk9 ->
+       case val_axW0 of { W64# ipv3_sykb ->
+       case {__ffi_static_ccall_unsafe main:hs_proto_encode_varint_field :: Addr#
+                                                                -> Word64#
+                                                                -> Word8#
+                                                                -> Word64#
+                                                                -> State# RealWorld
+                                                                -> (# State# RealWorld, Word64# #)}_iyks
+              ipv_syk5
+              (int64ToWord64# (intToInt64# ipv1_syk7))
+              ipv2_syk9
+              ipv3_sykb
+              realWorld#
+       of
+       { (# ds6_iykw, ds7_iykx #) ->
+       (# eta_B0,
+          I# (+# ipv1_syk7 (word2Int# (word64ToWord# ds7_iykx))) #)
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+dBytes
+  = (\ p_axVK off_axVL ds_dyf9 eta_B0 ->
+       case p_axVK of { Ptr ipv_sykN ->
+       case off_axVL of { I# ipv1_sykP ->
+       case ds_dyf9 of { BS bx_dygw bx1_dygx bx2_dygy ->
+       case copyAddrToAddrNonOverlapping#
+              bx_dygw (plusAddr# ipv_sykN ipv1_sykP) bx2_dygy eta_B0
+       of wild1_X3
+       { __DEFAULT ->
+       case touch# bx1_dygx wild1_X3 of s'_aylc { __DEFAULT ->
+       (# s'_aylc, I# (+# ipv1_sykP bx2_dygy) #)
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+dVarint
+  = (\ p_axVE off_axVF n_axVG eta_B0 ->
+       case p_axVE of { Ptr ipv_syll ->
+       case off_axVF of { I# ipv1_syln ->
+       case n_axVG of { W64# ipv2_sylp ->
+       case ltWord64# ipv2_sylp 128#Word64 of {
+         __DEFAULT ->
+           case ltWord64# ipv2_sylp 16384#Word64 of {
+             __DEFAULT ->
+               case ltWord64# ipv2_sylp 2097152#Word64 of {
+                 __DEFAULT ->
+                   join {
+                     exit_X3 ww_syoS ww1_syoW eta1_syoY
+                       = case writeWord8OffAddr#
+                                (plusAddr# ipv_syll ww_syoS)
+                                0#
+                                (wordToWord8# (word64ToWord# ww1_syoW))
+                                eta1_syoY
+                         of s2_ayh3
+                         { __DEFAULT ->
+                         (# s2_ayh3, I# (+# ww_syoS 1#) #)
+                         } } in
+                   joinrec {
+                     $wgo_syp0 ww_syoS ww1_syoW eta1_syoY
+                       = case ltWord64# ww1_syoW 128#Word64 of {
+                           __DEFAULT ->
+                             case writeWord8OffAddr#
+                                    (plusAddr# ipv_syll ww_syoS)
+                                    0#
+                                    (wordToWord8# (or# (and# (word64ToWord# ww1_syoW) 127##) 128##))
+                                    eta1_syoY
+                             of s2_ayh3
+                             { __DEFAULT ->
+                             jump $wgo_syp0
+                               (+# ww_syoS 1#) (uncheckedShiftRL64# ww1_syoW 7#) s2_ayh3
+                             };
+                           1# -> jump exit_X3 ww_syoS ww1_syoW eta1_syoY
+                         }; } in
+                   jump $wgo_syp0 ipv1_syln ipv2_sylp eta_B0;
+                 1# ->
+                   case writeWord8OffAddr#
+                          (plusAddr# ipv_syll ipv1_syln)
+                          0#
+                          (wordToWord8# (or# (and# (word64ToWord# ipv2_sylp) 127##) 128##))
+                          eta_B0
+                   of s2_ayh3
+                   { __DEFAULT ->
+                   case writeWord8OffAddr#
+                          (plusAddr# ipv_syll (+# ipv1_syln 1#))
+                          0#
+                          (wordToWord8#
+                             (or#
+                                (and# (word64ToWord# (uncheckedShiftRL64# ipv2_sylp 7#)) 127##)
+                                128##))
+                          s2_ayh3
+                   of s1_X8
+                   { __DEFAULT ->
+                   case writeWord8OffAddr#
+                          (plusAddr# ipv_syll (+# ipv1_syln 2#))
+                          0#
+                          (wordToWord8# (word64ToWord# (uncheckedShiftRL64# ipv2_sylp 14#)))
+                          s1_X8
+                   of s3_Xc
+                   { __DEFAULT ->
+                   (# s3_Xc, I# (+# ipv1_syln 3#) #)
+                   }
+                   }
+                   }
+               };
+             1# ->
+               case writeWord8OffAddr#
+                      (plusAddr# ipv_syll ipv1_syln)
+                      0#
+                      (wordToWord8# (or# (and# (word64ToWord# ipv2_sylp) 127##) 128##))
+                      eta_B0
+               of s2_ayh3
+               { __DEFAULT ->
+               case writeWord8OffAddr#
+                      (plusAddr# ipv_syll (+# ipv1_syln 1#))
+                      0#
+                      (wordToWord8# (word64ToWord# (uncheckedShiftRL64# ipv2_sylp 7#)))
+                      s2_ayh3
+               of s1_X7
+               { __DEFAULT ->
+               (# s1_X7, I# (+# ipv1_syln 2#) #)
+               }
+               }
+           };
+         1# ->
+           case writeWord8OffAddr#
+                  (plusAddr# ipv_syll ipv1_syln)
+                  0#
+                  (wordToWord8# (word64ToWord# ipv2_sylp))
+                  eta_B0
+           of s2_ayh3
+           { __DEFAULT ->
+           (# s2_ayh3, I# (+# ipv1_syln 1#) #)
+           }
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+dText
+  = (\ p_axVR off_axVS t_axVT eta_B0 ->
+       case p_axVR of { Ptr ipv_sylW ->
+       case off_axVS of { I# ipv1_sylY ->
+       case t_axVT of { Text ipv2_sym0 ipv3_sym1 ipv4_sym2 ->
+       join {
+         $j_syou ipv5_sym4 ipv6_sym5 ipv7_sym6
+           = let { ds_synU = intToInt64# ipv7_sym6 } in
+             let { ipv8_synW = int64ToWord64# ds_synU } in
+             case ltWord64# ipv8_synW 128#Word64 of {
+               __DEFAULT ->
+                 case ltWord64# ipv8_synW 16384#Word64 of {
+                   __DEFAULT ->
+                     case ltWord64# ipv8_synW 2097152#Word64 of {
+                       __DEFAULT ->
+                         join {
+                           exit_X3 ww_sypc ww1_sypg eta1_sypi
+                             = case writeWord8OffAddr#
+                                      (plusAddr# ipv_sylW ww_sypc)
+                                      0#
+                                      (wordToWord8# (word64ToWord# ww1_sypg))
+                                      eta1_sypi
+                               of s2_ayh3
+                               { __DEFAULT ->
+                               let { ww2_syp5 = +# ww_sypc 1# } in
+                               case copyAddrToAddrNonOverlapping#
+                                      ipv5_sym4 (plusAddr# ipv_sylW ww2_syp5) ipv7_sym6 s2_ayh3
+                               of wild_X5
+                               { __DEFAULT ->
+                               case touch# ipv6_sym5 wild_X5 of s'_aylc { __DEFAULT ->
+                               (# s'_aylc, I# (+# ww2_syp5 ipv7_sym6) #)
+                               }
+                               }
+                               } } in
+                         joinrec {
+                           $wgo_sypk ww_sypc ww1_sypg eta1_sypi
+                             = case ltWord64# ww1_sypg 128#Word64 of {
+                                 __DEFAULT ->
+                                   case writeWord8OffAddr#
+                                          (plusAddr# ipv_sylW ww_sypc)
+                                          0#
+                                          (wordToWord8#
+                                             (or# (and# (word64ToWord# ww1_sypg) 127##) 128##))
+                                          eta1_sypi
+                                   of s2_ayh3
+                                   { __DEFAULT ->
+                                   jump $wgo_sypk
+                                     (+# ww_sypc 1#) (uncheckedShiftRL64# ww1_sypg 7#) s2_ayh3
+                                   };
+                                 1# -> jump exit_X3 ww_sypc ww1_sypg eta1_sypi
+                               }; } in
+                         jump $wgo_sypk ipv1_sylY ipv8_synW eta_B0;
+                       1# ->
+                         case writeWord8OffAddr#
+                                (plusAddr# ipv_sylW ipv1_sylY)
+                                0#
+                                (wordToWord8# (or# (and# (word64ToWord# ipv8_synW) 127##) 128##))
+                                eta_B0
+                         of s2_ayh3
+                         { __DEFAULT ->
+                         case writeWord8OffAddr#
+                                (plusAddr# ipv_sylW (+# ipv1_sylY 1#))
+                                0#
+                                (wordToWord8#
+                                   (or#
+                                      (and#
+                                         (word64ToWord# (uncheckedShiftRL64# ipv8_synW 7#)) 127##)
+                                      128##))
+                                s2_ayh3
+                         of s1_X8
+                         { __DEFAULT ->
+                         case writeWord8OffAddr#
+                                (plusAddr# ipv_sylW (+# ipv1_sylY 2#))
+                                0#
+                                (wordToWord8# (word64ToWord# (uncheckedShiftRL64# ipv8_synW 14#)))
+                                s1_X8
+                         of s3_Xc
+                         { __DEFAULT ->
+                         let { ww_syp5 = +# ipv1_sylY 3# } in
+                         case copyAddrToAddrNonOverlapping#
+                                ipv5_sym4 (plusAddr# ipv_sylW ww_syp5) ipv7_sym6 s3_Xc
+                         of wild_X5
+                         { __DEFAULT ->
+                         case touch# ipv6_sym5 wild_X5 of s'_aylc { __DEFAULT ->
+                         (# s'_aylc, I# (+# ww_syp5 ipv7_sym6) #)
+                         }
+                         }
+                         }
+                         }
+                         }
+                     };
+                   1# ->
+                     case writeWord8OffAddr#
+                            (plusAddr# ipv_sylW ipv1_sylY)
+                            0#
+                            (wordToWord8# (or# (and# (word64ToWord# ipv8_synW) 127##) 128##))
+                            eta_B0
+                     of s2_ayh3
+                     { __DEFAULT ->
+                     case writeWord8OffAddr#
+                            (plusAddr# ipv_sylW (+# ipv1_sylY 1#))
+                            0#
+                            (wordToWord8# (word64ToWord# (uncheckedShiftRL64# ipv8_synW 7#)))
+                            s2_ayh3
+                     of s1_X7
+                     { __DEFAULT ->
+                     let { ww_syp5 = +# ipv1_sylY 2# } in
+                     case copyAddrToAddrNonOverlapping#
+                            ipv5_sym4 (plusAddr# ipv_sylW ww_syp5) ipv7_sym6 s1_X7
+                     of wild_X5
+                     { __DEFAULT ->
+                     case touch# ipv6_sym5 wild_X5 of s'_aylc { __DEFAULT ->
+                     (# s'_aylc, I# (+# ww_syp5 ipv7_sym6) #)
+                     }
+                     }
+                     }
+                     }
+                 };
+               1# ->
+                 case writeWord8OffAddr#
+                        (plusAddr# ipv_sylW ipv1_sylY)
+                        0#
+                        (wordToWord8# (word64ToWord# ipv8_synW))
+                        eta_B0
+                 of s2_ayh3
+                 { __DEFAULT ->
+                 let { ww_syp5 = +# ipv1_sylY 1# } in
+                 case copyAddrToAddrNonOverlapping#
+                        ipv5_sym4 (plusAddr# ipv_sylW ww_syp5) ipv7_sym6 s2_ayh3
+                 of wild_X5
+                 { __DEFAULT ->
+                 case touch# ipv6_sym5 wild_X5 of s'_aylc { __DEFAULT ->
+                 (# s'_aylc, I# (+# ww_syp5 ipv7_sym6) #)
+                 }
+                 }
+                 }
+             } } in
+       case ipv4_sym2 of wild_avU2 {
+         __DEFAULT ->
+           runRW#
+             (\ s_avU3 ->
+                case newPinnedByteArray# wild_avU2 s_avU3 of
+                { (# ipv5_avU5, ipv6_avU6 #) ->
+                case copyByteArray#
+                       ipv2_sym0 ipv3_sym1 ipv6_avU6 0# wild_avU2 ipv5_avU5
+                of
+                { __DEFAULT ->
+                case lazy
+                       (case unsafeEqualityProof of { UnsafeRefl v2_avUa ->
+                        BS
+                          (byteArrayContents# (ipv6_avU6 `cast` <Co:2> :: ...))
+                          (PlainPtr ipv6_avU6)
+                          wild_avU2
+                        })
+                of
+                { BS ipv7_sym4 ipv8_sym5 ipv9_sym6 ->
+                jump $j_syou ipv7_sym4 ipv8_sym5 ipv9_sym6
+                }
+                }
+                });
+         0# -> jump $j_syou __NULL FinalPtr 0#
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+dWord64LE
+  = (\ p_axVv off_axVw v_axVx eta_B0 ->
+       case p_axVv of { Ptr ipv_symn ->
+       case off_axVw of { I# ipv1_symp ->
+       case v_axVx of { W64# ipv2_symr ->
+       case writeWord64OffAddr#
+              (plusAddr# ipv_symn ipv1_symp) 0# ipv2_symr eta_B0
+       of s2_avLV
+       { __DEFAULT ->
+       (# s2_avLV, I# (+# ipv1_symp 8#) #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+dDoubleLE
+  = (\ p_axVB off_axVC v_axVD eta_B0 ->
+       case p_axVB of { Ptr ipv_symB ->
+       case off_axVC of { I# ipv1_symD ->
+       case v_axVD of { D# ipv2_symF ->
+       case writeWord64OffAddr#
+              (plusAddr# ipv_symB ipv1_symD)
+              0#
+              (castDoubleToWord64# ipv2_symF)
+              eta_B0
+       of s2_avLV
+       { __DEFAULT ->
+       (# s2_avLV, I# (+# ipv1_symD 8#) #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+dWord32LE
+  = (\ p_axVs off_axVt v_axVu eta_B0 ->
+       case p_axVs of { Ptr ipv_symN ->
+       case off_axVt of { I# ipv1_symP ->
+       case v_axVu of { W32# ipv2_symR ->
+       case writeWord32OffAddr#
+              (plusAddr# ipv_symN ipv1_symP) 0# ipv2_symR eta_B0
+       of s2_avLk
+       { __DEFAULT ->
+       (# s2_avLk, I# (+# ipv1_symP 4#) #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+dFloatLE
+  = (\ p_axVy off_axVz v_axVA eta_B0 ->
+       case p_axVy of { Ptr ipv_syn1 ->
+       case off_axVz of { I# ipv1_syn3 ->
+       case v_axVA of { F# ipv2_syn5 ->
+       case writeWord32OffAddr#
+              (plusAddr# ipv_syn1 ipv1_syn3)
+              0#
+              (castFloatToWord32# ipv2_syn5)
+              eta_B0
+       of s2_avLk
+       { __DEFAULT ->
+       (# s2_avLk, I# (+# ipv1_syn3 4#) #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+dWord8
+  = (\ p_axVp off_axVq b_axVr eta_B0 ->
+       case p_axVp of { Ptr ipv_synd ->
+       case off_axVq of { I# ipv1_synf ->
+       case b_axVr of { W8# ipv2_synh ->
+       case writeWord8OffAddr#
+              (plusAddr# ipv_synd ipv1_synf) 0# ipv2_synh eta_B0
+       of s2_ayh3
+       { __DEFAULT ->
+       (# s2_ayh3, I# (+# ipv1_synf 1#) #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+lvl_rypS = I# 0#
+
+directEncode
+  = \ sz_axVm writer_axVn ->
+      case sz_axVm of { I# ipv_synr ->
+      runRW#
+        (\ s_aynv ->
+           case <# ipv_synr 0# of {
+             __DEFAULT ->
+               case newPinnedByteArray# ipv_synr s_aynv of
+               { (# ipv1_aynC, ipv2_aynD #) ->
+               let { ipv3_syo2 = mutableByteArrayContents# ipv2_aynD } in
+               let { ipv4_syo4 = PlainPtr ipv2_aynD } in
+               case keepAlive#
+                      ipv4_syo4
+                      ipv1_aynC
+                      (\ s1_aec9 ->
+                         case ((writer_axVn (Ptr ipv3_syo2) lvl_rypS) `cast` <Co:2> :: ...)
+                                s1_aec9
+                         of
+                         { (# ipv5_aecb, ipv6_aecc #) ->
+                         (# ipv5_aecb, () #)
+                         })
+               of
+               { (# ipv5_aynI, ipv6_aynJ #) ->
+               case lazy runRW# (\ _ -> (# ipv5_aynI, ipv3_syo2 #)) of
+               { (# ipv7_aynM, ipv8_aynN #) ->
+               BS ipv8_aynN ipv4_syo4 ipv_synr
+               }
+               }
+               };
+             1# -> case mallocPlainForeignPtrBytes2 of {}
+           })
+      }
+
+

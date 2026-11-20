@@ -22,10 +22,9 @@ module Network.HTTP.Headers.IfRange (
   renderIfRange,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Data.Time.Clock (UTCTime)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
 import Network.HTTP.Headers.ETag (EntityTag, entityTagParser, renderEntityTag)
 import Network.HTTP.Headers.HeaderFieldName (hIfRange)
 import qualified Network.HTTP.Headers.Mason as M
@@ -47,11 +46,7 @@ instance KnownHeader IfRange where
   type Direction IfRange = 'Request
 
 
-  parseFromHeaders _ headers = case runParser ifRangeParser $ NE.head headers of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing If-Range header: " <> show rest
-    Fail -> Left "Failed to parse If-Range header"
-    Err e -> Left e
+  parseFromHeaders settings = parseSingleFieldLine "If-Range" (ifRangeParserWith (dateParserWith settings))
 
 
   renderToHeaders _ = M.toStrictByteString . renderIfRange
@@ -65,9 +60,13 @@ an HTTP-date, so the entity-tag branch is tried first and falls through to
 the date parser without ambiguity.
 -}
 ifRangeParser :: ParserT st String IfRange
-ifRangeParser =
+ifRangeParser = ifRangeParserWith dateParser
+
+
+ifRangeParserWith :: ParserT st String UTCTime -> ParserT st String IfRange
+ifRangeParserWith parseDate =
   (IfRangeETag <$> entityTagParser)
-    <|> (IfRangeDate <$> dateParser)
+    <|> (IfRangeDate <$> parseDate)
 
 
 renderIfRange :: IfRange -> M.Builder

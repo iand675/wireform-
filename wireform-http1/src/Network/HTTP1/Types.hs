@@ -134,12 +134,10 @@ streamBody = BodyStream
 -- Construct via 'Network.HTTP1.Encode.precomputeResponse'. The slice
 -- for HEAD is zero-copy (it shares 'peBytes'\' 'ForeignPtr').
 --
--- The @PreEncoded@ is /not/ checked for keep-alive headers — the
--- 'Connection: close' decision is still derived from the surrounding
--- 'Response' record's 'responseHeaders'. If you want to force the
--- connection to close after the response, set the header on the
--- 'Response' you pass to 'precomputeResponse' so it ends up in the
--- baked-in bytes.
+-- Keep-alive decisions use the surrounding 'Response' record's
+-- 'responseHeaders'. The server can add a per-connection option before
+-- the final CRLF of the encoded head. Keep the baked-in headers and the
+-- record in sync when constructing these values directly.
 data PreEncoded = PreEncoded
   { peBytes :: !ByteString
   , peHeadLen :: !Int
@@ -278,9 +276,8 @@ data Request = Request
     -- until the body has been fully drained; returns @[]@ when
     -- the framing carried no trailers.
     --
-    -- For an outgoing request the field is currently ignored —
-    -- the HTTP\/1.x encoder doesn't emit trailers yet.  Set it
-    -- to @pure []@ if you don't care.
+    -- For an outgoing chunked request, the action runs after the body
+    -- producer finishes. Declare the anticipated fields in @Trailer@.
   }
 
 instance Show Request where
@@ -309,9 +306,9 @@ data Response = Response
     -- Returns @[]@ when the framing carried no trailers.
     --
     -- /Outbound:/ servers that want to emit trailers populate this
-    -- with a (possibly @IO@-deferred) header list. The encoder
-    -- only emits a trailer block on chunked responses; for
-    -- 'ContentLength' framing the value is ignored.
+    -- with a (possibly @IO@-deferred) field list. On a chunked response
+    -- the action runs after the body producer finishes. Declare the
+    -- anticipated fields in @Trailer@.
   }
 
 instance Show Response where

@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 The @ALPN@ HTTP request header field, defined by
 [RFC 7639](https://www.rfc-editor.org/rfc/rfc7639).
@@ -40,22 +38,22 @@ module Network.HTTP.Headers.ALPN (
   renderALPN,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
 import Data.Bits (shiftR, (.&.))
+import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.Char (chr, digitToInt, isHexDigit, ord)
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Unsafe as BSU
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Word (Word8)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hALPN)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Network.HTTP.URL.Decode (urlDecode)
 import Network.TLS.Extensions (ALPNProtocol (alpnIdentificationSequence), mkALPNProtocol)
 
 
--- | A non-empty list of ALPN protocol IDs, as carried by the @ALPN@ header.
-newtype ALPN = ALPN {alpnProtocols :: NE.NonEmpty ALPNProtocol}
+-- | A nonempty list of ALPN protocol IDs. Each ID uses 1–255 decoded octets.
+newtype ALPN = ALPN {alpnProtocols :: NonEmpty ALPNProtocol}
   deriving stock (Eq, Show)
 
 
@@ -65,11 +63,13 @@ instance KnownHeader ALPN where
   type Direction ALPN = 'Request
 
 
-  parseFromHeaders _ headers = case runParser alpnParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing ALPN header: " <> show rest
-    Fail -> Left "Failed to parse ALPN header"
-    Err e -> Left e
+  parseFromHeaders _ (wire :| [])
+    | not (BS.null wire)
+    , BS.length wire <= 255
+    , BS.all isRawTokenByte wire =
+        Right $! ALPN (mkALPNProtocol wire :| [])
+  parseFromHeaders _ headers =
+    ALPN <$> (parseListFieldLines "ALPN" alpnList headers >>= requireNonEmptyList "ALPN")
 
 
   renderToHeaders _ = M.toStrictByteString . renderALPN
@@ -82,57 +82,79 @@ instance KnownHeader ALPN where
 ALPN protocol IDs, each decoded back to its raw octet sequence.
 -}
 alpnParser :: ParserT st String ALPN
-alpnParser = ALPN <$> protocolIdParser `sepBy1` (ows *> $(char ',') *> ows)
+alpnParser = alpnList >>= either err (pure . ALPN) . requireNonEmptyList "ALPN"
 
 
-{- | Parse one @protocol-id@ @token@ and percent-decode it into the underlying
-'ALPNProtocol' octet sequence.
--}
-protocolIdParser :: ParserT st String ALPNProtocol
-protocolIdParser = mkALPNProtocol . BS.pack <$> some (pctOctet <|> rawOctet)
+alpnList :: ParserT st String [ALPNProtocol]
+alpnList = httpList (withByteString tokenBytes (\() -> either err pure . decodeProtocol))
+
+
+decodeProtocol :: ByteString -> Either String ALPNProtocol
+decodeProtocol wire
+  | size > 3 * 255 = Left "ALPN protocol identifier exceeds 255 octets"
+  | otherwise = case BS.elemIndex 37 wire of
+      Nothing
+        | size <= 255 -> Right (mkALPNProtocol wire)
+        | otherwise -> Left "ALPN protocol identifier exceeds 255 octets"
+      Just start -> do
+        checkEscapes start
+        case urlDecode wire of
+          Right decoded
+            | BS.length decoded <= 255 -> Right (mkALPNProtocol decoded)
+            | otherwise -> Left "ALPN protocol identifier exceeds 255 octets"
+          Left _ -> Left "Invalid ALPN percent escape"
   where
-    -- A literal token octet, never the percent sign (which always introduces an
-    -- escape on the wire).
-    rawOctet = fromIntegral . ord <$> satisfyAscii isRawTokenChar
-    -- A @%XX@ escape decoded to a single octet.
-    pctOctet = $(char '%') *> (combineNibbles <$> hexNibble <*> hexNibble)
-    combineNibbles hi lo = hi * 16 + lo
+    size = BS.length wire
+    checkEscapes at
+      | size - at < 3 = Left "Truncated ALPN percent escape"
+      | hi > 15 || lo > 15 || isRawTokenByte (hi * 16 + lo) = Left "Noncanonical ALPN percent escape"
+      | otherwise =
+          let next = at + 3
+          in case BS.elemIndex 37 (BSU.unsafeDrop next wire) of
+               Nothing -> Right ()
+               Just rest -> checkEscapes (next + rest)
+      where
+        hi = upperHexValue (BSU.unsafeIndex wire (at + 1))
+        lo = upperHexValue (BSU.unsafeIndex wire (at + 2))
 
 
-hexNibble :: ParserT st String Word8
-hexNibble = fromIntegral . digitToInt <$> satisfyAscii isHexDigit
-
-
-{- | A @token@ character that does not require percent-encoding: any RFC 9110
-@tchar@ other than the percent sign.
--}
-isRawTokenChar :: Char -> Bool
-isRawTokenChar c = c /= '%' && CharSet.member c tokenCharSet
+upperHexValue :: Word8 -> Word8
+upperHexValue byte
+  | byte >= 48 && byte <= 57 = byte - 48
+  | byte >= 65 && byte <= 70 = byte - 55
+  | otherwise = 255
+{-# INLINE upperHexValue #-}
 
 
 {- | Render the @ALPN@ header value: each protocol ID percent-encoded per
 RFC 7639, joined with @", "@.
 -}
 renderALPN :: ALPN -> M.Builder
-renderALPN = M.intersperse ", " . map renderProtocolId . NE.toList . alpnProtocols
+renderALPN (ALPN (first :| rest)) =
+  renderProtocolId first <> foldMap ((", " <>) . renderProtocolId) rest
 
 
 -- | Percent-encode one 'ALPNProtocol' octet sequence into a @protocol-id@ token.
 renderProtocolId :: ALPNProtocol -> M.Builder
-renderProtocolId = foldMap encodeOctet . BS.unpack . alpnIdentificationSequence
+renderProtocolId = renderBytes . alpnIdentificationSequence
+  where
+    renderBytes bytes =
+      let (prefix, suffix) = BS.break (not . isRawTokenByte) bytes
+      in M.byteString prefix <> case BS.uncons suffix of
+           Nothing -> mempty
+           Just (byte, rest) -> encodeOctet byte <> renderBytes rest
 
 
 encodeOctet :: Word8 -> M.Builder
-encodeOctet w
-  | isRawTokenByte w = M.word8 w
-  | otherwise = M.char7 '%' <> hexDigit (w `shiftR` 4) <> hexDigit (w .&. 0x0F)
+encodeOctet w = M.char7 '%' <> hexDigit (w `shiftR` 4) <> hexDigit (w .&. 0x0F)
 
 
 {- | Whether an octet may appear verbatim in a @protocol-id@: an ASCII @tchar@
 other than the percent sign (@0x25@).
 -}
 isRawTokenByte :: Word8 -> Bool
-isRawTokenByte w = w /= 0x25 && w < 0x80 && CharSet.member (chr (fromIntegral w)) tokenCharSet
+isRawTokenByte w = w /= 0x25 && isTokenChar (toEnum (fromIntegral w))
+{-# INLINE isRawTokenByte #-}
 
 
 -- | Render a nibble (0–15) as a single uppercase hex digit.

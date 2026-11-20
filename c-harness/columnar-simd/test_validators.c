@@ -395,6 +395,16 @@ static void list_view_random(void)
 /* Dense unions                                                        */
 /* ------------------------------------------------------------------ */
 
+static void dense_union_offset_order(void)
+{
+    const int8_t types[] = {0, 1, 0, 1};
+    const int64_t lengths[] = {4, 4};
+    const int32_t ordered[] = {2, 0, 2, 3};
+    const int32_t unordered[] = {2, 0, 1, 3};
+    WF_CHECK_EQ(hs_columnar_dense_union(types, ordered, 4, lengths, 2), -1);
+    WF_CHECK_EQ(hs_columnar_dense_union(types, unordered, 4, lengths, 2), 2);
+}
+
 static void dense_union_random(void)
 {
     wf_rng r = wf_rng_from_env();
@@ -677,6 +687,7 @@ int main(void)
     WF_RUN(keys_vectors);
     WF_RUN(keys_sweep);
     WF_RUN(list_view_random);
+    WF_RUN(dense_union_offset_order);
     WF_RUN(dense_union_random);
     g_view = wf_guard_tail(16);
     WF_RUN(utf8_vectors);

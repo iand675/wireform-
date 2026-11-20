@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 6638 §8.1 @Schedule-Reply@ — a CalDAV scheduling request header an
 Attendee includes (typically on @DELETE@) to control whether the server
@@ -24,7 +22,6 @@ module Network.HTTP.Headers.ScheduleReply (
   renderScheduleReply,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hScheduleReply)
 import qualified Network.HTTP.Headers.Mason as M
@@ -42,11 +39,7 @@ instance KnownHeader ScheduleReply where
   type Direction ScheduleReply = 'Request
 
 
-  parseFromHeaders _ headers = case runParser scheduleReplyParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Schedule-Reply header: " <> show rest
-    Fail -> Left "Failed to parse Schedule-Reply header"
-    Err e -> Left e
+  parseFromHeaders _ = parseTFFieldLine "Schedule-Reply" ScheduleReply
 
 
   renderToHeaders _ = M.toStrictByteString . renderScheduleReply
@@ -56,9 +49,8 @@ instance KnownHeader ScheduleReply where
 
 
 scheduleReplyParser :: ParserT st String ScheduleReply
-scheduleReplyParser =
-  ScheduleReply <$> ((True <$ $(char 'T')) <|> (False <$ $(char 'F')))
+scheduleReplyParser = ScheduleReply <$> tfFlag
 
 
 renderScheduleReply :: ScheduleReply -> M.Builder
-renderScheduleReply (ScheduleReply b) = M.char7 (if b then 'T' else 'F')
+renderScheduleReply (ScheduleReply b) = if b then "T" else "F"

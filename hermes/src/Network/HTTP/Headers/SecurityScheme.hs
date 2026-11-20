@@ -1,31 +1,34 @@
-{- |
-@Security-Scheme@ — obsolete header from Secure HTTP (S-HTTP) used to negotiate
-the security enhancements in force. S-HTTP was moved to Historic status and the
-value is host-specific with no live, interoperable grammar, so it is preserved
-verbatim as an opaque string.
+{-# LANGUAGE TemplateHaskell #-}
 
-Spec: <https://datatracker.ietf.org/doc/html/rfc2660 RFC 2660: The Secure HyperText Transfer Protocol> (S-HTTP; Historic).
+{- | RFC 2660 §4.1 @Security-Scheme@ advertises support for S-HTTP/1.4.
+The scheme is retained as a case-insensitively matched literal.
 
-See also: "Network.HTTP.Headers.Upgrade", "Network.HTTP.Headers.StrictTransportSecurity", "Network.HTTP.Headers.WWWAuthenticate".
+Spec: <https://www.rfc-editor.org/rfc/rfc2660.html#section-4.1>
 -}
 module Network.HTTP.Headers.SecurityScheme (
   SecurityScheme (..),
+  secureHTTP14,
   securitySchemeParser,
   renderSecurityScheme,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.Bits ((.|.))
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Parser
+import Network.HTTP.Grammar.Rendering (shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSecurityScheme)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | Opaque, raw-preserving @Security-Scheme@ value.
 newtype SecurityScheme = SecurityScheme {securitySchemeValue :: ST.ShortText}
   deriving stock (Eq, Show)
+
+
+-- | The S-HTTP/1.4 advertisement in its standard spelling.
+secureHTTP14 :: SecurityScheme
+secureHTTP14 = SecurityScheme "S-HTTP/1.4"
 
 
 instance KnownHeader SecurityScheme where
@@ -34,21 +37,25 @@ instance KnownHeader SecurityScheme where
   type Direction SecurityScheme = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser securitySchemeParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Security-Scheme header: " <> show rest
-    Fail -> Left "Failed to parse Security-Scheme header"
-    Err e -> Left e
+  parseFromHeaders _ ("S-HTTP/1.4" :| []) = Right secureHTTP14
+  parseFromHeaders _ fields = parseSingleFieldLine "Security-Scheme" securitySchemeParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderSecurityScheme
+  renderToHeaders _ = ST.toByteString . securitySchemeValue
 
 
   headerName _ = hSecurityScheme
 
 
 securitySchemeParser :: ParserT st String SecurityScheme
-securitySchemeParser = SecurityScheme <$> takeRestShortText
+securitySchemeParser = SecurityScheme <$> shortASCIIFromParser_ version
+  where
+    version = do
+      prefix <- anyWord64be
+      -- Fold only the letters of "S-HTTP/1".
+      if prefix .|. 0x2000202020200000 == 0x732d687474702f31
+        then $(string ".4")
+        else failed
 
 
 renderSecurityScheme :: SecurityScheme -> M.Builder

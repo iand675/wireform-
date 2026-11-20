@@ -9,11 +9,11 @@ defined by the specification is @snapshot@ (snapshot isolation).
 OData-Isolation = "snapshot"
 @
 
-Surfaced as an enumeration with a forward-compatible fallback constructor
-for any future isolation level token. The value is case-sensitive.
+The @snapshot@ literal is case-insensitive. Other isolation tokens are
+retained so the recipient can handle an unsupported isolation level.
 
-Spec: OData Version 4.01 Part 1: Protocol §8.2.5
-<https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part1-protocol.html#sec_HeaderODataIsolation>
+Spec: OData Version 4.01 Part 1: Protocol §8.2.6
+<https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part1-protocol.html#sec_HeaderIsolationODataIsolation>
 
 See also: "Network.HTTP.Headers.Isolation", "Network.HTTP.Headers.ODataVersion",
 "Network.HTTP.Headers.ODataMaxVersion", "Network.HTTP.Headers.Prefer".
@@ -24,10 +24,11 @@ module Network.HTTP.Headers.ODataIsolation (
   renderODataIsolation,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hODataIsolation)
+import qualified Network.HTTP.Headers.Isolation as Isolation
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
@@ -48,25 +49,22 @@ instance KnownHeader ODataIsolation where
   type Direction ODataIsolation = 'Request
 
 
-  parseFromHeaders _ headers = case runParser oDataIsolationParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing OData-Isolation header: " <> show rest
-    Fail -> Left "Failed to parse OData-Isolation header"
-    Err e -> Left e
+  parseFromHeaders _ ("snapshot" :| []) = Right Snapshot
+  parseFromHeaders _ fields = parseSingleFieldLine "OData-Isolation" oDataIsolationParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderODataIsolation
+  renderToHeaders _ Snapshot = "snapshot"
+  renderToHeaders _ value = M.toStrictByteString (renderODataIsolation value)
 
 
   headerName _ = hODataIsolation
 
 
 oDataIsolationParser :: ParserT st String ODataIsolation
-oDataIsolationParser = classify <$> rfc9110Token
+oDataIsolationParser = fromIsolation <$> Isolation.isolationParser
   where
-    classify t
-      | t == ST.fromString "snapshot" = Snapshot
-      | otherwise = ODataIsolationOther t
+    fromIsolation Isolation.Snapshot = Snapshot
+    fromIsolation (Isolation.IsolationOther token) = ODataIsolationOther token
 
 
 renderODataIsolation :: ODataIsolation -> M.Builder

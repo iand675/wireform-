@@ -1,0 +1,6 @@
+syntax = "proto3";
+package collision.beta;
+
+message CollisionInner {
+  string label = 1;
+}

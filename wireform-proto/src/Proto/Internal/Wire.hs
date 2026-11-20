@@ -14,6 +14,7 @@ module Proto.Internal.Wire (
   makeTag,
   encodeTag,
   decodeTag,
+  validTagWord,
 
   -- * Field key
   fieldTag,
@@ -76,18 +77,17 @@ encodeTag (Tag fn wt) =
   fromIntegral fn `shiftL` 3 .|. fromIntegral (wireTypeToWord wt)
 
 
-{- | Decode a tag from a varint value. Per the proto wire format
-spec, field number 0 is reserved and any tag whose field
-number resolves to 0 (or whose wire type is one of the
-deprecated group types) must be rejected; otherwise a
-conformance test like @IllegalZeroFieldNum@ would be silently
-accepted as an unknown field instead of an error.
--}
+-- | Check the field number and wire type before narrowing the tag.
+validTagWord :: Word64 -> Bool
+validTagWord w = w >= 8 && w <= fromIntegral (maxBound :: Word32) && w .&. 7 <= 5
+{-# INLINE validTagWord #-}
+
+
+-- | Decode a tag from a varint value.
 decodeTag :: Word64 -> Maybe Tag
-decodeTag w = do
-  wt <- wireTypeFromTag (fromIntegral (w .&. 0x07))
-  let fn = fromIntegral (w `shiftR` 3)
-  if fn == 0 then Nothing else Just (Tag fn wt)
+decodeTag w
+  | validTagWord w = Tag (fromIntegral (w `shiftR` 3)) <$> wireTypeFromTag (fromIntegral w)
+  | otherwise = Nothing
 
 
 -- | Convenience: make the wire tag value for a given field number and wire type.

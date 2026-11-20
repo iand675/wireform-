@@ -1,0 +1,16 @@
+syntax = "proto3";
+package example.consumer;
+
+import "import_status.proto";
+
+message ImportStatus {}
+
+message ImportScopeEnvelope {
+  imported.ImportStatus relative = 1;
+  .example.imported.ImportStatus absolute = 2;
+  map<string, .example.imported.ImportStatus> by_key = 3;
+  oneof choice {
+    .example.imported.ImportStatus selected = 4;
+  }
+  ImportStatus local = 5;
+}

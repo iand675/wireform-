@@ -1,0 +1,7 @@
+syntax = "proto3";
+package example.imported;
+
+enum ImportStatus {
+  IMPORT_STATUS_UNKNOWN = 0;
+  IMPORT_STATUS_READY = 1;
+}

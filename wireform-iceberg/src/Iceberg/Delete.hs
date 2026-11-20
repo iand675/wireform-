@@ -102,10 +102,12 @@ writePositionDeleteFile outputPath rows =
               Nothing
               Nothing
               Nothing
+              Nothing
           , ( P.SchemaElement
                 "file_path"
                 (Just P.Required)
                 (Just P.PTByteArray)
+                Nothing
                 Nothing
                 Nothing
                 Nothing
@@ -118,6 +120,7 @@ writePositionDeleteFile outputPath rows =
                 "pos"
                 (Just P.Required)
                 (Just P.PTInt64)
+                Nothing
                 Nothing
                 Nothing
                 Nothing
@@ -257,6 +260,7 @@ writeEqualityDeleteFile outputPath schemaCols cols
               Nothing
               Nothing
               Nothing
+              Nothing
           !leaves = V.fromList (map mkLeaf schemaCols)
           !schema = V.cons rootElem leaves
           !nRows =
@@ -286,6 +290,7 @@ writeEqualityDeleteFile outputPath schemaCols cols
           (edsFieldName eds)
           (Just P.Required)
           (Just (edsType eds))
+          Nothing
           Nothing
           Nothing
           Nothing

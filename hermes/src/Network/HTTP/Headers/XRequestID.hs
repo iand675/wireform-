@@ -1,3 +1,6 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 {- |
 @X-Request-ID@ request and response header — a unique, opaque token identifying a
 single HTTP request so that it can be correlated across logs and services. A
@@ -6,10 +9,8 @@ and service in the path preserves and forwards it, and the origin server
 typically echoes the same value back in the response. It is supported by Nginx,
 HAProxy, AWS ALB, Heroku, and most API gateways.
 
-This is a __de-facto__ header with __no IANA registration__ and no formal
-grammar — any opaque string is valid (a UUIDv4 is the typical value). We
-therefore preserve the value verbatim as a 'ST.ShortText' rather than imposing a
-structure that the wild does not honour.
+Deployments define the payload. The codec checks HTTP field octets and
+preserves the original bytes.
 
 Spec: de-facto, unregistered; see <https://http.dev/x-request-id>.
 
@@ -17,25 +18,50 @@ See also: "Network.HTTP.Headers.XCorrelationID", "Network.HTTP.Headers.XTraceID"
 "Network.HTTP.Headers.Traceparent", "Network.HTTP.Headers.XForwardedFor".
 -}
 module Network.HTTP.Headers.XRequestID (
-  XRequestID (..),
+  XRequestID (XRequestID, xRequestID),
+  xRequestIDBytes,
+  xRequestIDFromBytes,
   xRequestIDParser,
   renderXRequestID,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXRequestID)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.OpaqueField
 
 
-{- | An @X-Request-ID@ value: an opaque request-correlation token, preserved
-verbatim.
--}
-newtype XRequestID = XRequestID {xRequestID :: ST.ShortText}
-  deriving stock (Eq, Show)
+-- | An opaque request correlation identifier.
+newtype XRequestID = XRequestIDBytes ByteString
+  deriving stock (Eq)
+
+
+-- | Legacy text view. Use 'xRequestIDBytes' for the original bytes.
+pattern XRequestID :: ST.ShortText -> XRequestID
+pattern XRequestID {xRequestID} <- (opaqueFieldText . xRequestIDBytes -> xRequestID)
+  where
+    XRequestID text = XRequestIDBytes (ST.toByteString text)
+
+
+{-# COMPLETE XRequestID #-}
+
+
+instance Show XRequestID where
+  showsPrec precedence (XRequestID text) =
+    showParen (precedence > 10) $ showString "XRequestID {xRequestID = " . shows text . showChar '}'
+
+
+-- | The original field bytes, including any received optional whitespace.
+xRequestIDBytes :: XRequestID -> ByteString
+xRequestIDBytes (XRequestIDBytes wire) = wire
+
+
+-- | Check field-value octets and keep the payload unchanged.
+xRequestIDFromBytes :: ByteString -> Either String XRequestID
+xRequestIDFromBytes = checkOpaqueField "X-Request-ID" XRequestIDBytes
 
 
 instance KnownHeader XRequestID where
@@ -44,24 +70,18 @@ instance KnownHeader XRequestID where
   type Direction XRequestID = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser xRequestIDParser header of
-      OK v "" -> Right v
-      OK _ rest -> Left $ "Unconsumed input after parsing X-Request-ID header: " <> show rest
-      Fail -> Left "Failed to parse X-Request-ID header"
-      Err e -> Left e
+  parseFromHeaders _ = parseOpaqueFieldLine "X-Request-ID" XRequestIDBytes
 
 
-  renderToHeaders _ = M.toStrictByteString . renderXRequestID
+  renderToHeaders _ = xRequestIDBytes
 
 
   headerName _ = hXRequestID
 
 
 xRequestIDParser :: ParserT st String XRequestID
-xRequestIDParser = XRequestID <$> takeRestShortText
+xRequestIDParser = opaqueFieldParser "X-Request-ID" XRequestIDBytes
 
 
 renderXRequestID :: XRequestID -> M.Builder
-renderXRequestID (XRequestID tok) = shortText tok
+renderXRequestID = M.byteString . xRequestIDBytes

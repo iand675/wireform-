@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9440 §2.3 @Client-Cert-Chain@ — request header inserted by a
 TLS-terminating reverse proxy to convey the certificate chain
@@ -60,7 +58,7 @@ instance KnownHeader ClientCertChain where
 
 
   parseFromHeaders _ headers = do
-    res <- traverse runChainParser headers
+    res <- traverse (parseFieldLine "Client-Cert-Chain" clientCertChainParser) headers
     pure $ fold1 res
 
 
@@ -70,20 +68,12 @@ instance KnownHeader ClientCertChain where
   headerName _ = hClientCertChain
 
 
-runChainParser :: ByteString -> Either String ClientCertChain
-runChainParser bs = case runParser clientCertChainParser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left $ "Unconsumed input after parsing Client-Cert-Chain header: " <> show rest
-  Fail -> Left "Failed to parse Client-Cert-Chain header"
-  Err e -> Left e
-
-
 clientCertChainParser :: ParserT st String ClientCertChain
-clientCertChainParser = ClientCertChain <$> rfc8941List1 (rfc8941Binary <* $(char ':'))
+clientCertChainParser = ClientCertChain <$> (ows *> rfc8941List1 rfc8941Binary <* ows)
 
 
 renderClientCertChain :: ClientCertChain -> M.Builder
 renderClientCertChain (ClientCertChain chain) =
   R.sepByCommas1 (fmap renderCert chain)
   where
-    renderCert bs = R.rfc8941Binary bs <> M.char7 ':'
+    renderCert bs = R.rfc8941Binary bs

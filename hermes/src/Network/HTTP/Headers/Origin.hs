@@ -7,7 +7,9 @@ never a path) that caused the request. Browsers attach it to CORS requests and t
 all requests with unsafe methods (@POST@, @PUT@, etc.), letting the server decide
 whether to honour the cross-origin access and what to return in
 @Access-Control-Allow-Origin@. The serialized value may be the literal @null@ for
-opaque origins (e.g. @data:@ URLs or sandboxed iframes).
+opaque origins (e.g. @data:@ URLs or sandboxed iframes). RFC 6454 also
+defines an ordered, space-separated list of serialized origins. Fetch
+uses the single-origin or null forms.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc6454#section-7>
 
@@ -20,18 +22,18 @@ module Network.HTTP.Headers.Origin (
   renderOrigin,
 ) where
 
-import Data.Functor (($>))
+import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Data.Word (Word16)
+import Network.HTTP.Grammar.Authority (SerializedOrigin (..), renderSerializedOrigin, serializedOriginParser)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hOrigin)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | Origin value can be null or a specific origin
+-- | An opaque origin, one origin, or the RFC 6454 form with several origins.
 data OriginValue
   = OriginNull
   | Origin
@@ -42,6 +44,7 @@ data OriginValue
       , originPort :: !(Maybe Word16)
       -- ^ Optional port
       }
+  | OriginList !SerializedOrigin !(NonEmpty SerializedOrigin)
   deriving stock (Eq, Show)
 
 
@@ -56,13 +59,7 @@ instance KnownHeader Origin where
   type Direction Origin = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser originParser header of
-      OK o "" -> Right o
-      OK _ rest -> Left $ "Unconsumed input after parsing Origin header: " <> show rest
-      Fail -> Left "Failed to parse Origin header"
-      Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Origin" originParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderOrigin
@@ -72,24 +69,19 @@ instance KnownHeader Origin where
 
 
 originParser :: ParserT st String Origin
-originParser = OriginHeader <$> originValueParser
+originParser = OriginHeader <$> (origins <|> (OriginNull <$ $(string "null")))
   where
-    originValueParser = nullOrigin <|> specificOrigin
-    nullOrigin = $(string "null") $> OriginNull
-    specificOrigin = do
-      scheme <- rfc9110Token
-      $(string "://")
-      host <- rfc9110Token
-      port <- optional $ do
-        $(char ':')
-        anyAsciiDecimalWord
-      pure $ Origin scheme host (fromIntegral <$> port)
+    origins = do
+      first <- serializedOriginParser
+      rest <- many ($(char ' ') *> serializedOriginParser)
+      pure $ case NE.nonEmpty rest of
+        Nothing -> case first of SerializedOrigin scheme host port -> Origin scheme host port
+        Just others -> OriginList first others
 
 
 renderOrigin :: Origin -> M.Builder
 renderOrigin (OriginHeader OriginNull) = "null"
-renderOrigin (OriginHeader (Origin scheme host mPort)) =
-  shortText scheme
-    <> "://"
-    <> shortText host
-    <> maybe mempty (\port -> M.char7 ':' <> M.word16Dec port) mPort
+renderOrigin (OriginHeader (Origin scheme host port)) =
+  renderSerializedOrigin (SerializedOrigin scheme host port)
+renderOrigin (OriginHeader (OriginList first rest)) =
+  renderSerializedOrigin first <> foldMap (\origin -> M.char7 ' ' <> renderSerializedOrigin origin) rest

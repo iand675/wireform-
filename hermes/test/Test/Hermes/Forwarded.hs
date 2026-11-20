@@ -9,13 +9,20 @@ module Test.Hermes.Forwarded (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.Function (on)
+import Data.List (nubBy)
+import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.Text as T
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader, setRawHeader)
 import qualified Network.HTTP.Headers.AuthenticationControl as AC
 import qualified Network.HTTP.Headers.AuthenticationInfo as AI
 import qualified Network.HTTP.Headers.Forwarded as F
+import Network.HTTP.Headers.HeaderFieldName (hAuthenticationControl)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (
   ItemValue (..),
@@ -110,8 +117,8 @@ genForwardedValue =
 genForwarded :: Gen F.Forwarded
 genForwarded = F.Forwarded <$> Gen.list (Range.linear 1 3) genElement
   where
-    genElement = F.ForwardedElement <$> Gen.list (Range.linear 1 3) genPair
-    genPair = (,) <$> genTokenText <*> genForwardedValue
+    genElement = F.ForwardedElement . nubBy ((==) `on` (T.toCaseFold . ST.toText . fst)) <$> Gen.list (Range.linear 1 3) genPair
+    genPair = (,) <$> (("x-" <>) <$> genTokenText) <*> genForwardedValue
 
 
 genItemValue :: Gen ItemValue
@@ -126,7 +133,7 @@ genItemValue =
 genProxyStatus :: Gen PS.ProxyStatus
 genProxyStatus = PS.ProxyStatus <$> Gen.list (Range.linear 1 3) genInfo
   where
-    genInfo = PS.ProxyInfo <$> genId <*> Gen.list (Range.linear 0 3) genParam
+    genInfo = PS.ProxyInfo <$> genId <*> (nubBy ((==) `on` fst) <$> Gen.list (Range.linear 0 3) genParam)
     genId =
       Gen.choice
         [ Token . RFC8941Token <$> genSfTokenText
@@ -149,7 +156,11 @@ genAuthControl = AC.AuthenticationControl <$> Gen.list (Range.linear 1 3) genEnt
     genEntry =
       AC.AuthControlEntry . AC.AuthScheme
         <$> genTokenText
-        <*> Gen.list (Range.linear 1 3) genAuthParam
+        <*> genParams
+    genParams = do
+      count <- Gen.int (Range.linear 1 3)
+      names <- take count <$> Gen.shuffle ["realm", "no-auth", "-label.example.org"]
+      traverse (\name -> (,) name <$> genCredParam) names
 
 
 -- ---------------------------------------------------------------------------
@@ -170,7 +181,7 @@ forwardedTests = describe "Forwarded" $ do
             ]
         )
 
-  it "parses a quoted obfuscated node" $
+  it "parses a quoted IPv6 node and port" $
     runP F.forwardedParser "for=\"[2001:db8:cafe::17]:4711\""
       `shouldBe` Right
         ( F.Forwarded
@@ -197,6 +208,60 @@ forwardedTests = describe "Forwarded" $ do
           ]
       )
       `shouldBe` "for=192.0.2.43;proto=http, for=\"[2001:db8::1]\""
+
+  it "keeps hops in wire order across field lines and skips empty list slots" $ do
+    let typed = lookupHeader @F.Forwarded
+        fields = headerMapFromList [("Forwarded", " ,;FoR=UNKNOWN;;proto=hTtPs,;,"), ("Forwarded", "By=\"_edge:_local\";host=\"[::1]:443\"")]
+        value =
+          F.Forwarded
+            [ F.ForwardedElement [("FoR", F.ForwardedToken "UNKNOWN"), ("proto", F.ForwardedToken "hTtPs")]
+            , F.ForwardedElement []
+            , F.ForwardedElement [("By", F.ForwardedQuoted "_edge:_local"), ("host", F.ForwardedQuoted "[::1]:443")]
+            ]
+    typed fields `shouldBe` Right (Just value)
+    headerMapToList (setHeader value (headerMapFromList []))
+      `shouldBe` [("forwarded", "FoR=UNKNOWN;proto=hTtPs, ;, By=\"_edge:_local\";host=\"[::1]:443\"")]
+
+  it "validates known parameter grammar and uniqueness per hop" $ do
+    let readField wire = lookupHeader @F.Forwarded (headerMapFromList [("Forwarded", wire)])
+    readField "for=\"192.0.2.1:00001\",for=\"\\_edge:_local\""
+      `shouldBe` Right (Just (F.Forwarded [F.ForwardedElement [("for", F.ForwardedQuoted "192.0.2.1:00001")], F.ForwardedElement [("for", F.ForwardedQuoted "_edge:_local")]]))
+    readField "FOR=unknown;For-Node=one;proto=https,for-node=two;PROTO=http"
+      `shouldBe` Right (Just (F.Forwarded
+        [ F.ForwardedElement [("FOR", F.ForwardedToken "unknown"), ("For-Node", F.ForwardedToken "one"), ("proto", F.ForwardedToken "https")]
+        , F.ForwardedElement [("for-node", F.ForwardedToken "two"), ("PROTO", F.ForwardedToken "http")]
+        ]))
+    mapM_
+      (\wire -> readField wire `shouldSatisfy` isLeft)
+      [ "for=192.0.2.1;FOR=192.0.2.2"
+      , "x=one;X=two"
+      , "for=unknown;For-Node=one;proto=https;for-node=two"
+      , "for=01.0.2.3"
+      , "for=256.0.2.3"
+      , "for=hostname"
+      , "for=\"2001:db8::1\""
+      , "for=\"[v1.xyz]\""
+      , "for=\"[::1]:123456\""
+      , "for=\"_x:_\""
+      , "for=\"unknown:\""
+      , "by=_"
+      , "by=_foo+bar"
+      , "host=\"user@example.com\""
+      , "host=\"example.com/path\""
+      , "proto=9http"
+      , "proto=\"https://example.com\""
+      , "for =unknown"
+      , "for=unknown; proto=https"
+      ]
+
+  it "preserves opaque quoted extension bytes and escapes delimiters on rendering" $ do
+    let typed = lookupHeader @F.Forwarded
+        wire = "x=\"comma,semi;quotes\\\"and\\\\slashes\t" <> BS.pack [128, 255] <> "\""
+        fields = headerMapFromList [("Forwarded", wire)]
+    case typed fields of
+      Right (Just value) ->
+        headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("forwarded", wire)]
+      other -> expectationFailure (show other)
 
   it "round-trips" prop_forwarded
 
@@ -244,6 +309,52 @@ proxyStatusTests = describe "Proxy-Status" $ do
       `shouldBe` "ExampleProxy;received-status=504"
 
   it "round-trips" prop_proxyStatus
+
+  it "keeps member order across lines and parameter positions across replacements" $ do
+    let validFields =
+          headerMapFromList
+            [ ("Proxy-Status", " origin;ext=@1700; received-status=bad;again=?1;received-status=204")
+            , ("Proxy-Status", "\"edge, west\";next-hop=backend.example:8443;next-protocol=:AA==:;error=connection_timeout\t")
+            ]
+    case lookupHeader @PS.ProxyStatus validFields of
+      Right (Just value@(PS.ProxyStatus [origin, edge])) -> do
+        PS.proxyParams origin `shouldBe` [("ext", Just (DateValue 1700)), ("received-status", Just (Integer 204)), ("again", Nothing)]
+        fmap PS.proxyReceivedStatus (PS.proxyInfoParameters origin) `shouldBe` Right (Just 204)
+        PS.proxyInfoParameters edge
+          `shouldBe` Right
+            (PS.ProxyStatusParameters (Just (RFC8941Token "connection_timeout")) (Just (Left (RFC8941Token "backend.example:8443"))) (Just (Right "\0")) Nothing Nothing)
+        headerMapToList (setHeader value (headerMapFromList []))
+          `shouldBe` [("proxy-status", "origin;ext=@1700;received-status=204;again, \"edge, west\";next-hop=backend.example:8443;next-protocol=:AA==:;error=connection_timeout")]
+      result -> expectationFailure (show result)
+    lookupHeader @PS.ProxyStatus (headerMapFromList [("Proxy-Status", "origin"), ("Proxy-Status", "")])
+      `shouldSatisfy` isLeft
+    headerMapToList (setHeader (PS.ProxyStatus []) (headerMapFromList [])) `shouldBe` []
+
+  it "reports invalid registered parameters through the typed view" $
+    mapM_
+      (\parameters -> PS.proxyInfoParameters (PS.ProxyInfo (Token (RFC8941Token "edge")) parameters) `shouldSatisfy` isLeft)
+      [ [("received-status", Just (Integer 600))]
+      , [("next-protocol", Just (Binary ""))]
+      , [("next-protocol", Just (Binary (BS.replicate 256 0)))]
+      , [("details", Nothing)]
+      , [("error", Just (String (RFC8941String "http_protocol_error")))]
+      ]
+
+  it "uses the token form for ALPN identifiers that fit the Structured Fields token grammar" $ do
+    let fields =
+          headerMapFromList
+            [ ("Proxy-Status", "edge;next-protocol=:aDI=:;ext=:aDI=:, numeric;next-protocol=:MWg=:")
+            , ("Proxy-Status", "binary;next-protocol=:aC8/AA==:")
+            ]
+    case lookupHeader @PS.ProxyStatus fields of
+      Right (Just value@(PS.ProxyStatus [edge, numeric, binary])) -> do
+        PS.proxyParams edge `shouldBe` [("next-protocol", Just (Binary "h2")), ("ext", Just (Binary "h2"))]
+        fmap (fmap PS.proxyNextProtocol . PS.proxyInfoParameters) [edge, numeric, binary]
+          `shouldBe` [Right (Just (Left (RFC8941Token "h2"))), Right (Just (Right "1h")), Right (Just (Right "h/?\0"))]
+        let expected = "edge;next-protocol=h2;ext=:aDI=:, numeric;next-protocol=:MWg=:, binary;next-protocol=:aC8/AA==:"
+        render PS.renderProxyStatus value `shouldBe` expected
+        headerMapToList (setHeader value fields) `shouldBe` [("proxy-status", expected)]
+      result -> expectationFailure (show result)
 
 
 prop_proxyStatus :: Property
@@ -370,6 +481,60 @@ authenticationControlTests = describe "Authentication-Control" $ do
           ]
       )
       `shouldBe` "Basic realm=\"entrance\", no-auth=true"
+
+  it "combines repeated fields across parameters and entries, skipping empty elements" $ do
+    let fields =
+          ", Basic  , Realm\t=\tentrance,"
+            :| ["-label.example.org*=UTF-8''caf%C3%A9", "", "Basic realm=other, "]
+        combined = BS.intercalate "," (case fields of first :| rest -> first : rest)
+        expected =
+          AC.AuthenticationControl
+            [ AC.AuthControlEntry
+                (AC.AuthScheme "Basic")
+                [ ("Realm", AC.CredentialParamToken "entrance")
+                , ("-label.example.org*", AC.CredentialParamToken "UTF-8''caf%C3%A9")
+                ]
+            , AC.AuthControlEntry (AC.AuthScheme "Basic") [("realm", AC.CredentialParamToken "other")]
+            ]
+    lookupHeader @AC.AuthenticationControl (setRawHeader hAuthenticationControl fields (headerMapFromList []))
+      `shouldBe` Right (Just expected)
+    runP AC.authenticationControlParser combined `shouldBe` Right expected
+    lookupHeader @AC.AuthenticationControl (setHeader expected (headerMapFromList []))
+      `shouldBe` Right (Just expected)
+
+  it "round-trips opaque quoted octets, escapes, and horizontal tab" $ do
+    let wire = "Basic realm=\"\t,\\\\" <> BS.pack [0x80, 0xff] <> "\""
+        expected =
+          AC.AuthenticationControl
+            [AC.AuthControlEntry (AC.AuthScheme "Basic") [("realm", AC.CredentialParamOpaque ("\t,\\" <> BS.pack [0x80, 0xff]))]]
+    runP AC.authenticationControlParser wire `shouldBe` Right expected
+    render AC.renderAuthenticationControl expected `shouldBe` wire
+
+  it "rejects duplicate parameter names, including plain and extended spellings" $ do
+    let header value = headerMapFromList [("Authentication-Control", value)]
+    lookupHeader @AC.AuthenticationControl (header "Basic realm=one, Realm=two")
+      `shouldBe` Left "Duplicate Authentication-Control parameter"
+    lookupHeader @AC.AuthenticationControl (header "Basic Username=one, username*=UTF-8''caf%C3%A9")
+      `shouldBe` Left "Duplicate Authentication-Control parameter"
+
+  it "rejects invalid names, extended values and list boundaries" $
+    mapM_
+      (\value -> runP AC.authenticationControlParser value `shouldSatisfy` isLeft)
+      [ " , \t,"
+      , "Basic"
+      , "Basic\trealm=one"
+      , "Basic realm=one Digest realm=two"
+      , "Basic realm=one, Digest"
+      , "Basic _name=one"
+      , "Basic a.b=one"
+      , "Basic -name=one"
+      , "Basic -name..org=one"
+      , "Basic title**=UTF-8''caf%C3%A9"
+      , "Basic title*=\"UTF-8''caf%C3%A9\""
+      , "Basic title*=UTF-8'en--US'caf%C3%A9"
+      , "Basic title*=UTF-8''caf%C3%ZZ"
+      , "Basic title*=UTF-8''caf%C3,%A9"
+      ]
 
   it "round-trips" prop_authControl
 

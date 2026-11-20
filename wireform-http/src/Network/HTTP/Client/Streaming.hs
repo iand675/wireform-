@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -14,7 +13,7 @@ bracket.
 
 This module's 'streamedTransport' takes a different shape: for
 each request it forks a /worker thread/ that owns the connection
-for the response's lifetime, pipes the body through an unbounded
+through the response's trailer section, pipes the body through a bounded
 'TBQueue', and returns a 'RawResponse' whose 'bodyPopper' reads
 from that queue. The caller's popper is therefore live and
 streaming — chunks land in memory as they come off the wire,
@@ -23,20 +22,16 @@ rather than the whole body being drained up front.
 == Trade-offs vs the pool
 
 * /No connection reuse./ Each request opens a fresh connection
-  and closes it at popper EOF. Pair with
+  and closes it when the body and trailers have arrived. Pair with
   'Network.HTTP.Client.Pool.pooledTransport' when you want reuse
   on the request side and don't need streaming responses.
-* /Strict EOF contract./ The worker thread blocks until either
-  the popper has returned its EOF chunk (empty 'ByteString') or
-  the popper's 'Weak' reference is collected by the GC. Callers
-  that abandon the response without draining it tie up a worker
-  until GC fires; for tests and reasonable user code that's
-  fine.
+* /Back-pressure./ Read the body before waiting for trailers. If a
+  caller abandons a response while the chunk queue is full, the worker
+  cannot make more progress until the body is drained or cancelled.
 * /Streaming-aware middleware./ Compression and tracing both work
   unchanged: compression sees the chunks as they arrive,
   'withTracing' keeps its span open until the popper hits EOF
-  via the same mechanism (the streaming popper bumps an
-  on-EOF callback the middleware can install).
+  via the response popper.
 
 == Future
 This module is the substrate for a streaming-capable pool. Once
@@ -52,16 +47,15 @@ module Network.HTTP.Client.Streaming (
   StreamingError (..),
 ) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception (Exception, SomeException, mask, throwIO, try)
-import Control.Monad (void)
+import Control.Exception (Exception, SomeException, mask_, throwIO, try)
+import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
-import Data.IORef
-import Network.HTTP.Client.BodyStream (BodyStream, Popper, bodyStreamBytes)
+import Network.HTTP.Client.BodyStream (BodyStream, Popper)
 import Network.HTTP.Client.Protocol
 import Network.HTTP.Client.Proxy (Proxy, ProxyConfig)
 import Network.HTTP.Client.Proxy qualified as Pxy
@@ -70,8 +64,10 @@ import Network.HTTP.Client.Response
 import Network.HTTP.Client.Transport
 import Network.HTTP.Client.URI qualified as WURI
 import Network.HTTP.Connection qualified as Conn
+import Network.HTTP.Internal.Convert qualified as Conv
 import Network.HTTP.Message qualified as Msg
 import Network.HTTP.Types.Body qualified as LB
+import Network.HTTP.Types.Header (Headers)
 import Network.HTTP.Types.Version qualified as LV
 import Network.HTTP.VersionRange qualified as VR
 
@@ -132,19 +128,15 @@ streamedTransportWithVia qcap versionRange pcfg = Transport $ \req -> do
         | otherwise = case WURI.uriScheme uri_ of
             WURI.SchemeHttp -> Pxy.proxyForHttp pcfg
             WURI.SchemeHttps -> Pxy.proxyForHttps pcfg
-  bodyBytes <- bodyStreamBytes (WReq.body req)
-  let lowReq = toLowLevelRequest uri_ bodyBytes req
+  prepared <- Conv.prepareRequestBody Conv.bufferedRequestBody req
+  let lowReq = toLowLevelRequest uri_ prepared
+      hints = WReq.protocolHints req
 
   chunks <- newTBQueueIO (fromIntegral qcap)
   rawVar <- newEmptyMVar
-  doneVar <- newEmptyMVar
-  finished <- newIORef False
-
-  -- Worker holds the bracketed connection for the lifetime of the
-  -- response body. It produces chunks into 'chunks' and blocks on
-  -- 'doneVar' until the consumer signals EOF.
-  _wtid <- forkIO $ workerLoop cfg mProxy lowReq chunks rawVar doneVar finished
-  result <- takeMVar rawVar
+  completion <- newEmptyTMVarIO
+  _wtid <- forkIO $ workerLoop cfg mProxy hints lowReq chunks rawVar completion
+  result <- readMVar rawVar
   case result of
     Left e -> throwIO e
     Right raw -> pure raw
@@ -157,37 +149,28 @@ streamedTransportWithVia qcap versionRange pcfg = Transport $ \req -> do
 workerLoop
   :: Conn.ConnectionConfig
   -> Maybe Proxy
+  -> ProtocolHints
   -> Msg.Request
-  -> TBQueue (Maybe ByteString)
+  -> TBQueue ByteString
   -> MVar (Either SomeException RawResponse)
-  -> MVar ()
-  -> IORef Bool
+  -> TMVar (Either SomeException Headers)
   -> IO ()
-workerLoop cfg mProxy lowReq chunks rawVar doneVar finished = do
-  outcome <- try $ Conn.withConnectionVia cfg mProxy Nothing $ \conn ->
-    Conn.withResponseOn conn lowReq $ \resp -> do
-      -- 1. Hand a 'RawResponse' back to the caller. Its popper
-      --    drains 'chunks'. We have to deliver the raw response
-      --    /before/ pumping (otherwise the caller is blocked
-      --    waiting for it).
-      let popper = readChunk chunks finished doneVar
-          -- Cancellation combines a real H2 RST_STREAM (when the
-          -- low-level layer surfaced one as @responseCancel@) with
-          -- the local consumer-side EOF + worker wake-up: that way
-          -- a caller that cancels still drops out of the popper
-          -- and the bracketed @Conn.withConnection@ unwinds.
-          cancel = do
-            Msg.responseCancel resp
-            writeIORef finished True
-            atomically (writeTBQueue chunks Nothing)
-            _ <- tryPutMVar doneVar ()
-            pure ()
+workerLoop cfg mProxy hints lowReq chunks rawVar completion = do
+  outcome <- try $ Conn.withConnectionVia cfg mProxy Nothing $ \conn -> do
+    framed <- Conv.prepareRequestTrailers (Conn.negotiatedVersion conn) hints lowReq
+    Conn.withResponseOnWithContinueTimeout (continueTimeoutMicros hints) conn framed $ \resp -> do
+      let cancel = mask_ $ do
+            running <- atomically $ do
+              _ <- flushTBQueue chunks
+              tryPutTMVar completion (Right [])
+            when running (Msg.responseCancel resp)
+          readTrailers = atomically (readTMVar completion >>= either throwSTM pure)
           raw =
             RawResponse
               { statusCode = Msg.responseStatus resp
               , headers = Msg.responseHeaders resp
-              , bodyPopper = popper
-              , protocolInfo = case Msg.responseVersion resp of
+              , bodyPopper = readChunk chunks completion
+              , protocolInfo = withProtocolTrailers readTrailers $ case Msg.responseVersion resp of
                   LV.HTTP2 ->
                     HTTP2
                       Http2Info
@@ -199,73 +182,53 @@ workerLoop cfg mProxy lowReq chunks rawVar doneVar finished = do
               }
       putMVar rawVar (Right raw)
 
-      -- 2. Pump the underlying body popper into 'chunks'.
-      pumpBody (Msg.responseBody resp) chunks
-
-      -- 3. Wait until the caller has drained or abandoned the
-      --    popper. 'doneVar' is signalled by 'readChunk' on EOF or
-      --    by the streaming-aware middleware when it's done.
-      takeMVar doneVar
+      -- Completion lives outside the bounded queue, so it can be
+      -- published even when the caller has chunks left to read.
+      complete <- pumpBody (Msg.responseBody resp) writeChunk
+      when complete $ do
+        trailers <- Msg.responseTrailers resp
+        atomically $ void (tryPutTMVar completion (Right trailers))
   case outcome of
     Right () -> pure ()
     Left (e :: SomeException) -> do
-      -- If anything failed before 'rawVar' was filled, surface
-      -- the error there.
-      noResult <- tryPutMVar rawVar (Left e)
-      -- If the response was already delivered, push an EOF into
-      -- the chunk queue so the consumer's popper can finish.
-      atomically (writeTBQueue chunks Nothing)
-      _ <- pure noResult
-      pure ()
+      void (tryPutMVar rawVar (Left e))
+      atomically $ void (tryPutTMVar completion (Left e))
+  where
+    writeChunk bytes = atomically $ do
+      running <- isEmptyTMVar completion
+      when running (writeTBQueue chunks bytes)
+      pure running
 
 
-{- | Drain chunks from the underlying body into the TBQueue. On
-end-of-body, queues a single 'Nothing' as the EOF marker.
--}
-pumpBody :: LB.Body -> TBQueue (Maybe ByteString) -> IO ()
-pumpBody body chunks = case body of
-  LB.BodyEmpty -> atomically (writeTBQueue chunks Nothing)
-  LB.BodyBytes bs -> do
-    !_ <- pure bs -- materialised already
-    atomically $ do
-      writeTBQueue chunks (Just bs)
-      writeTBQueue chunks Nothing
+-- | Drain until EOF or until cancellation rejects the next chunk.
+pumpBody :: LB.Body -> (ByteString -> IO Bool) -> IO Bool
+pumpBody body writeChunk = case body of
+  LB.BodyEmpty -> pure True
+  LB.BodyBytes bs
+    | BS.null bs -> pure True
+    | otherwise -> writeChunk bs
   LB.BodyStream p -> drainStream p
   where
     drainStream p = do
       mChunk <- p
       case mChunk of
-        Nothing -> atomically (writeTBQueue chunks Nothing)
+        Nothing -> pure True
         Just b
           | BS.null b -> drainStream p
           | otherwise -> do
-              atomically (writeTBQueue chunks (Just b))
-              drainStream p
+              accepted <- writeChunk b
+              if accepted then drainStream p else pure False
 
 
-{- | Read one chunk from the queue. EOF (the queue's 'Nothing'
-marker, or repeated reads after EOF) returns an empty
-'ByteString' and signals the worker via 'doneVar'.
--}
+-- | Drain queued bytes before surfacing successful EOF or a wire error.
 readChunk
-  :: TBQueue (Maybe ByteString)
-  -> IORef Bool
-  -> MVar ()
+  :: TBQueue ByteString
+  -> TMVar (Either SomeException Headers)
   -> Popper
-readChunk chunks finished doneVar = do
-  alreadyDone <- readIORef finished
-  if alreadyDone
-    then pure BS.empty
-    else do
-      mb <- atomically (readTBQueue chunks)
-      case mb of
-        Just b
-          | BS.null b -> readChunk chunks finished doneVar
-          | otherwise -> pure b
-        Nothing -> do
-          writeIORef finished True
-          void (tryPutMVar doneVar ())
-          pure BS.empty
+readChunk chunks completion =
+  atomically $
+    readTBQueue chunks
+      `orElse` (readTMVar completion >>= either throwSTM (const (pure BS.empty)))
 
 
 -- ---------------------------------------------------------------------------
@@ -297,10 +260,9 @@ connectionConfigForRequest versionRange req = do
 
 toLowLevelRequest
   :: WURI.URI
-  -> ByteString
-  -> WReq.Request BodyStream
+  -> WReq.Request LB.Body
   -> Msg.Request
-toLowLevelRequest uri_ bodyBytes req =
+toLowLevelRequest uri_ req =
   let lowScheme = case WURI.uriScheme uri_ of
         WURI.SchemeHttps -> Msg.SchemeHttps
         WURI.SchemeHttp -> Msg.SchemeHttp
@@ -319,10 +281,7 @@ toLowLevelRequest uri_ bodyBytes req =
        , Msg.requestAuthority = authority
        , Msg.requestScheme = lowScheme
        , Msg.requestHeaders = WReq.headers req
-       , Msg.requestBody =
-           if BS.null bodyBytes
-             then LB.BodyEmpty
-             else LB.BodyBytes bodyBytes
+       , Msg.requestBody = WReq.body req
        , Msg.requestVersion = VR.preferredVersion (Conn.connectionVersionRange placeholder)
        , Msg.requestTrailers = pure []
        }

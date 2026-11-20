@@ -3,6 +3,7 @@ module Test.CBORDiagnostic (cborDiagnosticTests) where
 import CBOR.Diagnostic (fromDiagnostic, toDiagnostic)
 import CBOR.Value qualified as C
 import Data.ByteString qualified as BS
+import Data.Either (isLeft)
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Word (Word64)
@@ -45,6 +46,11 @@ renderTests =
           toDiagnostic (C.TextString "hello") `shouldBe` "\"hello\""
       , it "text string with escape" $
           toDiagnostic (C.TextString "a\"b") `shouldBe` "\"a\\\"b\""
+      , it "renders control characters as valid JSON string escapes" $ do
+          let original = C.TextString "\NUL\b\f\x1f"
+              rendered = toDiagnostic original
+          T.any (< '\x20') rendered `shouldBe` False
+          fromDiagnostic rendered `shouldBe` Right original
       , it "array" $
           toDiagnostic (C.Array (V.fromList [C.UInt 1, C.UInt 2, C.UInt 3])) `shouldBe` "[1, 2, 3]"
       , it "empty array" $
@@ -95,6 +101,13 @@ parseTests =
           fromDiagnostic "\"hello\"" `shouldBe` Right (C.TextString "hello")
       , it "text string with escape" $
           fromDiagnostic "\"a\\\"b\"" `shouldBe` Right (C.TextString "a\"b")
+      , it "decodes JSON escapes and a Unicode surrogate pair" $
+          fromDiagnostic "\"\\u0061\\/\\b\\f\\uD834\\uDD1E\""
+            `shouldBe` Right (C.TextString "a/\b\f\x1D11E")
+      , it "rejects invalid JSON escapes and raw control characters" $
+          mapM_
+            (\s -> isLeft (fromDiagnostic s) `shouldBe` True)
+            ["\"\\q\"", "\"\\uD800\"", "\"\\u12xz\"", "\"\NUL\""]
       , it "array" $
           fromDiagnostic "[1, 2, 3]"
             `shouldBe` Right (C.Array (V.fromList [C.UInt 1, C.UInt 2, C.UInt 3]))
@@ -126,6 +139,15 @@ parseTests =
           fromDiagnostic "-Infinity" `shouldBe` Right (C.Float64 ((-1) / 0))
       , it "simple value" $
           fromDiagnostic "simple(16)" `shouldBe` Right (C.Simple 16)
+      , it "rejects reserved and overflowing simple values" $ do
+          isLeft (fromDiagnostic "simple(24)") `shouldBe` True
+          isLeft (fromDiagnostic "simple(18446744073709551616)") `shouldBe` True
+      , it "represents large decimal integers as bignums" $ do
+          let magnitude = C.ByteString (BS.pack (1 : replicate 8 0))
+          fromDiagnostic "18446744073709551616" `shouldBe` Right (C.Tag 2 magnitude)
+          fromDiagnostic "-18446744073709551617" `shouldBe` Right (C.Tag 3 magnitude)
+      , it "rejects a tag number above the 64-bit range" $
+          isLeft (fromDiagnostic "18446744073709551616(1)") `shouldBe` True
       , it "float" $
           fromDiagnostic "1.5" `shouldBe` Right (C.Float64 1.5)
       , it "negative float" $

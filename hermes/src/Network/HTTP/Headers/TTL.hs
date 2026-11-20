@@ -1,8 +1,11 @@
-{- | TTL request header (RFC 8030 §5.2): the number of seconds a push message
+{- | TTL header (RFC 8030 §5.2): the number of seconds a push message
 is retained by the push service for later delivery to a user agent that is
 currently offline, expressed as a single non-negative delta-seconds value. A
 value of zero asks the push service to attempt immediate delivery only and not
-store the message.
+store the message. A push service can return TTL on its response to indicate
+the actual retention time.
+
+Values outside the range of 'Word' decode to 2^31 as specified by RFC 8030.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc8030#section-5.2>
 
@@ -15,7 +18,6 @@ module Network.HTTP.Headers.TTL (
   renderTTL,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTTL)
 import qualified Network.HTTP.Headers.Mason as M
@@ -30,16 +32,10 @@ newtype TTL = TTL {ttlSeconds :: Word}
 instance KnownHeader TTL where
   type ParseFailure TTL = String
   type Cardinality TTL = 'ZeroOrOne
-  type Direction TTL = 'Request
+  type Direction TTL = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser ttlParser header of
-      OK ttl "" -> Right ttl
-      OK _ rest -> Left $ "Unconsumed input after parsing TTL header: " <> show rest
-      Fail -> Left "Failed to parse TTL header"
-      Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "TTL" ttlParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderTTL
@@ -49,7 +45,7 @@ instance KnownHeader TTL where
 
 
 ttlParser :: ParserT st String TTL
-ttlParser = TTL <$> anyAsciiDecimalWord
+ttlParser = TTL <$> boundedDecimalWord maxBound (2_147_483_648 <$ skipMany (skipSatisfyAscii isDigit))
 
 
 renderTTL :: TTL -> M.Builder

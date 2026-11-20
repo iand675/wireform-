@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 {- |
 @Position@ (RFC 3648 §6.1) — request header used with methods that add
@@ -24,11 +25,8 @@ module Network.HTTP.Headers.Position (
   renderPosition,
 ) where
 
-import Data.CharSet (CharSet)
-import qualified Data.CharSet as CharSet
-import Data.CharSet.Posix.Ascii (alnum)
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (nonEmptyPathSegment)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPosition)
 import qualified Network.HTTP.Headers.Mason as M
@@ -55,11 +53,7 @@ instance KnownHeader Position where
   type Direction Position = 'Request
 
 
-  parseFromHeaders _ headers = case runParser positionParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Position header: " <> show rest
-    Fail -> Left "Failed to parse Position header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Position" positionValue
 
 
   renderToHeaders _ = M.toStrictByteString . renderPosition
@@ -68,25 +62,21 @@ instance KnownHeader Position where
   headerName _ = hPosition
 
 
--- | RFC 2396 §3.3 @segment@ characters (pchar plus @;@ for params).
-segmentCharSet :: CharSet
-segmentCharSet = alnum <> "-_.!~*'():@&=+$,;%"
-
-
-segment :: ParserT st e ST.ShortText
-segment = shortASCIIFromParser_ (skipSome (skipSatisfyAscii (`CharSet.member` segmentCharSet)))
-
-
 positionParser :: ParserT st String Position
-positionParser = do
-  ows
-  pos <-
-    (PositionFirst <$ $(string "first"))
-      <|> (PositionLast <$ $(string "last"))
-      <|> ($(string "before") *> rws *> (PositionBefore <$> segment))
-      <|> ($(string "after") *> rws *> (PositionAfter <$> segment))
-  ows
-  pure pos
+positionParser = ows *> positionValue <* ows
+
+
+positionValue :: ParserT st String Position
+positionValue =
+  $( switchAsciiCI
+       [|
+         case _ of
+           "first" -> pure PositionFirst
+           "last" -> pure PositionLast
+           "before" -> rws *> (PositionBefore <$> nonEmptyPathSegment)
+           "after" -> rws *> (PositionAfter <$> nonEmptyPathSegment)
+         |]
+   )
 
 
 renderPosition :: Position -> M.Builder

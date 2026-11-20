@@ -20,19 +20,14 @@ auth-control-param     = extensive-token BWS "=" BWS token
 Each entry is an @auth-scheme@ followed by a comma-separated list of
 @name=value@ parameters, so the comma plays a dual role exactly as in
 @WWW-Authenticate@: it both separates parameters within an entry and
-separates entries.  We disambiguate by look-ahead — a comma followed
-by @token BWS "="@ continues the parameter list, whereas a comma
-followed by @token 1*SP token "="@ (a scheme name then a parameter)
-begins a new entry.
+separates entries. A parameter name followed by @BWS "="@ continues
+the current entry.
 
 Recipients must accept both quoted and unquoted parameter values, and
-the @name*=@ extended-value form of RFC 5987 is lexically a
-@token "=" token@ (its @charset@lang@pct-encoded@ body and trailing
-@*@ on the name are all token characters).  Both forms therefore parse
-uniformly as the shared 'CredentialParam' (token or quoted-string),
-preserved in document order; the @*@ suffix on a name marks the
-extended form.  Parameter names are case-insensitive; the on-the-wire
-spelling is preserved.
+the @name*=@ form uses the RFC 8187 extended-value grammar. The
+extended value is kept as a 'CredentialParamToken' with its original
+wire spelling. Parameter names are case-insensitive and their original
+spelling and order are preserved.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc8053#section-4>
 
@@ -50,10 +45,18 @@ module Network.HTTP.Headers.AuthenticationControl (
 ) where
 
 import qualified Data.ByteString as B
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text.Short (ShortText)
+import qualified Data.Text.Short.Unsafe as STU
+import Network.HTTP.Grammar.ExtendedValue (extendedValueBytes)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Authorization (AuthScheme (..), CredentialParam (..))
+import Network.HTTP.Headers.Authorization (
+  AuthScheme (..),
+  CredentialParam (..),
+  authParamValueParser,
+  authParamsUniqueOn,
+  renderAuthParam,
+ )
 import Network.HTTP.Headers.HeaderFieldName (hAuthenticationControl)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -87,18 +90,11 @@ instance KnownHeader AuthenticationControl where
   type Direction AuthenticationControl = 'Response
 
 
-  parseFromHeaders _ headers = do
-    entryss <- traverse parseOne (NE.toList headers)
-    pure (AuthenticationControl (concat entryss))
-    where
-      parseOne hdr = case runParser authenticationControlParser hdr of
-        OK (AuthenticationControl es) leftover
-          | B.null (dropOws leftover) -> Right es
-          | otherwise ->
-              Left ("Unconsumed input after parsing Authentication-Control: " <> show leftover)
-        Fail -> Left "Failed to parse Authentication-Control header"
-        Err err -> Left err
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ (first :| rest) =
+    parseFieldLine "Authentication-Control" authenticationControlParser $
+      case rest of
+        [] -> first
+        _ -> B.intercalate "," (first : rest)
 
 
   renderToHeaders _ ac = [M.toStrictByteString (renderAuthenticationControl ac)]
@@ -115,70 +111,61 @@ instance KnownHeader AuthenticationControl where
 authenticationControlParser :: ParserT st String AuthenticationControl
 authenticationControlParser = do
   ows
+  skipMany comma
   first <- entryParser
-  rest <- many continueEntry
+  rest <- many (commas *> entryParser)
+  skipMany comma
   ows
   pure (AuthenticationControl (first : rest))
-  where
-    continueEntry = do
-      lookahead $ do
-        ows
-        $(char ',')
-        ows
-        _ <- rfc9110Token
-        rws
-        _ <- rfc9110Token
-        bws
-        $(char '=')
-      ows
-      $(char ',')
-      ows
-      entryParser
+
+
+comma :: ParserT st e ()
+comma = ows *> $(char ',') *> ows
+{-# INLINE comma #-}
+
+
+commas :: ParserT st e ()
+commas = comma *> skipMany comma
+{-# INLINE commas #-}
 
 
 -- | Parse one entry: @auth-scheme 1*SP 1#auth-control-param@.
 entryParser :: ParserT st String AuthControlEntry
 entryParser = do
   scheme <- AuthScheme <$> rfc9110Token
-  rws
-  AuthControlEntry scheme <$> paramList
-
-
-{- | Parse the entry's parameter list, stopping at any comma that
-begins a new entry (@token 1*SP token "="@) rather than another
-parameter (@token BWS "="@).
--}
-paramList :: ParserT st String [(ShortText, CredentialParam)]
-paramList = do
+  skipSome $(char ' ')
+  skipMany comma
   first <- authParamParser
-  rest <- many continueParam
-  pure (first : rest)
+  rest <- many (commas *> authParamParser)
+  let params = first : rest
+  if authParamsUniqueOn baseName params
+    then pure (AuthControlEntry scheme params)
+    else err "Duplicate Authentication-Control parameter"
   where
-    continueParam = do
-      lookahead $ do
-        ows
-        $(char ',')
-        ows
-        _ <- rfc9110Token
-        bws
-        $(char '=')
-      ows
-      $(char ',')
-      ows
-      authParamParser
+    baseName bytes
+      | B.last bytes == 42 = B.take (B.length bytes - 1) bytes
+      | otherwise = bytes
 
 
--- | @extensive-token BWS "=" BWS ( token / quoted-string )@.
 authParamParser :: ParserT st String (ShortText, CredentialParam)
-authParamParser = do
-  key <- rfc9110Token
-  bws
-  $(char '=')
-  bws
-  val <-
-    (CredentialParamString <$> rfc8941String)
-      <|> (CredentialParamToken <$> rfc9110Token)
-  pure (key, val)
+authParamParser =
+  withByteString parameterName $ \extended key -> do
+    bws
+    $(char '=')
+    bws
+    value <-
+      if extended
+        then CredentialParamToken <$> shortASCIIFromParser_ extendedValueBytes
+        else authParamValueParser
+    pure (STU.fromByteStringUnsafe key, value)
+  where
+    parameterName = do
+      bareToken <|> ($(char '-') *> bareToken *> skipSome ($(char '.') *> bareToken))
+      (True <$ $(char '*')) <|> pure False
+    bareToken =
+      skipSatisfyAscii alphanumeric
+        *> skipMany (skipSatisfyAscii (\c -> alphanumeric c || c == '-' || c == '_'))
+    alphanumeric c = isLatinLetter c || isDigit c
 
 
 -- ---------------------------------------------------------------------------
@@ -194,11 +181,4 @@ renderEntry :: AuthControlEntry -> M.Builder
 renderEntry (AuthControlEntry (AuthScheme scheme) ps) =
   R.shortText scheme
     <> M.char7 ' '
-    <> M.intersperse ", " (map renderParam ps)
-
-
-renderParam :: (ShortText, CredentialParam) -> M.Builder
-renderParam (k, v) =
-  R.shortText k <> M.char7 '=' <> case v of
-    CredentialParamToken t -> R.shortText t
-    CredentialParamString s -> R.rfc8941String s
+    <> M.intersperse ", " (map renderAuthParam ps)

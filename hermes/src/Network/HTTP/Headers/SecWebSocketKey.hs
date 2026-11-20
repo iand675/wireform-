@@ -23,17 +23,12 @@ module Network.HTTP.Headers.SecWebSocketKey (
   renderSecWebSocketKey,
 ) where
 
-import Data.ByteArray.Encoding (Base (Base64), convertFromBase, convertToBase)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
-import Data.CharSet (CharSet)
-import qualified Data.CharSet as CharSet
-import Data.CharSet.Posix.Ascii (alpha, digit)
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSecWebSocketKey)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Wireform.Base64 (encodeBase64)
 
 
 -- | The decoded 16-octet nonce carried by @Sec-WebSocket-Key@.
@@ -47,34 +42,18 @@ instance KnownHeader SecWebSocketKey where
   type Direction SecWebSocketKey = 'Request
 
 
-  parseFromHeaders _ headers = case runParser secWebSocketKeyParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise -> Left ("Unconsumed input after parsing Sec-WebSocket-Key: " <> show leftover)
-    Fail -> Left "Failed to parse Sec-WebSocket-Key header"
-    Err e -> Left e
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = parseSingleFieldLine "Sec-WebSocket-Key" secWebSocketKeyParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderSecWebSocketKey
+  renderToHeaders _ = encodeBase64 . secWebSocketKeyBytes
 
 
   headerName _ = hSecWebSocketKey
 
 
-base64CharSet :: CharSet
-base64CharSet = alpha <> digit <> "+/="
-
-
 secWebSocketKeyParser :: ParserT st String SecWebSocketKey
-secWebSocketKeyParser = do
-  ows
-  withByteString (skipSome (skipSatisfyAscii (`CharSet.member` base64CharSet))) $ \_ bs ->
-    case convertFromBase Base64 bs of
-      Left e -> err e
-      Right ok -> pure (SecWebSocketKey ok)
+secWebSocketKeyParser = ows *> (SecWebSocketKey <$> fixedBase64Bytes 16)
 
 
 renderSecWebSocketKey :: SecWebSocketKey -> M.Builder
-renderSecWebSocketKey (SecWebSocketKey bs) = M.byteString (convertToBase Base64 bs)
+renderSecWebSocketKey (SecWebSocketKey bs) = M.byteString (encodeBase64 bs)

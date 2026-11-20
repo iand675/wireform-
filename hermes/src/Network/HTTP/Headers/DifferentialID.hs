@@ -7,9 +7,8 @@ return a differential (delta) update; the value is a checksum URN such as
 
 == Value
 
-A single opaque content identifier. Per the depth guidance for
-obsolete/host-specific values this is a faithful raw-preserving newtype: the
-identifier is captured verbatim and re-emitted unchanged.
+One or more comma-separated absolute URIs forming a single DRP content
+identifier. The accepted spelling is retained verbatim.
 
 Spec: <https://www.w3.org/TR/NOTE-drp-19970825> (W3C DRP Note; HTTP registration RFC 4229 §2.1.43).
 
@@ -21,9 +20,9 @@ module Network.HTTP.Headers.DifferentialID (
   renderDifferentialID,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
+import Network.HTTP.Headers.ContentID (drpContentIdentifier)
 import Network.HTTP.Headers.HeaderFieldName (hDifferentialID)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -41,21 +40,17 @@ instance KnownHeader DifferentialID where
   type Direction DifferentialID = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser differentialIDParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Differential-ID header: " <> show rest
-    Fail -> Left "Failed to parse Differential-ID header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Differential-ID" differentialIDParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderDifferentialID
+  renderToHeaders _ = ST.toByteString . differentialID
 
 
   headerName _ = hDifferentialID
 
 
 differentialIDParser :: ParserT st String DifferentialID
-differentialIDParser = DifferentialID <$> takeRestShortText
+differentialIDParser = DifferentialID <$> drpContentIdentifier
 
 
 renderDifferentialID :: DifferentialID -> M.Builder

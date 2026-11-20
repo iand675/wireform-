@@ -1,0 +1,78 @@
+edition = "2024";
+package wireform.option_fixture;
+
+import "google/protobuf/descriptor.proto";
+import "option_defaults.proto";
+
+extend google.protobuf.MessageOptions {
+  bool enabled = 51000;
+  RuntimePolicy runtime_policy = 51001;
+  bool build_only = 51002 [retention = RETENTION_SOURCE];
+  repeated int32 values = 51011;
+  RuntimePolicy aggregate_policy = 51012;
+  ExtensiblePolicy nested_policy = 51013;
+  OptionDefaults implicit_defaults = 51014;
+  EditionDefaults edition_defaults = 51015;
+  float scalar_float_zero = 51016;
+  int32 scalar_int_zero = 51017;
+  EditionDefaults dotted_defaults = 51018;
+}
+
+extend google.protobuf.FileOptions {
+  string file_tag = 51003;
+}
+
+extend google.protobuf.FieldOptions {
+  sint32 field_tag = 51004;
+}
+
+extend google.protobuf.OneofOptions {
+  bool oneof_tag = 51005;
+}
+
+extend google.protobuf.EnumOptions {
+  uint32 enum_tag = 51006;
+}
+
+extend google.protobuf.EnumValueOptions {
+  bytes enum_value_tag = 51007;
+}
+
+extend google.protobuf.ServiceOptions {
+  PolicyLevel service_tag = 51008;
+}
+
+extend google.protobuf.MethodOptions {
+  string method_tag = 51009;
+}
+
+extend google.protobuf.ExtensionRangeOptions {
+  bool range_tag = 51010;
+}
+
+message RuntimePolicy {
+  string label = 1;
+  string annotation = 2 [retention = RETENTION_SOURCE];
+  repeated sint32 numbers = 3;
+}
+
+message ExtensiblePolicy {
+  extensions 100 to 199;
+}
+
+extend ExtensiblePolicy {
+  string detail = 100;
+}
+
+enum PolicyLevel {
+  POLICY_LEVEL_UNSPECIFIED = 0;
+  POLICY_LEVEL_ON = 1;
+}
+
+message OptionOnlyMessage {}
+
+message EditionDefaults {
+  int32 explicit_zero = 1;
+  int32 implicit_zero = 2 [features.field_presence = IMPLICIT];
+  float float_value = 3;
+}

@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 {- |
 @X-Forwarded-Host@ — de-facto request header set by reverse proxies to convey
 the original @Host@ requested by the client before the request was proxied.
@@ -6,7 +8,8 @@ This header is __not IANA-registered__ and is superseded by the @host@
 parameter of the standardized @Forwarded@ header
 (<https://www.rfc-editor.org/rfc/rfc7239 RFC 7239>). The value is nominally a
 single host (optionally with a @:port@), but deployments occasionally emit
-comma-separated chains, so the raw value is preserved verbatim.
+comma-separated chains. Each authority is validated and the original
+spelling and spacing within the chain are retained.
 
 Spec (de-facto, not IANA-registered): MDN
 <https://developer.mozilla.org/docs/Web/HTTP/Headers/X-Forwarded-Host>.
@@ -21,8 +24,8 @@ module Network.HTTP.Headers.XForwardedHost (
   renderXForwardedHost,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Authority (hostAndPortListMemberBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXForwardedHost)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,11 +46,7 @@ instance KnownHeader XForwardedHost where
   type Direction XForwardedHost = 'Request
 
 
-  parseFromHeaders _ headers = case runParser xForwardedHostParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing X-Forwarded-Host header: " <> show rest
-    Fail -> Left "Failed to parse X-Forwarded-Host header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "X-Forwarded-Host" xForwardedHostParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderXForwardedHost
@@ -57,7 +56,10 @@ instance KnownHeader XForwardedHost where
 
 
 xForwardedHostParser :: ParserT st String XForwardedHost
-xForwardedHostParser = XForwardedHost <$> takeRestShortText
+xForwardedHostParser =
+  XForwardedHost <$> shortASCIIFromParser_ (authority *> skipMany (ows *> $(char ',') *> ows *> authority))
+  where
+    authority = hostAndPortListMemberBytes
 
 
 renderXForwardedHost :: XForwardedHost -> M.Builder

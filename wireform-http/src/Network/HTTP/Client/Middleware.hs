@@ -50,6 +50,7 @@ module Network.HTTP.Client.Middleware (
   defaultRetryPolicy,
   exponentialBackoff,
   withRetry,
+  withRetryUsing,
 
   -- * Circuit breaker
   CircuitBreaker,
@@ -101,7 +102,6 @@ import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Text.Read qualified as T
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Word (Word64)
 import Network.HTTP.Client.BodyStream
@@ -109,7 +109,7 @@ import Network.HTTP.Client.Request
 import Network.HTTP.Client.Response
 import Network.HTTP.Client.Transport
 import Network.HTTP.Client.URI
-import Network.HTTP.HttpDate qualified as HttpDate
+import Network.HTTP.Internal.RetryAfter (RetryDelay (..), retryAfterWithin)
 import Network.HTTP.Internal.Validation qualified as V
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Method qualified as M
@@ -173,9 +173,7 @@ withAuth scheme inner = Transport $ \req ->
 -- Duration / Timeout
 -- ---------------------------------------------------------------------------
 
-{- | A nanosecond-resolution duration. We resolve to microseconds when
-handing off to 'System.Timeout.timeout' and 'threadDelay'.
--}
+-- | A duration in microseconds.
 newtype Duration
   = -- | microseconds
     Duration {unDuration :: Int}
@@ -227,11 +225,10 @@ data RetryPolicy = RetryPolicy
   replay safety (e.g. server-side @Idempotency-Key@).
   -}
   , honorRetryAfter :: !Bool
-  {- ^ Honor the response's @Retry-After@ header (RFC 9110 §10.2.3)
-  on 429 / 503. The header may be either delta-seconds or an
-  HTTP-date; both are parsed. The reported delay is clamped
-  to 'maxDelay' so a malicious or buggy server can't pin a
-  client for hours. 'True' by default.
+  {- ^ Use a valid singleton @Retry-After@ header (RFC 9110 §10.2.3)
+  on a response selected by 'retryOn'. Return the response if the server
+  delay exceeds 'maxDelay'. Otherwise wait at least the server delay and
+  the client's capped backoff. 'True' by default.
   -}
   }
 
@@ -260,9 +257,16 @@ callers who want to retry without buffering should compose retry
 /below/ a layer that handles their streaming semantics.
 -}
 withRetry :: RetryPolicy -> Middleware IO
-withRetry policy inner = Transport $ \req -> do
+withRetry = withRetryUsing getCurrentTime (threadDelay . toMicros)
+
+
+-- | Retry middleware with a supplied wall clock and delay operation.
+withRetryUsing :: IO UTCTime -> (Duration -> IO ()) -> RetryPolicy -> Middleware IO
+withRetryUsing getTime wait policy inner = Transport $ \req -> do
   buffered <- bodyStreamBytes (body req)
-  let methodIsSafe = M.isIdempotent (method req)
+  let cap = max 0 (toMicros (maxDelay policy))
+      initial = max (Duration 0) (min (Duration cap) (initialDelay policy))
+      methodIsSafe = M.isIdempotent (method req)
       attempt n delay = do
         bs <- streamFromStrict buffered
         let attemptReq = req {Network.HTTP.Client.Request.body = bs}
@@ -273,71 +277,29 @@ withRetry policy inner = Transport $ \req -> do
                 && (not (retrySafeMethodsOnly policy) || methodIsSafe)
         if shouldRetry
           then do
-            now <- getCurrentTime
-            let raDelay =
-                  if honorRetryAfter policy
-                    then retryAfterDelay now (Network.HTTP.Client.Response.headers raw)
-                    else Nothing
-                effective = case raDelay of
-                  Nothing -> delay
-                  Just d ->
-                    Duration
-                      ( max
-                          (toMicros delay)
-                          ( min
-                              (toMicros d)
-                              (toMicros (maxDelay policy))
-                          )
-                      )
-            threadDelay (toMicros effective)
-            let next =
-                  scaleDuration
-                    delay
-                    (backoffFactor policy)
-                    (maxDelay policy)
-            -- Flush the body of this failed attempt so the
-            -- connection / mock can advance, but don't allocate a
-            -- ByteString for bytes we won't look at.
-            drainPopper (bodyPopper raw)
-            attempt (n + 1) next
+            let drain = drainPopper (bodyPopper raw)
+                retry waitFor = do
+                  drain
+                  wait waitFor
+                  attempt (n + 1) (scaleDuration delay (backoffFactor policy) (Duration cap))
+            hinted <- if honorRetryAfter policy
+              then retryAfterWithin getTime cap (Network.HTTP.Client.Response.headers raw)
+                `U.onException` drain
+              else pure NoRetryDelay
+            case hinted of
+              NoRetryDelay -> retry delay
+              RetryDelay micros -> retry (max delay (Duration micros))
+              RetryDelayAboveLimit -> pure raw
           else pure raw
-  attempt 1 (initialDelay policy)
-
-
-{- | Parse the response's @Retry-After@ header (RFC 9110 §10.2.3),
-which may be either delta-seconds or an HTTP-date. Returns the
-server-requested delay relative to @now@, or 'Nothing' if the
-header is absent or malformed.
--}
-retryAfterDelay :: UTCTime -> H.Headers -> Maybe Duration
-retryAfterDelay now hdrs = do
-  raw <- H.lookupHeader H.hRetryAfter hdrs
-  let trimmed = BS.dropWhile isWS (BS.dropWhileEnd isWS raw)
-  if BS.null trimmed
-    then Nothing
-    else
-      -- delta-seconds first; fall back to HTTP-date.
-      case parseInt trimmed of
-        Just n | n >= 0 -> Just (seconds n)
-        _ -> case HttpDate.parseHttpDateMaybe trimmed of
-          Just t ->
-            let diff = realToFrac (diffUTCTime t now) :: Double
-                us = max 0 (round (diff * 1_000_000) :: Int)
-            in Just (Duration us)
-          Nothing -> Nothing
-  where
-    isWS w = w == 0x20 || w == 0x09
-    parseInt b = case TE.decodeUtf8' b of
-      Right t -> case T.signed T.decimal t of
-        Right (n, rest) | T.null rest -> Just (n :: Int)
-        _ -> Nothing
-      Left _ -> Nothing
+  attempt 1 initial
 
 
 scaleDuration :: Duration -> Double -> Duration -> Duration
 scaleDuration (Duration us) factor (Duration cap) =
-  let scaled = round (fromIntegral us * factor :: Double)
-  in Duration (min scaled cap)
+  let scaled = fromIntegral us * factor
+  in Duration $
+       if scaled >= fromIntegral cap then cap
+       else if scaled > 0 then round scaled else 0
 
 
 -- ---------------------------------------------------------------------------
@@ -545,27 +507,9 @@ defaultExpectContinuePolicy =
 
 
 {- | Attach @Expect: 100-continue@ to outgoing requests when the
-policy says it's worthwhile.  The 100 Continue interim
-response is silently absorbed by the HTTP\/1 client's
-existing 1xx loop in 'Network.HTTP1.Client.sendRequestOn'
-(which keeps reading past informational responses until it
-sees the final one), so an @Expect@ here gives the server
-the chance to short-circuit with a 4xx before the body lands
-on the wire.
-
-/Caveat (RFC 9110 §10.1.1 strict reading)./ A full two-stage
-@Expect: 100-continue@ — send headers, /pause/ until the 1xx
-arrives or a short timeout elapses, then send the body — is
-not yet implemented at the connection layer.  Doing so
-safely requires a non-blocking recv primitive in
-@wireform-http1@'s 'ClientConnection' that's not yet
-available; tracking it as follow-up work for §1.2.  In
-practice the header still has value: servers that pre-check
-(e.g. @413 Payload Too Large@, @401 Unauthorized@,
-@415 Unsupported Media Type@) can return the rejection ahead
-of the body and the existing 1xx-absorbing client code
-handles the 100 itself; what this middleware /can't/ yet do
-is /delay/ the body until the 100 arrives.
+policy says it is worthwhile. The HTTP/1.1 and HTTP/2 clients wait for
+@100 Continue@, a final response, or its continue timeout before
+deciding whether to send the body.
 -}
 withExpectContinue :: ExpectContinuePolicy -> Middleware IO
 withExpectContinue policy inner = Transport $ \req -> do
@@ -579,6 +523,8 @@ withExpectContinue policy inner = Transport $ \req -> do
           contentLen = parseCL =<< H.lookupHeader H.hContentLength hdrs
       in not alreadyHas
            && meth `notElem` ecSkipMethods policy
+           && knownSize (Network.HTTP.Client.Request.body req) /= Just 0
+           && contentLen /= Just 0
            && passesThreshold contentLen
 
     passesThreshold len = case (ecMinBodyBytes policy, len) of

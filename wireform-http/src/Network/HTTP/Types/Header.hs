@@ -23,6 +23,7 @@ module Network.HTTP.Types.Header (
 
   -- * Lookups
   lookupHeader,
+  lookupSingletonHeader,
   lookupHeaders,
   hasHeader,
   insertHeader,
@@ -144,6 +145,19 @@ lookupHeader name = go
     go ((k, v) : rest)
       | k == name = Just v
       | otherwise = go rest
+
+
+-- | Look up a single field line. A second line is an error, even if its
+-- value is identical to the first.
+lookupSingletonHeader :: HeaderName -> Headers -> Either String (Maybe HeaderValue)
+lookupSingletonHeader name = go
+  where
+    go [] = Right Nothing
+    go ((k, v) : rest)
+      | k /= name = go rest
+      | hasHeader name rest = Left "Repeated header field lines"
+      | otherwise = Right (Just v)
+{-# INLINE lookupSingletonHeader #-}
 
 
 {- | All values for a given header name, in original order. Useful for

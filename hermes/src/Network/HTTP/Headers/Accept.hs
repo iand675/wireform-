@@ -4,7 +4,8 @@
 optional @;q=@ quality weight expressing relative preference. Servers
 use it for proactive content negotiation, selecting the best matching
 representation to return (or replying @406 Not Acceptable@ when none is
-acceptable).
+acceptable). Servers can also send it to advertise media types preferred
+for a subsequent request.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-12.5.1>
 
@@ -16,7 +17,6 @@ module Network.HTTP.Headers.Accept (
   renderAccept,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.ContentNegotiation
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAccept)
@@ -31,14 +31,10 @@ newtype Accept = Accept {accept :: [WeightedMediaRange]}
 instance KnownHeader Accept where
   type ParseFailure Accept = String
   type Cardinality Accept = 'ZeroOrOne
-  type Direction Accept = 'Request
+  type Direction Accept = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser acceptParser $ NE.head headers of
-    OK a "" -> Right a
-    OK _ rest -> Left $ "Unconsumed input after parsing Accept header: " <> show rest
-    Fail -> Left "Failed to parse Accept header"
-    Err e -> Left e
+  parseFromHeaders _ = fmap Accept . parseNegotiationHeaders "Accept" listParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccept
@@ -48,7 +44,11 @@ instance KnownHeader Accept where
 
 
 acceptParser :: ParserT st String Accept
-acceptParser = Accept <$> weightedMediaRangesParser
+acceptParser = Accept <$> listParser
+
+
+listParser :: ParserT st String [WeightedMediaRange]
+listParser = weightedMediaRangesParser
 
 
 renderAccept :: Accept -> M.Builder

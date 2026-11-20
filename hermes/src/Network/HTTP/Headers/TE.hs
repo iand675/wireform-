@@ -16,9 +16,8 @@ transfer-coding = token *( OWS ";" OWS transfer-parameter )
 weight          = OWS ";" OWS "q=" qvalue
 @
 
-Each entry is surfaced as a coding name (the @trailers@ keyword is just a
-name) plus an optional quality 'Double' weight. Transfer-parameters other
-than the @q@ weight are not in current use and are not modelled.
+Each entry includes its transfer parameters and an optional quality
+weight. The @trailers@ keyword has neither parameters nor a weight.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9112#section-7.4>
 
@@ -28,33 +27,58 @@ See also: "Network.HTTP.Headers.TransferEncoding", "Network.HTTP.Headers.Trailer
 module Network.HTTP.Headers.TE (
   TE (..),
   TECoding (..),
+  teCodingParams,
   teParser,
   renderTE,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
 import Data.List.NonEmpty (NonEmpty)
-import Data.Semigroup (sconcat)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.ContentNegotiation (qualityParameter, qualityValueParser, renderQualityValue)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTE)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (sepByCommas1, shortText)
+import Network.HTTP.Headers.TransferEncoding (
+  TransferParameter (..),
+  renderTransferParameter,
+  transferCodingIs,
+  transferCodingNameParser,
+  transferCodingSupportsParameters,
+  transferParameterParser,
+ )
 
 
 -- | A single @t-codings@ entry: a transfer-coding name with an optional q weight.
-data TECoding = TECoding
-  { teCodingName :: !ST.ShortText
-  , teCodingWeight :: !(Maybe Double)
-  }
+data TECoding
+  = TECoding
+      { teCodingName :: !ST.ShortText
+      , teCodingWeight :: !(Maybe Double)
+      }
+  | TEParameterizedCoding
+      { teCodingName :: !ST.ShortText
+      , teCodingWeight :: !(Maybe Double)
+      , teCodingParameters :: !(NonEmpty TransferParameter)
+      }
   deriving stock (Eq, Show)
 
 
--- | A @TE@ header value: a non-empty list of 'TECoding' entries.
-newtype TE = TE {teCodings :: NonEmpty TECoding}
+-- | A @TE@ list. 'TEEmpty' represents an explicitly empty field.
+data TE = TE {teCodings :: NonEmpty TECoding} | TEEmpty
   deriving stock (Eq, Show)
-  deriving newtype (Semigroup)
+
+
+instance Semigroup TE where
+  TEEmpty <> other = other
+  other <> TEEmpty = other
+  TE xs <> TE ys = TE (xs <> ys)
+
+
+teCodingParams :: TECoding -> [TransferParameter]
+teCodingParams (TECoding _ _) = []
+teCodingParams (TEParameterizedCoding _ _ params) = NE.toList params
 
 
 instance KnownHeader TE where
@@ -63,63 +87,56 @@ instance KnownHeader TE where
   type Direction TE = 'Request
 
 
-  parseFromHeaders _ neHeaders = sconcat <$> traverse parseLine neHeaders
-    where
-      parseLine bs = case runParser teParser bs of
-        OK v "" -> Right v
-        OK _ rest -> Left $ "Unconsumed input after parsing TE header: " <> show rest
-        Fail -> Left "Failed to parse TE header"
-        Err e -> Left e
+  parseFromHeaders _ = fmap fromCodings . parseListFieldLines "TE" (httpList teCodingParser)
   renderToHeaders _ = pure . M.toStrictByteString . renderTE
   headerName _ = hTE
 
 
 teParser :: ParserT st String TE
-teParser = TE <$> (teCodingParser `sepBy1` (ows *> $(char ',') *> ows))
+teParser = fromCodings <$> httpList teCodingParser
+
+
+fromCodings :: [TECoding] -> TE
+fromCodings = maybe TEEmpty TE . NE.nonEmpty
 
 
 teCodingParser :: ParserT st String TECoding
 teCodingParser = do
-  name <- rfc9110Token
-  TECoding name <$> teWeightParser
-
-
-{- | The optional @OWS ";" OWS "q=" qvalue@ tail (same shape as the
-@Accept-*@ weight parsers).
--}
-teWeightParser :: ParserT st String (Maybe Double)
-teWeightParser = optional weight
+  name <- transferCodingNameParser
+  if transferCodingIs "chunked" name
+    then err "TE cannot advertise chunked"
+    else
+      if transferCodingIs "trailers" name
+        then pure (TECoding name Nothing)
+        else parameters name []
   where
-    weight = do
-      ows
-      $(char ';')
-      ows
-      $(string "q=")
-      qValue
-    qValue =
-      $( switch
-          [|
-            case _ of
-              "0." -> withSpan anyAsciiDecimalWord $ \d (Span (Pos start) (Pos end)) -> do
-                let d' = fromIntegral d
-                case end - start of
-                  1 -> pure $! d' / 10
-                  2 -> pure $! d' / 100
-                  3 -> pure $! d' / 1000
-                  _ -> err "Too many digits after the decimal point in q-value"
-              "0" -> pure 0
-              "1.000" -> pure 1
-              "1.00" -> pure 1
-              "1.0" -> pure 1
-              "1" -> pure 1
-            |]
-       )
+    parameters name reversed =
+      withOption
+        (ows *> $(char ';') *> ows)
+        (\() -> withOption qualityParameter readWeight readParameter)
+        (pure (coding Nothing))
+      where
+        coding weight = case NE.nonEmpty (reverse reversed) of
+          Nothing -> TECoding name weight
+          Just params -> TEParameterizedCoding name weight params
+        readWeight () = coding . Just <$> qualityValueParser
+        readParameter = do
+          param <- transferParameterParser
+          if transferCodingIs "q" (transferParameterName param)
+            then err "TE weight must use q= followed by a qvalue"
+            else
+              if transferCodingSupportsParameters name
+                then parameters name (param : reversed)
+                else err "TE coding does not allow parameters"
 
 
 renderTE :: TE -> M.Builder
+renderTE TEEmpty = mempty
 renderTE (TE codings) = sepByCommas1 (fmap renderTECoding codings)
 
 
 renderTECoding :: TECoding -> M.Builder
-renderTECoding (TECoding name mw) =
-  shortText name <> maybe mempty (\w -> ";q=" <> M.doubleDec w) mw
+renderTECoding coding =
+  shortText (teCodingName coding)
+    <> foldMap renderTransferParameter (teCodingParams coding)
+    <> maybe mempty (\weight -> ";q=" <> renderQualityValue weight) (teCodingWeight coding)

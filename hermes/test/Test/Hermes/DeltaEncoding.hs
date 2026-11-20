@@ -2,11 +2,16 @@
 
 module Test.Hermes.DeltaEncoding (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
 import qualified Network.HTTP.Headers.AIM as AIM
 import qualified Network.HTTP.Headers.DeltaBase as DB
 import Network.HTTP.Headers.ETag (EntityTag (..))
@@ -92,6 +97,33 @@ prop_aim_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+unit_aim_fields :: Spec
+unit_aim_fields = it "reads ordered A-IM field lines with an optional parameter before the weight" $ do
+  let fields = headerMapFromList [("A-IM", ", vcdiff; flavor = \"a,b\" ; Q = 0.125, "), ("A-IM", "gzip, identity;q=0.,,")]
+      value =
+        AIM.AIM
+          [ AIM.WeightedIMWithParameter "vcdiff" 0.125 (AIM.IMParameter "flavor" (Just (AIM.IMParameterQuoted "a,b")))
+          , AIM.WeightedIM "gzip" 1
+          , AIM.WeightedIM "identity" 0
+          ]
+  lookupHeader @AIM.AIM fields `shouldBe` Right (Just value)
+  lookupRawHeader "A-IM" (setHeader value (headerMapFromList []))
+    `shouldBe` Just ("vcdiff;flavor=\"a,b\";q=0.125, gzip, identity;q=0" :| [])
+  lookupHeader @AIM.AIM (headerMapFromList [("A-IM", " ,\t, ")]) `shouldBe` Right (Just (AIM.AIM []))
+  lookupHeader @AIM.AIM (headerMapFromList [("A-IM", "range;label=\"a"), ("A-IM", "b\";q=0.5")])
+    `shouldBe` Right (Just (AIM.AIM [AIM.WeightedIMWithParameter "range" 0.5 (AIM.IMParameter "label" (Just (AIM.IMParameterQuoted "a,b")))]))
+  parseAIM "range; flag; Q=1." `shouldBe` Right (AIM.AIM [AIM.WeightedIMWithParameter "range" 1 (AIM.IMParameter "flag" Nothing)])
+  forM_ ["range;q", "range;q=1.001", "range;q=0.1234", "range;q=0.7;extra", "range;first;second", "range;flag;q=\"0.5\""] $ \bad ->
+    lookupHeader @AIM.AIM (headerMapFromList [("A-IM", "gzip"), ("A-IM", bad)]) `shouldSatisfy` isLeft
+
+
+unit_aim_authored_weights :: Spec
+unit_aim_authored_weights =
+  it "renders authored A-IM weights within the three-digit wire grammar" $
+    renderAIM (AIM.AIM [AIM.WeightedIM "a" 0.0001, AIM.WeightedIM "b" 0.12345, AIM.WeightedIM "c" (0 / 0), AIM.WeightedIM "d" 1.5])
+      `shouldBe` "a;q=0, b;q=0.123, c;q=0, d"
+
+
 -- ---------------------------------------------------------------------------
 -- IM
 -- ---------------------------------------------------------------------------
@@ -119,6 +151,25 @@ prop_im_roundtrip = property $ do
   case parseIM bs of
     Right v' -> v' === v
     Left err -> error (err <> " on " <> show bs)
+
+
+unit_im_fields :: Spec
+unit_im_fields = it "reads ordered IM field lines and retains quoted octets and flags" $ do
+  let fields = headerMapFromList [("IM", ", vcdiff;flavor=\"a,\\\"" <> BS.singleton 255 <> "\", "), ("IM", "ext;raw=DATA, gzip;flag")]
+      value =
+        IM.IMEntries
+          [ IM.InstanceManipulation "vcdiff" (Just (IM.IMParameter "flavor" (Just (IM.IMParameterQuoted "a,\"\xff"))))
+          , IM.InstanceManipulation "ext" (Just (IM.IMParameter "raw" (Just (IM.IMParameterToken "DATA"))))
+          , IM.InstanceManipulation "gzip" (Just (IM.IMParameter "flag" Nothing))
+          ]
+  lookupHeader @IM.IM fields `shouldBe` Right (Just value)
+  IM.instanceManipulations value `shouldBe` ["vcdiff", "ext", "gzip"]
+  lookupRawHeader "IM" (setHeader value (headerMapFromList []))
+    `shouldBe` Just (("vcdiff;flavor=\"a,\\\"" <> BS.singleton 255 <> "\", ext;raw=DATA, gzip;flag") :| [])
+  parseIM " \t, , " `shouldBe` Right (IM.IM [])
+  parseIM "identity-ext" `shouldBe` Right (IM.IM ["identity-ext"])
+  forM_ ["IDENTITY", "identity;ext", "range;Q", "range;q=0.5", "range;unclosed=\"x", "range;x=y;z"] $ \bad ->
+    lookupHeader @IM.IM (headerMapFromList [("IM", "gzip"), ("IM", bad)]) `shouldSatisfy` isLeft
 
 
 -- ---------------------------------------------------------------------------
@@ -154,6 +205,18 @@ prop_deltabase_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+unit_deltabase_fields :: Spec
+unit_deltabase_fields = it "reads Delta-Base as one opaque entity tag" $ do
+  let spelling = "W/\"" <> BS.singleton 255 <> "\""
+      fields = headerMapFromList [("Delta-Base", " \t" <> spelling <> " ")]
+  case lookupHeader @DB.DeltaBase fields of
+    Right (Just value) ->
+      lookupRawHeader "Delta-Base" (setHeader value (headerMapFromList [])) `shouldBe` Just (spelling :| [])
+    other -> expectationFailure (show other)
+  forM_ [["*"], ["\"v\", \"w\""], ["\"v\"", "\"w\""]] $ \bad ->
+    lookupHeader @DB.DeltaBase (headerMapFromList (map (\field -> ("Delta-Base", field)) bad)) `shouldSatisfy` isLeft
+
+
 -- ---------------------------------------------------------------------------
 -- Generators
 -- ---------------------------------------------------------------------------
@@ -166,7 +229,20 @@ tokenGen =
 
 
 weightedGen :: Gen AIM.WeightedIM
-weightedGen = AIM.WeightedIM <$> tokenGen <*> Gen.element [1.0, 0.5, 0.9, 0.1]
+weightedGen = do
+  tag <- tokenGen
+  weight <- (/ 1000) . fromIntegral <$> Gen.int (Range.linear 0 1000)
+  Gen.choice
+    [ pure (AIM.WeightedIM tag weight)
+    , AIM.WeightedIMWithParameter tag weight <$> parameterGen
+    ]
+
+
+parameterGen :: Gen IM.IMParameter
+parameterGen =
+  IM.IMParameter
+    <$> Gen.element ["flag", "x", "quality"]
+    <*> Gen.maybe (Gen.element [IM.IMParameterToken "DATA", IM.IMParameterQuoted "abc,def", IM.IMParameterQuoted "\"${}\\\xff"])
 
 
 aimGen :: Gen AIM.AIM
@@ -174,7 +250,9 @@ aimGen = AIM.AIM <$> Gen.list (Range.linear 1 5) weightedGen
 
 
 imGen :: Gen IM.IM
-imGen = IM.IM <$> Gen.list (Range.linear 1 5) tokenGen
+imGen = IM.IMEntries <$> Gen.list (Range.linear 0 5) manipulationGen
+  where
+    manipulationGen = IM.InstanceManipulation <$> Gen.filter (/= "identity") tokenGen <*> Gen.maybe parameterGen
 
 
 etagGen :: Gen EntityTag
@@ -197,12 +275,16 @@ tests =
     sequence_
       [ unit_aim_parse
       , unit_aim_render
+      , unit_aim_fields
+      , unit_aim_authored_weights
       , it "A-IM round-trips" prop_aim_roundtrip
       , unit_im_parse
       , unit_im_render
+      , unit_im_fields
       , it "IM round-trips" prop_im_roundtrip
       , unit_deltabase_parse
       , unit_deltabase_parse_weak
       , unit_deltabase_render
+      , unit_deltabase_fields
       , it "Delta-Base round-trips" prop_deltabase_roundtrip
       ]

@@ -26,9 +26,8 @@ module Network.HTTP.Headers.Upgrade (
   renderUpgrade,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
 import Data.List.NonEmpty (NonEmpty)
-import Data.Semigroup (sconcat)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hUpgrade)
@@ -45,10 +44,17 @@ data Protocol = Protocol
   deriving stock (Eq, Show)
 
 
--- | An @Upgrade@ header value: a non-empty list of protocols.
-newtype Upgrade = Upgrade {upgradeProtocols :: NonEmpty Protocol}
+-- | Upgrade options in preference order. 'UpgradeEmpty' offers no protocol.
+data Upgrade
+  = Upgrade {upgradeProtocols :: NonEmpty Protocol}
+  | UpgradeEmpty
   deriving stock (Eq, Show)
-  deriving newtype (Semigroup)
+
+
+instance Semigroup Upgrade where
+  UpgradeEmpty <> other = other
+  other <> UpgradeEmpty = other
+  Upgrade xs <> Upgrade ys = Upgrade (xs <> ys)
 
 
 instance KnownHeader Upgrade where
@@ -57,19 +63,17 @@ instance KnownHeader Upgrade where
   type Direction Upgrade = 'RequestAndResponse
 
 
-  parseFromHeaders _ neHeaders = sconcat <$> traverse parseLine neHeaders
-    where
-      parseLine bs = case runParser upgradeParser bs of
-        OK v "" -> Right v
-        OK _ rest -> Left $ "Unconsumed input after parsing Upgrade header: " <> show rest
-        Fail -> Left "Failed to parse Upgrade header"
-        Err e -> Left e
+  parseFromHeaders _ = fmap fromProtocols . parseListFieldLines "Upgrade" (httpList protocolParser)
   renderToHeaders _ = pure . M.toStrictByteString . renderUpgrade
   headerName _ = hUpgrade
 
 
 upgradeParser :: ParserT st String Upgrade
-upgradeParser = Upgrade <$> (protocolParser `sepBy1` (ows *> $(char ',') *> ows))
+upgradeParser = fromProtocols <$> httpList protocolParser
+
+
+fromProtocols :: [Protocol] -> Upgrade
+fromProtocols = maybe UpgradeEmpty Upgrade . NE.nonEmpty
 
 
 protocolParser :: ParserT st String Protocol
@@ -80,6 +84,7 @@ protocolParser = do
 
 
 renderUpgrade :: Upgrade -> M.Builder
+renderUpgrade UpgradeEmpty = mempty
 renderUpgrade (Upgrade protos) = sepByCommas1 (fmap renderProtocol protos)
 
 

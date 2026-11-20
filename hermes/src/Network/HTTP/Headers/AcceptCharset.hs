@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Accept-Charset@ — a request header by which a client indicated which
 character encodings (charsets) it was willing to accept in the
@@ -25,10 +23,8 @@ module Network.HTTP.Headers.AcceptCharset (
   renderAcceptCharset,
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import Data.Functor (($>))
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.ContentNegotiation (negotiationList, parseNegotiationHeaders, renderWeight, weightParser)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptCharset)
 import qualified Network.HTTP.Headers.Mason as M
@@ -58,12 +54,7 @@ instance KnownHeader AcceptCharset where
   type Direction AcceptCharset = 'Request
 
 
-  parseFromHeaders _ headers =
-    case runParser acceptCharsetParser (NE.head headers) of
-      OK ac "" -> Right ac
-      OK _ rest -> Left $ "Unconsumed input after parsing Accept-Charset header: " <> show rest
-      Fail -> Left "Failed to parse Accept-Charset header"
-      Err err -> Left err
+  parseFromHeaders _ = fmap AcceptCharset . parseNegotiationHeaders "Accept-Charset" listParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderAcceptCharset
@@ -73,59 +64,22 @@ instance KnownHeader AcceptCharset where
 
 
 acceptCharsetParser :: ParserT st String AcceptCharset
-acceptCharsetParser = AcceptCharset <$> (weightedCharsetParser `sepBy` $(char ','))
+acceptCharsetParser = AcceptCharset <$> listParser
+
+
+listParser :: ParserT st String [WeightedCharset]
+listParser = negotiationList weightedCharsetParser
   where
     weightedCharsetParser = do
-      ows
-      tag <-
-        ($(char '*') $> ST.fromString "*")
-          <|> rfc9110Token
-      -- \^ The parens around the @$>@ are mandatory.  Wireform's
-      -- 'Wireform.Parser.(<|>)' is @infixr 6@ while 'Data.Functor.($>)'
-      -- is @infixl 4@; without the parens this would group as
-      -- @$(char '*') $> (ST.fromString \"*\" \<|\> rfc9110Token)@, which
-      -- requires @*@ to match before the alternative is even
-      -- considered.
+      tag <- rfc9110Token
       w <- weightParser
-      ows
       pure $ WeightedCharset tag w
-
-
-{- | Parser for the optional @;q=Q@ tail (same shape as
-"Network.HTTP.Headers.AcceptLanguage"\u2019s 'weightParser').
--}
-weightParser :: ParserT st String Double
-weightParser = flip (<|>) (pure 1) $ do
-  ows
-  $(char ';')
-  ows
-  $(string "q=")
-  qValue
-  where
-    qValue =
-      $( switch
-          [|
-            case _ of
-              "0." -> withSpan anyAsciiDecimalWord $ \d (Span (Pos start) (Pos end)) -> do
-                let d' = fromIntegral d
-                case end - start of
-                  1 -> pure $! d' / 10
-                  2 -> pure $! d' / 100
-                  3 -> pure $! d' / 1000
-                  _ -> err "Too many digits after the decimal point in q-value"
-              "0" -> pure 0
-              "1.000" -> pure 1
-              "1.00" -> pure 1
-              "1.0" -> pure 1
-              "1" -> pure 1
-            |]
-       )
 
 
 renderWeightedCharset :: WeightedCharset -> M.Builder
 renderWeightedCharset (WeightedCharset tag w) =
   shortText tag
-    <> if w == 1 then mempty else ";q=" <> M.doubleDec (realToFrac w)
+    <> renderWeight w
 
 
 renderAcceptCharset :: AcceptCharset -> M.Builder

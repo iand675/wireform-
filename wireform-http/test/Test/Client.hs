@@ -18,18 +18,23 @@ import Codec.Compression.Brotli qualified as Brotli
 import Codec.Compression.GZip qualified as GZip
 import Codec.Compression.Zlib qualified as Zlib
 import Control.Exception (SomeException, try)
+import Control.Monad (forM_)
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BSL
+import Data.Either (isLeft)
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import GHC.Generics (Generic)
 import Network.HTTP.Client
+import Network.HTTP.Client.Compression qualified as Compression
 import Network.HTTP.Client.Request (Request (headers))
+import Network.HTTP.Client.Request qualified as WReq
 import Network.HTTP.Client.Response (RawResponse (headers))
+import Network.HTTP.ContentCoding qualified as Coding
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Method qualified as M
 import Network.HTTP.Types.Status qualified as S
@@ -99,6 +104,21 @@ mediaTypeTests =
           matches "application/json" "application/*" `shouldBe` True
           matches "application/json" "text/*" `shouldBe` False
           matches "text/plain" "text/plain" `shouldBe` True
+      , it "distinguishes concrete content types from media ranges" $ do
+          map (isLeft . parseMediaType) ["*/*", "text/*", "*/json", "application/*+json"] `shouldBe` replicate 4 True
+          parseMediaRange "TeXT/*; charset=utf-8" `shouldBe` Right (MediaType "text" "*" [("charset", "utf-8")])
+          contentTypeOf [(H.hContentType, "*/*")] `shouldBe` MediaType "application" "octet-stream" []
+      , it "uses the default for repeated Content-Type field lines" $
+          map
+            (\value -> contentTypeOf [(H.hContentType, "application/json"), (H.hAge, "0"), ("CONTENT-TYPE", value)])
+            ["application/json", "text/plain"]
+            `shouldBe` replicate 2 (MediaType "application" "octet-stream" [])
+      , it "round-trips quoted parameter delimiters and opaque bytes" $ do
+          let opaque = BS.pack [0x80, 0xff]
+              parsed = MediaType "application" "example" [("profile", "a,b"), ("opaque", opaque)]
+              canonical = "application/example; profile=\"a,b\"; opaque=\"" <> opaque <> "\""
+          parseMediaType canonical `shouldBe` Right parsed
+          renderMediaType parsed `shouldBe` canonical
       , it "Accept header rendering omits q=1" $ do
           acceptHeaderValue
             [ ("application/json", maxQuality)
@@ -676,6 +696,47 @@ compressionTests =
           let transport = withDecompression logged
           _ <- sendIO transport (get (compileTemplate "/x")) (as @PlainText @Text)
           assertLog log_ (anyRequest (hasHeaderEq H.hAcceptEncoding "br, gzip, deflate"))
+      , it "asks for identity on ranged requests and preserves explicit preferences" $ do
+          let ranged = setHeader H.hRange "bytes=5-" (get (compileTemplate "/x"))
+          forM_ [(ranged, "identity"), (setHeader H.hAcceptEncoding "gzip" ranged, "gzip"), (setHeader H.hAcceptEncoding "" ranged, "")] $ \(req, expected) -> do
+            (logged, log_) <- withRequestLog (stubStatus S.status200)
+            _ <- sendRaw (withDecompression logged) =<< prep req
+            assertLog log_ (anyRequest (hasHeaderEq H.hAcceptEncoding expected))
+      , it "preserves encoded partial bytes and the fields that describe them" $ do
+          let coded = BSL.toStrict (GZip.compress "range payload more than five bytes")
+              part = BS.drop 5 coded
+              lastByte = BS8.pack (show (BS.length coded - 1))
+              total = BS8.pack (show (BS.length coded))
+              fields = [(H.hContentEncoding, "gzip"), (H.hContentLength, BS8.pack (show (BS.length part))), (H.hContentRange, "bytes 5-" <> lastByte <> "/" <> total)] <> bodyDigests
+              inner = mockTransport $ \_ -> rawResponse S.status206 fields part
+              req = setHeader H.hAcceptEncoding "gzip" (setHeader H.hRange "bytes=5-" (get (compileTemplate "/x")))
+          raw <- sendRaw (withDecompression inner) =<< prep req
+          let RawResponse{headers = respFields} = raw
+          respFields `shouldBe` fields
+          rawResponseBytes raw `shouldReturn` part
+      , it "decodes a full replacement response to a range request" $ do
+          let coded = BSL.toStrict (GZip.compress "new representation")
+              inner = mockTransport $ \_ -> rawResponse S.status200 [(H.hContentEncoding, "gzip")] coded
+              req = setHeader H.hAcceptEncoding "gzip" (setHeader H.hRange "bytes=5-" (get (compileTemplate "/x")))
+          raw <- sendRaw (withDecompression inner) =<< prep req
+          rawResponseBytes raw `shouldReturn` "new representation"
+      , it "preserves coding and length metadata on HEAD and 304" $ do
+          let fields = [(H.hContentEncoding, "gzip"), (H.hContentLength, "42")]
+          forM_ [(M.mHead, S.status200), (M.mGet, S.status304)] $ \(method, status) -> do
+            let req = WReq.setMethod method (get (compileTemplate "/x"))
+                inner = mockTransport $ \_ -> rawResponse status fields ""
+            raw <- sendRaw (withDecompression inner) =<< prep req
+            let RawResponse{headers = respFields} = raw
+            respFields `shouldBe` fields
+            rawResponseBytes raw `shouldReturn` ""
+      , it "does not rebuild a response when its only coding is identity" $ do
+          let fields = [(H.hContentEncoding, "identity"), (H.hContentLength, "3")]
+              inner = mockTransport $ \_ -> rawResponse S.status200 fields "abc"
+          forM_ [withDecompression, withDecompressionPolicy []] $ \middleware -> do
+            raw <- sendRaw (middleware inner) =<< prep (get (compileTemplate "/x"))
+            let RawResponse{headers = respFields} = raw
+            respFields `shouldBe` fields
+            rawResponseBytes raw `shouldReturn` "abc"
       , it "leaves unknown Content-Encoding alone" $ do
           let payload = "raw bytes" :: BS.ByteString
               inner = mockTransport $ \_ ->
@@ -687,6 +748,34 @@ compressionTests =
           raw <- sendRaw transport =<< prep (get (compileTemplate "/x"))
           bs <- rawResponseBytes raw
           bs `shouldBe` payload
+      , it "decodes Content-Encoding across repeated field lines in reverse application order" $ do
+          let payload = "gzip inside brotli" :: BS.ByteString
+              compressed = BSL.toStrict (Brotli.compress (GZip.compress (BSL.fromStrict payload)))
+              inner = mockTransport $ \_ ->
+                rawResponse S.status200 [(H.hContentEncoding, "x-GZip"), (H.hContentEncoding, "BR")] compressed
+          raw <- sendRaw (withDecompression inner) =<< prep (get (compileTemplate "/x"))
+          rawResponseBytes raw `shouldReturn` payload
+          let RawResponse {headers = respHdrs} = raw
+          H.lookupHeaders H.hContentEncoding respHdrs `shouldBe` []
+      , it "leaves the whole response intact when any Content-Encoding line is unsupported or malformed" $ do
+          let compressed = BSL.toStrict (GZip.compress "a gzip payload")
+          mapM_ (\later -> do
+            let fields = [(H.hContentEncoding, "gzip"), (H.hContentEncoding, later)]
+                inner = mockTransport $ \_ -> rawResponse S.status200 fields compressed
+            raw <- sendRaw (withDecompression inner) =<< prep (get (compileTemplate "/x"))
+            let RawResponse {headers = respHdrs} = raw
+            H.lookupHeaders H.hContentEncoding respHdrs `shouldBe` ["gzip", later]
+            rawResponseBytes raw `shouldReturn` compressed)
+            ["unknown-coding", "br;q=0"]
+      , it "matches registered custom handlers independently of coding name case" $ do
+          let payload = "custom gzip"
+              compressed = BSL.toStrict (GZip.compress "custom gzip")
+              handler = (asDecompressor @Gzip)
+                {ehCoding = Coding.Custom "x-test-gzip"}
+              inner = mockTransport $ \_ ->
+                rawResponse S.status200 [(H.hContentEncoding, "X-Test-GZip")] compressed
+          raw <- sendRaw (withDecompressionPolicy [handler] inner) =<< prep (get (compileTemplate "/x"))
+          rawResponseBytes raw `shouldReturn` payload
       , it "strips Content-Encoding + Content-Length after decompression" $ do
           let payload = "hello" :: BS.ByteString
               compressed = BSL.toStrict $ GZip.compress (BSL.fromStrict payload)
@@ -705,6 +794,51 @@ compressionTests =
           let RawResponse {headers = respHdrs} = raw
           H.lookupHeader "Content-Encoding" respHdrs `shouldBe` Nothing
           H.lookupHeader H.hContentLength respHdrs `shouldBe` Nothing
+      , it "removes wire digests after decoding and preserves validators" $ do
+          let payload = "a coded body"
+              encoded = BSL.toStrict (GZip.compress (BSL.fromStrict payload))
+              validator = (H.hETag, "\"gzip-revision\"")
+              fields = (H.hContentEncoding, "gzip") : validator : bodyDigests
+              inner = mockTransport $ \_ -> rawResponse S.status200 fields encoded
+          raw <- sendRaw (withDecompression inner) =<< prep (get (compileTemplate "/x"))
+          let RawResponse{headers = respFields} = raw
+          respFields `shouldBe` [validator]
+          rawResponseBytes raw `shouldReturn` payload
+      , it "removes original digests when compressing a request and keeps digest preferences" $ do
+          let payload = "body before compression"
+              preference = ("Want-Repr-Digest", "sha-256=10")
+              inner = mockTransport $ \req -> do
+                let Request{headers = fields} = req
+                H.lookupHeader H.hContentEncoding fields `shouldBe` Just "gzip"
+                H.lookupHeader (fst preference) fields `shouldBe` Just (snd preference)
+                mapM_ (\(name, _) -> H.lookupHeader name fields `shouldBe` Nothing) bodyDigests
+                compressed <- bodyStreamBytes (WReq.body req)
+                H.lookupHeader H.hContentLength fields `shouldBe` Just (BS8.pack (show (BS.length compressed)))
+                GZip.decompress (BSL.fromStrict compressed) `shouldBe` BSL.fromStrict payload
+                rawResponse S.status200 [] ""
+          stream <- streamFromStrict payload
+          req <- prep (post (compileTemplate "/uploads"))
+          _ <- sendRaw (withCompression @Gzip inner) req{WReq.body = stream, WReq.headers = preference : bodyDigests}
+          pure ()
+      , it "keeps digest fields on an identity-coded request" $ do
+          let payload = "plain body"
+              inner = mockTransport $ \req -> do
+                let Request{headers = fields} = req
+                fields `shouldBe` bodyDigests
+                bodyStreamBytes (WReq.body req) `shouldReturn` payload
+                rawResponse S.status200 [] ""
+          stream <- streamFromStrict payload
+          req <- prep (post (compileTemplate "/uploads"))
+          _ <- sendRaw (withCompression @Compression.Identity inner) req{WReq.body = stream, WReq.headers = bodyDigests}
+          pure ()
+      ]
+  where
+    bodyDigests =
+      [ ("Content-Digest", "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:")
+      , ("content-digest", "md5=:1B2M2Y8AsgTpgAmY7PhCfg==:")
+      , ("Repr-Digest", "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:")
+      , ("Digest", "md5=1B2M2Y8AsgTpgAmY7PhCfg==")
+      , ("Content-MD5", "1B2M2Y8AsgTpgAmY7PhCfg==")
       ]
 
 
@@ -727,4 +861,23 @@ vcrTests =
             Response {responseBody = u2} <-
               sendIO transport postUsers (as @JSON @User)
             u2 `shouldBe` User 1 "alice"
+      , it "keeps trailers on the live response and omits the announcement on replay" $
+          withSystemTempDirectory "wire-vcr" $ \dir -> do
+            let cassettePath = dir <> "/trailers.yaml"
+                trailers = [("X-Result", "done")]
+                real = mockTransport $ \_ -> do
+                  raw <- rawResponse S.status200 [("Trailer", "X-Result")] "body"
+                  pure raw {protocolInfo = withBufferedTrailers trailers (protocolInfo raw)}
+                req = get (compileTemplate "/body")
+            recordSession real cassettePath $ \transport ->
+              withResponse transport req [] $ \live -> do
+                rawResponseBytes live `shouldReturn` "body"
+                rawResponseTrailers live `shouldReturn` trailers
+            cassette <- loadCassette cassettePath
+            transport <- replayTransport cassette byMethodAndURI
+            withResponse transport req [] $ \replayed -> do
+              rawResponseBytes replayed `shouldReturn` "body"
+              rawResponseTrailers replayed `shouldReturn` []
+              let RawResponse {headers = fields} = replayed
+              H.lookupHeader H.hTrailer fields `shouldBe` Nothing
       ]

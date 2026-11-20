@@ -4,9 +4,11 @@ module Test.Hermes.Priority (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, lookupHeader)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import qualified Network.HTTP.Headers.Priority as P
@@ -82,6 +84,25 @@ unit_render_default =
     render (P.Priority 3 False) `shouldBe` "u=3"
 
 
+dictionaryCases :: Spec
+dictionaryCases = do
+  it "combines repeated field lines and uses the last member for each key" $ do
+    let linesFor first lastLine = headerMapFromList [("Priority", first), ("priority", lastLine)]
+    lookupHeader @P.Priority (linesFor "u=2" "i, u=6") `shouldBe` Right (Just (P.Priority 6 True))
+    lookupHeader @P.Priority (linesFor "u=2, i" "u=wrong, i=1") `shouldBe` Right (Just (P.Priority 3 False))
+    lookupHeader @P.Priority (linesFor "u=2" "i=?") `shouldSatisfy` isLeft
+  it "ignores unexpected types, out-of-range values and extensions" $ do
+    parseOk "u=(0 1), i, ext=(@3 %\"caf%c3%a9\");flag" `shouldBe` Right (P.Priority 3 True)
+    parseOk "u=9, i=\"true\"" `shouldBe` Right (P.Priority 3 False)
+    parseOk "u=2;stamp=@3, i=?0; p=1;p=2" `shouldBe` Right (P.Priority 2 False)
+  it "rejects malformed dictionary syntax even in ignored members" $
+    mapM_
+      (\value -> parseOk value `shouldSatisfy` isLeft)
+      ["u=1,", "u=1,,i", "u=1, ext=(1\t2)", "u=1, ext=\"a\\e\"", "i; \tp"]
+  it "renders out-of-range constructed urgency as the default" $
+    render (P.Priority 100 True) `shouldBe` "u=3, i"
+
+
 priorityGen :: Gen P.Priority
 priorityGen =
   P.Priority
@@ -110,5 +131,6 @@ tests =
       , unit_parse_out_of_range
       , unit_render
       , unit_render_default
+      , dictionaryCases
       , it "round-trip" prop_roundtrip
       ]

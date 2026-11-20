@@ -1,0 +1,7 @@
+syntax = "proto3";
+package google.protobuf;
+
+enum AuditMode {
+  AUDIT_MODE_UNSPECIFIED = 0;
+  AUDIT_MODE_ENABLED = 1;
+}

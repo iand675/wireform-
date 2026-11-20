@@ -14,8 +14,10 @@ module Proto.IDL.Parser.Lexer (
   identifier,
   fullIdent,
   intLiteral,
+  intLiteralWithSpelling,
   floatLiteral,
   stringLiteral,
+  bytesLiteral,
   boolLiteral,
   reserved,
   option,
@@ -35,6 +37,9 @@ module Proto.IDL.Parser.Lexer (
 ) where
 
 import Control.Monad (void)
+import Data.ByteString (ByteString)
+import Data.ByteString.Builder qualified as BB
+import Data.ByteString.Lazy qualified as BL
 import Data.Char (chr, digitToInt, isAlphaNum, isDigit, isLetter, isOctDigit)
 import Data.Functor qualified
 import Data.IntMap.Strict (IntMap)
@@ -42,6 +47,7 @@ import Data.IntMap.Strict qualified as IntMap
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Void (Void)
 import Proto.IDL.AST (Comment (..))
 import Proto.IDL.AST.Span (Span, mkSpan)
@@ -165,19 +171,24 @@ fullIdent =
 
 -- | Parse an integer literal (decimal, hex, or octal), with optional sign.
 intLiteral :: Parser Integer
-intLiteral =
-  lexeme
-    ( do
-        sign <- option id (negate <$ char '-')
-        n <-
-          choice
-            [ try (char '0' *> char' 'x') *> L.hexadecimal
-            , try (char '0' *> octalNum)
-            , L.decimal
-            ]
-        pure (sign n)
-    )
-    <?> "integer literal"
+intLiteral = lexeme rawInteger <?> "integer literal"
+
+
+-- | Parse an integer while retaining the token before trailing trivia.
+intLiteralWithSpelling :: Parser (Text, Integer)
+intLiteralWithSpelling = lexeme (match rawInteger) <?> "integer literal"
+
+
+rawInteger :: Parser Integer
+rawInteger = do
+  sign <- option id (negate <$ char '-')
+  n <-
+    choice
+      [ try (char '0' *> char' 'x') *> L.hexadecimal
+      , try (char '0' *> octalNum)
+      , L.decimal
+      ]
+  pure (sign n)
   where
     octalNum = do
       digits <- takeWhile1P (Just "octal digit") isOctDigit
@@ -229,37 +240,43 @@ Adjacent string literals are concatenated per the proto spec.
 -}
 stringLiteral :: Parser Text
 stringLiteral =
-  lexeme
-    ( do
-        parts <- some singleString
-        pure (T.concat parts)
-    )
+  (bytesLiteral >>= either (const (fail "String literal is not valid UTF-8")) pure . TE.decodeUtf8')
     <?> "string literal"
+
+
+-- | Bytes literals encode source characters as UTF-8 and numeric escapes as octets.
+bytesLiteral :: Parser ByteString
+bytesLiteral =
+  BL.toStrict . BB.toLazyByteString . mconcat <$> some singleString <?> "quoted literal"
   where
     singleString = do
       q <- char '"' <|> char '\''
-      content <- many (escapedChar <|> satisfy (\c -> c /= q && c /= '\\' && c /= '\n'))
+      content <- many (escapedChar <|> plain q)
       void (char q)
       sc
-      pure (T.pack content)
+      pure (mconcat content)
+
+    plain q =
+      BB.byteString . TE.encodeUtf8
+        <$> takeWhile1P Nothing (\c -> c /= q && c /= '\\' && c /= '\n' && c /= '\0')
 
     escapedChar =
       char '\\'
         *> choice
-          [ '\a' <$ char 'a'
-          , '\b' <$ char 'b'
-          , '\f' <$ char 'f'
-          , '\n' <$ char 'n'
-          , '\r' <$ char 'r'
-          , '\t' <$ char 't'
-          , '\v' <$ char 'v'
-          , '\\' <$ char '\\'
-          , '\'' <$ char '\''
-          , '"' <$ char '"'
-          , '?' <$ char '?'
+          [ BB.word8 7 <$ char 'a'
+          , BB.word8 8 <$ char 'b'
+          , BB.word8 12 <$ char 'f'
+          , BB.word8 10 <$ char 'n'
+          , BB.word8 13 <$ char 'r'
+          , BB.word8 9 <$ char 't'
+          , BB.word8 11 <$ char 'v'
+          , BB.word8 92 <$ char '\\'
+          , BB.word8 39 <$ char '\''
+          , BB.word8 34 <$ char '"'
+          , BB.word8 63 <$ char '?'
           , hexEscape
-          , unicode4Escape
-          , unicode8Escape
+          , char 'u' *> unicodeEscape 4
+          , char 'U' *> unicodeEscape 8
           , octEscape
           ]
 
@@ -271,22 +288,26 @@ stringLiteral =
       void (char 'x' <|> char 'X')
       d1 <- hexDigitChar
       md2 <- optional hexDigitChar
-      pure (chr (hexValue (d1 : maybe [] (: []) md2)))
+      pure (BB.word8 (fromIntegral (hexValue (d1 : maybe [] (: []) md2))))
 
-    -- @\uHHHH@: a Basic-Multilingual-Plane code point (always valid).
-    unicode4Escape = do
-      void (char 'u')
-      ds <- count 4 hexDigitChar
-      pure (chr (hexValue ds))
+    unicodeEscape width = do
+      cp <- hexValue <$> count width hexDigitChar
+      if cp > 0x10ffff
+        then fail "invalid Unicode code point in \\U escape (above U+10FFFF)"
+        else do
+          codePoint <- if cp >= 0xd800 && cp < 0xdc00
+            then option cp (try (surrogatePair cp))
+            else pure cp
+          pure (BB.charUtf8 (chr codePoint))
 
-    -- @\UHHHHHHHH@: a full code point; reject values above U+10FFFF.
-    unicode8Escape = do
-      void (char 'U')
-      ds <- count 8 hexDigitChar
-      let cp = hexValue ds
-      if cp <= 0x10FFFF
-        then pure (chr cp)
-        else fail "invalid Unicode code point in \\U escape (above U+10FFFF)"
+    -- protoc joins a high surrogate to an immediately following short
+    -- low-surrogate escape within the same quoted token.
+    surrogatePair high = do
+      void (string "\\u")
+      low <- hexValue <$> count 4 hexDigitChar
+      if low >= 0xdc00 && low < 0xe000
+        then pure (0x10000 + (high - 0xd800) * 1024 + low - 0xdc00)
+        else fail "expected a low surrogate"
 
     octEscape = do
       d1 <- octDigitChar
@@ -296,7 +317,7 @@ stringLiteral =
             (Nothing, _) -> digitToInt d1
             (Just d2', Nothing) -> digitToInt d1 * 8 + digitToInt d2'
             (Just d2', Just d3') -> digitToInt d1 * 64 + digitToInt d2' * 8 + digitToInt d3'
-      pure (chr val)
+      pure (BB.word8 (fromIntegral val))
 
 
 -- | Parse a boolean literal (@true@ or @false@).

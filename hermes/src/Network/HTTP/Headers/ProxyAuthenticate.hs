@@ -35,8 +35,6 @@ module Network.HTTP.Headers.ProxyAuthenticate (
   CredentialParam (..),
 ) where
 
-import qualified Data.ByteString as B
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hProxyAuthenticate)
 import qualified Network.HTTP.Headers.Mason as M
@@ -47,6 +45,7 @@ import Network.HTTP.Headers.WWWAuthenticate (
   ChallengeContents (..),
   CredentialParam (..),
   challengesParser,
+  parseChallengeFieldLines,
   renderAuthChallenge,
  )
 
@@ -64,18 +63,7 @@ instance KnownHeader ProxyAuthenticate where
   type Direction ProxyAuthenticate = 'Response
 
 
-  parseFromHeaders _ headers = do
-    challenges <- traverse parseOne (NE.toList headers)
-    pure (ProxyAuthenticate (concat challenges))
-    where
-      parseOne hdr = case runParser challengesParser hdr of
-        OK cs leftover
-          | B.null (dropOws leftover) -> Right cs
-          | otherwise ->
-              Left ("Unconsumed input after parsing Proxy-Authenticate: " <> show leftover)
-        Fail -> Left "Failed to parse Proxy-Authenticate header"
-        Err err -> Left err
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = fmap ProxyAuthenticate . parseChallengeFieldLines "Proxy-Authenticate"
 
 
   renderToHeaders _ (ProxyAuthenticate cs) =

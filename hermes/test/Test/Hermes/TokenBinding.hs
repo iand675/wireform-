@@ -2,159 +2,165 @@
 
 module Test.Hermes.TokenBinding (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
-import Hedgehog (Gen, Property, forAll, property, (===))
+import Hedgehog (Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers.HeaderFieldName (hIncludeReferredTokenBindingID, hOSCORE, hSecTokenBinding)
 import qualified Network.HTTP.Headers.IncludeReferredTokenBindingID as IR
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.OSCORE as OSC
-import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Headers.Parsing.Util (parseFieldLine)
 import qualified Network.HTTP.Headers.SecTokenBinding as STB
 import Test.Syd
 import Test.Syd.Hedgehog ()
 
 
-parseIR :: ByteString -> Either String IR.IncludeReferredTokenBindingID
-parseIR bs = case runParser IR.includeReferredTokenBindingIDParser bs of
-  OK v leftover
-    | BS.null (BS.dropWhile (\w -> w == 0x20 || w == 0x09) leftover) -> Right v
-    | otherwise -> Left ("unconsumed: " <> show leftover)
-  Fail -> Left "parse failed"
-  Err err -> Left err
+bindingWire :: ByteString
+bindingWire =
+  "AIkAAgBBQFzK4_bhAqLDwRQxqJWte33d7hZ0hZWHwk-miKPg4E"
+    <> "9fcgs7gBPoz-9RfuDfN9WCw6keHEw1ZPQMGs9CxpuHm-YAQM_j"
+    <> "aOwwej6a-cQBGU7CJpUHOvXG4VvjNq8jDsvta9Y8_bPEPj25Gg"
+    <> "mKiPjhJEtZA6mJ_9SNifLvVBTi7fR9wSAAAA"
 
 
-parseSTB :: ByteString -> Either String STB.SecTokenBinding
-parseSTB bs = case runParser STB.secTokenBindingParser bs of
-  OK v leftover
-    | BS.null (BS.dropWhile (\w -> w == 0x20 || w == 0x09) leftover) -> Right v
-    | otherwise -> Left ("unconsumed: " <> show leftover)
-  Fail -> Left "parse failed"
-  Err err -> Left err
+p256Binding :: STB.TokenBinding
+p256Binding =
+  STB.TokenBinding
+    STB.ProvidedTokenBinding
+    STB.ECDSAP256
+    (BS.cons 64 (BS.replicate 64 0))
+    (BS.replicate 64 0)
+    []
 
 
-parseOSC :: ByteString -> Either String OSC.OSCORE
-parseOSC bs = case runParser OSC.oscoreParser bs of
-  OK v leftover
-    | BS.null (BS.dropWhile (\w -> w == 0x20 || w == 0x09) leftover) -> Right v
-    | otherwise -> Left ("unconsumed: " <> show leftover)
-  Fail -> Left "parse failed"
-  Err err -> Left err
+propBindingRoundTrip :: Property
+propBindingRoundTrip = property $ do
+  key <- BS.pack <$> forAll (Gen.list (Range.singleton 64) (Gen.word8 Range.constantBounded))
+  signature <- BS.pack <$> forAll (Gen.list (Range.singleton 64) (Gen.word8 Range.constantBounded))
+  extension <- BS.pack <$> forAll (Gen.list (Range.linear 0 64) (Gen.word8 Range.constantBounded))
+  let entries =
+        p256Binding
+          { STB.bindingPublicKey = BS.cons 64 key
+          , STB.bindingSignature = signature
+          , STB.bindingExtensions = [STB.TokenBindingExtension 52 extension]
+          }
+          :| []
+  case STB.secTokenBindingFromEntries entries of
+    Left err -> error err
+    Right header -> do
+      let fields = setHeader header (headerMapFromList [])
+      (lookupHeader @STB.SecTokenBinding fields >>= traverse STB.secTokenBindingEntries) === Right (Just entries)
 
 
-renderIR :: IR.IncludeReferredTokenBindingID -> ByteString
-renderIR = M.toStrictByteString . IR.renderIncludeReferredTokenBindingID
-
-
-renderSTB :: STB.SecTokenBinding -> ByteString
-renderSTB = M.toStrictByteString . STB.renderSecTokenBinding
-
-
-renderOSC :: OSC.OSCORE -> ByteString
-renderOSC = M.toStrictByteString . OSC.renderOSCORE
-
-
--- Include-Referred-Token-Binding-ID --------------------------------------
-
-unit_include_parse :: Spec
-unit_include_parse = it "parses the literal true" $
-  case parseIR "true" of
-    Right (IR.IncludeReferredTokenBindingID True) -> pure () :: IO ()
-    other -> error (show other)
-
-
-unit_include_render :: Spec
-unit_include_render =
-  it "renders the boolean flag" $ do
-    renderIR (IR.IncludeReferredTokenBindingID True) `shouldBe` "true"
-    renderIR (IR.IncludeReferredTokenBindingID False) `shouldBe` "false"
-
-
-prop_include_roundtrip :: Property
-prop_include_roundtrip = property $ do
-  b <- forAll Gen.bool
-  let v = IR.IncludeReferredTokenBindingID b
-      bs = renderIR v
-  case parseIR bs of
-    Right v' -> v === v'
-    Left err -> error (err <> " on " <> show bs)
-
-
--- Sec-Token-Binding ------------------------------------------------------
-
-base64urlChar :: Gen Char
-base64urlChar =
-  Gen.element (['A' .. 'Z'] <> ['a' .. 'z'] <> ['0' .. '9'] <> ['-', '_'])
-
-
-unit_secbinding_parse :: Spec
-unit_secbinding_parse = it "preserves the base64url TokenBindingMessage" $
-  case parseSTB "AIkAAgBBQA-cf2v3p7BzG" of
-    Right v -> STB.secTokenBindingMessage v `shouldBe` ST.fromString "AIkAAgBBQA-cf2v3p7BzG"
-    other -> error (show other)
-
-
-unit_secbinding_render :: Spec
-unit_secbinding_render =
-  it "renders the raw value verbatim" $
-    renderSTB (STB.SecTokenBinding (ST.fromString "AIkAAgBBQA-cf2v3p7BzG"))
-      `shouldBe` "AIkAAgBBQA-cf2v3p7BzG"
-
-
-prop_secbinding_roundtrip :: Property
-prop_secbinding_roundtrip = property $ do
-  s <- forAll (Gen.string (Range.linear 1 64) base64urlChar)
-  let v = STB.SecTokenBinding (ST.fromString s)
-      bs = renderSTB v
-  case parseSTB bs of
-    Right v' -> v === v'
-    Left err -> error (err <> " on " <> show bs)
-
-
--- OSCORE -----------------------------------------------------------------
-
-base64Char :: Gen Char
-base64Char =
-  Gen.element (['A' .. 'Z'] <> ['a' .. 'z'] <> ['0' .. '9'] <> ['+', '/'])
-
-
-unit_oscore_parse :: Spec
-unit_oscore_parse = it "preserves the opaque OSCORE option value" $
-  case parseOSC "CQUAaGVsbG8=" of
-    Right v -> OSC.oscoreValue v `shouldBe` ST.fromString "CQUAaGVsbG8="
-    other -> error (show other)
-
-
-unit_oscore_render :: Spec
-unit_oscore_render =
-  it "renders the raw value verbatim" $
-    renderOSC (OSC.OSCORE (ST.fromString "CQUAaGVsbG8="))
-      `shouldBe` "CQUAaGVsbG8="
-
-
-prop_oscore_roundtrip :: Property
-prop_oscore_roundtrip = property $ do
-  s <- forAll (Gen.string (Range.linear 1 64) base64Char)
-  let v = OSC.OSCORE (ST.fromString s)
-      bs = renderOSC v
-  case parseOSC bs of
-    Right v' -> v === v'
-    Left err -> error (err <> " on " <> show bs)
+propOSCORERoundTrip :: Property
+propOSCORERoundTrip = property $ do
+  bytes <- BS.pack <$> forAll (Gen.list (Range.linear 0 80) (Gen.word8 Range.constantBounded))
+  let value = OSC.oscoreFromOptionBytes bytes
+      expected = if bytes == BS.singleton 0 then BS.empty else bytes
+      fields = setHeader value (headerMapFromList [])
+  (lookupHeader @OSC.OSCORE fields >>= traverse OSC.oscoreOptionBytes) === Right (Just expected)
 
 
 tests :: Spec
-tests =
-  describe "TokenBinding" $
-    sequence_
-      [ unit_include_parse
-      , unit_include_render
-      , it "Include-Referred-Token-Binding-ID round-trips" prop_include_roundtrip
-      , unit_secbinding_parse
-      , unit_secbinding_render
-      , it "Sec-Token-Binding round-trips" prop_secbinding_roundtrip
-      , unit_oscore_parse
-      , unit_oscore_render
-      , it "OSCORE round-trips" prop_oscore_roundtrip
-      ]
+tests = describe "TokenBinding" $ do
+  describe "Include-Referred-Token-Binding-ID" $ do
+    let name = "Include-Referred-Token-Binding-ID"
+        check wire = lookupHeader @IR.IncludeReferredTokenBindingID (headerMapFromList [(name, wire)])
+    it "reads the case-insensitive true response signal and renders lowercase" $ do
+      check " \tTrUE\t " `shouldBe` Right (Just (IR.IncludeReferredTokenBindingID True))
+      parseFieldLine "flag" IR.includeReferredTokenBindingIDParser "TRUE" `shouldBe` Right (IR.IncludeReferredTokenBindingID True)
+      lookupRawHeader hIncludeReferredTokenBindingID (setHeader (IR.IncludeReferredTokenBindingID True) (headerMapFromList []))
+        `shouldBe` Just ("true" :| [])
+    it "rejects false, suffixes and duplicate lines" $ do
+      forM_ ["false", "", "true, true", "truE!", "t r u e", "true\r\n", "\255rue"] $ \wire ->
+        check wire `shouldSatisfy` isLeft
+      lookupHeader @IR.IncludeReferredTokenBindingID (headerMapFromList [(name, "true"), (name, "true")])
+        `shouldSatisfy` isLeft
+    it "omits a disabled signal" $ do
+      M.toStrictByteString (IR.renderIncludeReferredTokenBindingID (IR.IncludeReferredTokenBindingID False)) `shouldBe` ""
+      lookupRawHeader hIncludeReferredTokenBindingID (setHeader (IR.IncludeReferredTokenBindingID False) (headerMapFromList [(name, "true")]))
+        `shouldBe` Nothing
+  describe "Sec-Token-Binding" $ do
+    let name = "Sec-Token-Binding"
+        check wire = lookupHeader @STB.SecTokenBinding (headerMapFromList [(name, wire)])
+    it "reads the RFC 8473 message and retains the exact encoded bytes" $ do
+      case check (" \t" <> bindingWire <> "\t ") of
+        Right (Just value) -> do
+          STB.secTokenBindingMessage value `shouldBe` maybe (error "invalid fixture ASCII") id (ST.fromByteString bindingWire)
+          M.toStrictByteString (STB.renderSecTokenBinding value) `shouldBe` bindingWire
+          lookupRawHeader hSecTokenBinding (setHeader value (headerMapFromList [])) `shouldBe` Just (bindingWire :| [])
+          parseFieldLine "Sec-Token-Binding" STB.secTokenBindingParser bindingWire `shouldBe` Right value
+          fmap BS.length (STB.secTokenBindingBytes value) `shouldBe` Right 139
+          case STB.secTokenBindingEntries value of
+            Right (entry :| []) -> do
+              STB.bindingType entry `shouldBe` STB.ProvidedTokenBinding
+              STB.bindingKeyParameters entry `shouldBe` STB.ECDSAP256
+              BS.take 5 (STB.bindingPublicKey entry) `shouldBe` BS.pack [64, 92, 202, 227, 246]
+              BS.length (STB.bindingSignature entry) `shouldBe` 64
+              STB.bindingExtensions entry `shouldBe` []
+              STB.secTokenBindingFromEntries (entry :| []) `shouldBe` Right value
+            other -> expectationFailure (show other)
+        other -> expectationFailure (show other)
+    it "enforces canonical unpadded base64url and single-line framing" $ do
+      forM_ ["", "AA", bindingWire <> "=", bindingWire <> "AA", BS.init bindingWire <> "B", BS.drop 1 bindingWire, "!" <> BS.drop 1 bindingWire] $ \wire ->
+        check wire `shouldSatisfy` isLeft
+      lookupHeader @STB.SecTokenBinding (headerMapFromList [(name, bindingWire), (name, bindingWire)])
+        `shouldSatisfy` isLeft
+    it "checks vector boundaries, key sizes and required bindings" $ do
+      let provided = p256Binding
+          referred = provided {STB.bindingType = STB.ReferredTokenBinding}
+          unknown =
+            provided
+              { STB.bindingType = STB.OtherTokenBindingType 8
+              , STB.bindingKeyParameters = STB.OtherTokenBindingKeyParameters 42
+              , STB.bindingExtensions = [STB.TokenBindingExtension 187 "\0\255"]
+              }
+          rsa =
+            provided
+              { STB.bindingKeyParameters = STB.RSA2048PSS
+              , STB.bindingPublicKey = "\1\0\128" <> BS.replicate 255 0 <> "\3\1\0\1"
+              , STB.bindingSignature = BS.replicate 256 17
+              }
+          entries = unknown :| [rsa, referred]
+      (STB.secTokenBindingFromEntries entries >>= STB.secTokenBindingEntries) `shouldBe` Right entries
+      forM_
+        [ referred :| []
+        , provided :| [provided]
+        , provided :| [referred, referred]
+        , provided :| [provided {STB.bindingType = STB.OtherTokenBindingType 1}]
+        , (provided {STB.bindingKeyParameters = STB.OtherTokenBindingKeyParameters 2}) :| []
+        , (provided {STB.bindingPublicKey = "not an EC point"}) :| []
+        , (provided {STB.bindingSignature = BS.replicate 63 0}) :| []
+        , (rsa {STB.bindingPublicKey = BS.init (STB.bindingPublicKey rsa)}) :| []
+        , (provided {STB.bindingExtensions = [STB.TokenBindingExtension 3 (BS.replicate 65535 0)]}) :| []
+        ]
+        $ \invalid -> STB.secTokenBindingFromEntries invalid `shouldSatisfy` isLeft
+      case STB.secTokenBindingFromEntries (provided :| []) >>= STB.secTokenBindingBytes of
+        Right bytes -> do
+          forM_ [BS.init bytes, bytes <> "\0", "\0\132" <> BS.drop 2 bytes, BS.take 6 bytes <> "\65" <> BS.drop 7 bytes] $ \invalid ->
+            STB.secTokenBindingFromBytes invalid `shouldSatisfy` isLeft
+        Left err -> expectationFailure err
+    it "round-trips framed entries and opaque extensions through HeaderMap" propBindingRoundTrip
+  describe "OSCORE" $ do
+    let name = "OSCORE"
+        check wire = lookupHeader @OSC.OSCORE (headerMapFromList [(name, wire)]) >>= traverse OSC.oscoreOptionBytes
+    it "maps RFC 8613 options, including the special one-octet empty mapping" $ do
+      check " \tCSU \t" `shouldBe` Right (Just "\9\37")
+      check "AA" `shouldBe` Right (Just "")
+      check "AAA" `shouldBe` Right (Just "\0\0")
+      check "-_8" `shouldBe` Right (Just "\251\255")
+      parseFieldLine "OSCORE" OSC.oscoreParser "CQUl" `shouldBe` Right (OSC.OSCORE "CQUl")
+      M.toStrictByteString (OSC.renderOSCORE (OSC.OSCORE "CQUl")) `shouldBe` "CQUl"
+      lookupRawHeader hOSCORE (setHeader (OSC.oscoreFromOptionBytes "") (headerMapFromList [])) `shouldBe` Just ("AA" :| [])
+    it "rejects wrong alphabets, padding, stray bits, whitespace and duplicate lines" $ do
+      forM_ ["", "A", "AAAAA", "AB", "AAF", "+/8", "-_8=", "A\tA", "AA, AA", "AA\r\n"] $ \wire ->
+        check wire `shouldSatisfy` isLeft
+      lookupHeader @OSC.OSCORE (headerMapFromList [(name, "AA"), (name, "CSU")]) `shouldSatisfy` isLeft
+    it "round-trips arbitrary CoAP option octets through HeaderMap" propOSCORERoundTrip

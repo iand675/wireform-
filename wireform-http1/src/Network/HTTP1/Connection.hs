@@ -1,6 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -18,7 +19,7 @@ A 'Connection' owns:
     so successive @read*@ helpers can chain without round-tripping
     through 'Wireform.Transport.Receive.receiveLoadHead' between
     iterations,
-  * a closed-flag so finalizers don't double-close.
+  * lifecycle state for connection retirement and idempotent cleanup.
 
 The body-reading helpers ('readBody', 'drainBody') run the framing
 state machine inferred by 'Network.HTTP1.Parser.requestFraming' \/
@@ -29,6 +30,7 @@ pipelining).
 module Network.HTTP1.Connection (
   Connection,
   newConnectionFromSocket,
+  newConnectionFromOwnedSocket,
   newConnectionFromSocketPooled,
   newConnectionFromTls,
   newConnectionFromDuplex,
@@ -41,6 +43,8 @@ module Network.HTTP1.Connection (
   connectionCursor,
   connectionReadCursor,
   connectionAdvanceCursor,
+  connectionCanReuse,
+  retireConnection,
   closeConnection,
 
   -- * Send helpers
@@ -55,6 +59,7 @@ module Network.HTTP1.Connection (
   readResponseHead,
 
   -- * Framing-aware body
+  writeChunkedBody,
   readBody,
   readBodyAndTrailers,
   drainBody,
@@ -68,20 +73,24 @@ import Control.Concurrent.MVar (
   readMVar,
   tryPutMVar,
  )
-import Control.Exception (Exception, SomeException, throwIO, try)
+import Control.Exception (Exception, SomeException, finally, throwIO, try)
+import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Word (Word64)
 import GHC.Generics (Generic)
-import Network.HTTP1.Headers (Header)
+import Network.HTTP1.Chunked (encodeChunk, encodeLastChunk, encodeLastChunkWithTrailers)
+import Network.HTTP1.Headers (ConnectionOption (..), Header, connectionOptions, hHas)
 import Network.HTTP1.Method qualified as Method
-import Network.HTTP1.Parser (Framing (..), ParseError (..))
+import Network.HTTP1.Parser (Framing (..), ParseError (..), parseHeaderLine)
 import Network.HTTP1.StreamingReader qualified as SR
 import Network.HTTP1.Types (
   Body (..),
   Request,
-  Response,
+  Response (..),
+  statusCode,
+  pattern HTTP_1_0,
  )
 import Network.Socket (Socket)
 import Network.Socket qualified as S
@@ -131,8 +140,12 @@ data Connection = Connection
   -}
   , connCursor :: !(IORef Word64)
   -- ^ Position past the last byte the recv path has consumed.
-  , connClosed :: !(IORef Bool)
+  , connState :: !(IORef ConnectionState)
   }
+
+
+data ConnectionState = ConnectionOpen | ConnectionRetiring | ConnectionClosed
+  deriving stock (Eq)
 
 
 {- | Default magic-ring size: 256 KiB.  Easily fits the largest
@@ -155,6 +168,14 @@ newConnectionFromSocket sock = do
   let !cfg = defaultTransportConfig {WC.ringSizeHint = defaultRingSize}
   duplex <- newDuplexTransport cfg sock
   buildConnection duplex (Just sock) Nothing
+
+
+-- | Transfer a connected TCP socket to this connection for cleanup.
+newConnectionFromOwnedSocket :: Socket -> IO Connection
+newConnectionFromOwnedSocket sock = do
+  let !cfg = defaultTransportConfig {WC.ringSizeHint = defaultRingSize}
+  duplex <- newDuplexTransport cfg sock
+  buildConnection (duplex {duplexClose = duplexClose duplex `finally` S.close sock}) (Just sock) Nothing
 
 
 {- | Like 'newConnectionFromSocket' but acquires ring buffers from a
@@ -210,14 +231,14 @@ newConnectionFromDuplexWithRingSize _ duplex =
 buildConnection :: DuplexTransport -> Maybe Socket -> Maybe SslConn -> IO Connection
 buildConnection duplex mSock mSsl = do
   cursor <- newIORef 0
-  closed <- newIORef False
+  state <- newIORef ConnectionOpen
   pure
     Connection
       { connDuplex = duplex
       , connSocket = mSock
       , connSslConn = mSsl
       , connCursor = cursor
-      , connClosed = closed
+      , connState = state
       }
 
 
@@ -309,13 +330,13 @@ withConnectionCork conn = withSendCork (connectionSend conn)
 
 {- | Tear down the connection.  Order: drain + close the send ring,
 close the receive ring, then (for TLS) issue @SSL_shutdown@ and
-free the @SSL*@.  Idempotent.  The underlying 'Socket' is NOT
-closed; the caller owns its lifetime.
+free the @SSL*@. Idempotent. An owned TCP socket is closed with its
+transport.
 -}
 closeConnection :: Connection -> IO ()
 closeConnection conn = do
-  wasClosed <- atomicModifyIORef' (connClosed conn) (\c -> (True, c))
-  if wasClosed
+  previous <- atomicModifyIORef' (connState conn) (\state -> (ConnectionClosed, state))
+  if previous == ConnectionClosed
     then pure ()
     else do
       _ <- try @SomeException (closeDuplexTransport (connDuplex conn))
@@ -324,6 +345,18 @@ closeConnection conn = do
           _ <- try @SomeException (freeConn s)
           pure ()
         Nothing -> pure ()
+
+
+-- | Whether the protocol still permits reuse once the current body is read.
+connectionCanReuse :: Connection -> IO Bool
+connectionCanReuse conn = (== ConnectionOpen) <$> readIORef (connState conn)
+
+
+-- | Let the current exchange finish, but exclude this connection from reuse.
+retireConnection :: Connection -> IO ()
+retireConnection conn = atomicModifyIORef' (connState conn) $ \case
+  ConnectionOpen -> (ConnectionRetiring, ())
+  state -> (state, ())
 
 
 ------------------------------------------------------------------------
@@ -351,15 +384,51 @@ readResponseHead conn reqMethod = do
   pos <- readIORef (connCursor conn)
   r <- SR.readResponseHeadFrom (connectionReceive conn) pos reqMethod
   case r of
-    Right (ok, newPos) -> do
+    Right (ok@(response, framing), newPos) -> do
       writeIORef (connCursor conn) newPos
+      when (responseEndsConnection reqMethod response framing) (retireConnection conn)
       pure (Right ok)
-    Left e -> pure (Left e)
+    Left e -> do
+      retireConnection conn
+      pure (Left e)
+
+
+-- RFC 9112 sections 6.1 and 9.3. Upgrades and successful CONNECTs hand
+-- the connection to another protocol. A close-delimited body consumes it.
+responseEndsConnection :: Method.Method -> Response -> Framing -> Bool
+responseEndsConnection method response framing
+  | framing == CloseDelimited || status == 101 = True
+  | ConnClose `elem` options = True
+  | status < 200 = False
+  | method == Method.CONNECT && status < 300 = True
+  | responseVersion response == HTTP_1_0 = ConnKeepAlive `notElem` options || hHas "transfer-encoding" headers
+  | otherwise = False
+  where
+    status = statusCode (responseStatus response)
+    headers = responseHeaders response
+    options = connectionOptions headers
 
 
 ------------------------------------------------------------------------
 -- Body
 ------------------------------------------------------------------------
+
+-- | Write chunked content, evaluating the trailer producer after EOF.
+writeChunkedBody :: Connection -> IO (Maybe ByteString) -> IO [Header] -> IO ()
+writeChunkedBody conn producer produceTrailers = loop
+  where
+    loop = do
+      chunk <- producer
+      case chunk of
+        Nothing -> do
+          trailers <- produceTrailers
+          connectionSendBuilder conn $ case trailers of
+            [] -> encodeLastChunk
+            _ -> encodeLastChunkWithTrailers trailers
+        Just bytes
+          | BS.null bytes -> loop
+          | otherwise -> connectionSendBuilder conn (encodeChunk bytes) >> loop
+
 
 readBody :: Connection -> Framing -> IO Body
 readBody conn framing = fst <$> readBodyAndTrailers conn framing
@@ -387,9 +456,7 @@ readBodyAndTrailers conn (ContentLength n) = do
             pos <- readIORef (connCursor conn)
             r <- SR.readUpTo (connectionReceive conn) pos want
             case r of
-              Left _ -> do
-                _ <- tryPutMVar trailersMV []
-                pure Nothing
+              Left e -> failBodyRead conn (readErrorToParseError e)
               Right (chunk, newPos) -> do
                 let !chunkCopy = BS.copy chunk
                 connectionAdvanceCursor conn newPos
@@ -411,9 +478,10 @@ readBodyAndTrailers conn CloseDelimited = do
         pos <- readIORef (connCursor conn)
         r <- SR.readUpTo (connectionReceive conn) pos 16384
         case r of
-          Left _ -> do
+          Left SR.ReadUnexpectedEof -> do
             _ <- tryPutMVar trailersMV []
             pure Nothing
+          Left e -> failBodyRead conn (readErrorToParseError e)
           Right (chunk, newPos) -> do
             let !chunkCopy = BS.copy chunk
             connectionAdvanceCursor conn newPos
@@ -444,7 +512,7 @@ readChunkedStep conn ref trailersMV = do
       pos <- readIORef (connCursor conn)
       lineE <- SR.readChunkSizeLineFrom (connectionReceive conn) pos
       case lineE of
-        Left e -> throwIO (ProtocolException (readErrorToParseError e))
+        Left e -> failBodyRead conn (readErrorToParseError e)
         Right (sz, newPos) -> do
           writeIORef (connCursor conn) newPos
           if sz == 0
@@ -461,7 +529,7 @@ readChunkedStep conn ref trailersMV = do
       pos <- readIORef (connCursor conn)
       r <- SR.readUpTo (connectionReceive conn) pos want
       case r of
-        Left _ -> throwIO (ProtocolException ParseUnexpectedEof)
+        Left _ -> failBodyRead conn ParseUnexpectedEof
         Right (slice, newPos) -> do
           let !sliceCopy = BS.copy slice
               consumed = BS.length sliceCopy
@@ -470,12 +538,12 @@ readChunkedStep conn ref trailersMV = do
             then do
               termE <- SR.readExact (connectionReceive conn) newPos 2
               case termE of
-                Left _ -> throwIO (ProtocolException ParseBadChunkHeader)
+                Left _ -> failBodyRead conn ParseBadChunkHeader
                 Right (term, afterTerm)
                   | BS.length term < 2
                       || BS.index term 0 /= 0x0d
                       || BS.index term 1 /= 0x0a ->
-                      throwIO (ProtocolException ParseBadChunkHeader)
+                      failBodyRead conn ParseBadChunkHeader
                   | otherwise -> do
                       connectionAdvanceCursor conn afterTerm
                       writeIORef ref (ChunkPending 0)
@@ -486,41 +554,28 @@ readChunkedStep conn ref trailersMV = do
 
 
 readTrailers :: Connection -> IO [Header]
-readTrailers conn = go []
+readTrailers conn = go SR.defaultHeaderBlockCap []
   where
-    go acc = do
+    go !remaining acc = do
       pos <- readIORef (connCursor conn)
       r <- SR.readUntilCRLFStrict (connectionReceive conn) pos 8192
       case r of
-        Left e -> throwIO (ProtocolException (readErrorToParseError e))
+        Left e -> failBodyRead conn (readErrorToParseError e)
         Right (Nothing, _) ->
-          throwIO (ProtocolException ParseInvalidHeaderValue)
+          failBodyRead conn ParseInvalidHeaderValue
         Right (Just SR.StrictBareLf, _) ->
-          throwIO (ProtocolException ParseInvalidHeaderValue)
-        Right (Just (SR.StrictLine bs), newPos) -> do
-          writeIORef (connCursor conn) newPos
-          if BS.null bs
-            then pure (reverse acc)
-            else
-              if BS.any badByte bs
-                then throwIO (ProtocolException ParseInvalidHeaderValue)
-                else case parseTrailerLine bs of
-                  Nothing -> throwIO (ProtocolException ParseInvalidHeaderValue)
-                  Just hdr -> go (hdr : acc)
-    badByte b = b == 0x0a || b == 0x00 || b == 0x0d
-
-
-parseTrailerLine :: ByteString -> Maybe Header
-parseTrailerLine bs = do
-  let (rawName, rest0) = BS.break (== 0x3A {- ':' -}) bs
-  case BS.uncons rest0 of
-    Just (0x3A, rest1) ->
-      let value = stripOWS rest1
-      in if BS.null rawName then Nothing else Just (rawName, value)
-    _ -> Nothing
-  where
-    stripOWS = BS.dropWhile isOWS . BS.reverse . BS.dropWhile isOWS . BS.reverse
-    isOWS b = b == 0x20 || b == 0x09
+          failBodyRead conn ParseInvalidHeaderValue
+        Right (Just (SR.StrictLine bs), newPos)
+          | BS.null bs -> do
+              writeIORef (connCursor conn) newPos
+              pure (reverse acc)
+          | let lineBytes = BS.length bs + 2
+          , lineBytes <= remaining -> case parseHeaderLine bs of
+              Left e -> failBodyRead conn e
+              Right header -> do
+                writeIORef (connCursor conn) newPos
+                go (remaining - lineBytes) (header : acc)
+          | otherwise -> failBodyRead conn ParseMessageTooLong
 
 
 drainBody :: Body -> IO ()
@@ -536,6 +591,10 @@ drainBody = \case
       case mc of
         Nothing -> pure ()
         Just _ -> loop producer
+
+
+failBodyRead :: Connection -> ParseError -> IO a
+failBodyRead conn e = retireConnection conn *> throwIO (ProtocolException e)
 
 
 readErrorToParseError :: SR.ReadError -> ParseError

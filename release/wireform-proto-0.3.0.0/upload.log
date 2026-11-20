@@ -1,0 +1,11 @@
+Uploading
+/tmp/wireform-proto-release-2026-11-06/sdist/wireform-proto-0.3.0.0.tar.gz...
+Package successfully published. You can now view it at
+'https://hackage.haskell.org/package/wireform-proto-0.3.0.0'.
+Warnings:
+- [option-optimize] 'ghc-options: -O0' is not needed. Use the
+--disable-optimization configure flag.
+- [option-optimize] 'ghc-options: -O0' is not needed. Use the
+--disable-optimization configure flag.
+- [option-o2] 'ghc-options: -O2' is rarely needed. Check that it is giving a
+real benefit and not just imposing longer compile times on your users.

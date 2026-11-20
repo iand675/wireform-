@@ -11,10 +11,9 @@ drafts it served as a combination of @Location@, @Content-Location@ and
 URI-header = \"URI\" \":\" 1#( \"\<\" URI \"\>\" )
 @
 
-A non-empty, comma-separated list of URIs, each enclosed in angle brackets. We
-capture the list structure ('NE.NonEmpty') with each element holding the URI
-text between the @\<@ and @\>@ delimiters verbatim (the URI itself is opaque, so
-no inner URI grammar is fabricated).
+A non-empty list of angle-bracketed URI references. Each reference is checked
+against RFC 3986 and its spelling is preserved. Repeated lines form a single
+ordered list, as specified by RFC 2068 §4.2.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc2068#section-19.6.2.5>
 
@@ -26,8 +25,10 @@ module Network.HTTP.Headers.URI (
   renderURI,
 ) where
 
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (uriReference)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hURI)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,14 +44,10 @@ newtype URI = URI {uriList :: NE.NonEmpty ST.ShortText}
 instance KnownHeader URI where
   type ParseFailure URI = String
   type Cardinality URI = 'ZeroOrOne
-  type Direction URI = 'Response
+  type Direction URI = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser uriParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing URI header: " <> show rest
-    Fail -> Left "Failed to parse URI header"
-    Err e -> Left e
+  parseFromHeaders _ fields = URI <$> (parseListFieldLines "URI" uriItems fields >>= requireNonEmptyList "URI")
 
 
   renderToHeaders _ = M.toStrictByteString . renderURI
@@ -60,20 +57,14 @@ instance KnownHeader URI where
 
 
 uriParser :: ParserT st String URI
-uriParser = do
-  ows
-  first <- uriItem
-  rest <- many (ows *> $(char ',') *> ows *> uriItem)
-  pure $ URI (first NE.:| rest)
-  where
-    uriItem = do
-      $(char '<')
-      uri <- shortASCIIFromParser_ (skipMany (skipSatisfyAscii (/= '>')))
-      $(char '>')
-      pure uri
+uriParser = uriItems >>= maybe failed (pure . URI) . NE.nonEmpty
+
+
+uriItems :: ParserT st String [ST.ShortText]
+uriItems = httpList ($(char '<') *> uriReference <* $(char '>'))
 
 
 renderURI :: URI -> M.Builder
-renderURI (URI uris) = M.intersperse ", " $ map renderOne $ NE.toList uris
+renderURI (URI (first :| rest)) = renderOne first <> foldMap (\uri -> ", " <> renderOne uri) rest
   where
     renderOne u = M.char7 '<' <> shortText u <> M.char7 '>'

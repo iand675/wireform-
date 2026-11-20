@@ -1,36 +1,71 @@
-{- |
-SOAP 1.1 @SOAPAction@ request header (SOAP 1.1 §6.1.1) — a (possibly empty)
-quoted URI that indicates the intent of a SOAP HTTP request. The URI has no
-prescribed meaning beyond identifying the action; servers MAY use it for
-routing or dispatch.
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns #-}
 
-The on-the-wire value is a @quoted-string@ wrapping the URI. This module
-stores the unquoted URI and re-adds the surrounding double quotes (escaping
-any embedded @\"@ or @\\@) on render.
+{- |
+SOAP 1.1 @SOAPAction@ request header. A quoted URI reference names an
+explicit action, a quoted empty string indicates the request URI, and an
+empty field gives no indication of intent. URI references retain their
+original spelling.
 
 Spec: <https://www.w3.org/TR/2000/NOTE-SOAP-20000508/#_Toc478383528>
 
 See also: "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.Slug".
 -}
 module Network.HTTP.Headers.SoapAction (
-  SoapAction (..),
+  SoapAction (SoapAction, SoapActionNoIntent, soapActionURI),
+  SoapActionIntent (..),
+  soapActionIntent,
   soapActionParser,
   renderSoapAction,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Parser
+import Network.HTTP.Grammar.Rendering (shortText)
+import Network.HTTP.Grammar.URIReference (uriReference)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSoapAction)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
+import qualified Wireform.Builder as WB
 
 
-{- | The URI carried (in quoted form) by a @SOAPAction@ header. An empty
-'ST.ShortText' corresponds to the wire value @\"\"@.
--}
-newtype SoapAction = SoapAction {soapActionURI :: ST.ShortText}
+data SoapAction = QuotedSoapAction !ST.ShortText | SoapActionNoIntent
   deriving stock (Eq, Show)
+
+
+{- | The legacy URI view. Reading an empty field through this pattern reports
+empty text. Construction always creates the quoted form. Use
+'soapActionIntent' to distinguish the two empty forms.
+-}
+pattern SoapAction :: ST.ShortText -> SoapAction
+pattern SoapAction {soapActionURI} <- (legacyURI -> soapActionURI)
+  where
+    SoapAction uri = QuotedSoapAction uri
+
+
+{-# COMPLETE SoapAction #-}
+
+
+legacyURI :: SoapAction -> ST.ShortText
+legacyURI SoapActionNoIntent = ""
+legacyURI (QuotedSoapAction uri) = uri
+
+
+data SoapActionIntent
+  = SoapNoIntent
+  | SoapRequestURI
+  | SoapExplicitAction !ST.ShortText
+  deriving stock (Eq, Show)
+
+
+soapActionIntent :: SoapAction -> SoapActionIntent
+soapActionIntent SoapActionNoIntent = SoapNoIntent
+soapActionIntent (QuotedSoapAction uri)
+  | ST.null uri = SoapRequestURI
+  | otherwise = SoapExplicitAction uri
 
 
 instance KnownHeader SoapAction where
@@ -39,27 +74,23 @@ instance KnownHeader SoapAction where
   type Direction SoapAction = 'Request
 
 
-  parseFromHeaders _ headers = case runParser soapActionParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing SoapAction header: " <> show rest
-    Fail -> Left "Failed to parse SoapAction header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "SOAPAction" soapActionParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderSoapAction
+  renderToHeaders _ SoapActionNoIntent = ""
+  renderToHeaders _ value@(QuotedSoapAction uri) =
+    WB.toStrictByteStringExact (BSI.checkedAdd "SOAPAction" 2 (SBS.length (ST.toShortByteString uri))) (renderSoapAction value)
 
 
   headerName _ = hSoapAction
 
 
 soapActionParser :: ParserT st String SoapAction
-soapActionParser = SoapAction <$> quotedString
+soapActionParser =
+  ows *> ((QuotedSoapAction <$> ($(char '"') *> uriReference <* $(char '"'))) <|> (SoapActionNoIntent <$ eof)) <* ows
 
 
 renderSoapAction :: SoapAction -> M.Builder
-renderSoapAction (SoapAction uri) =
-  M.char8 '"' <> foldr esc mempty (ST.toString uri) <> M.char8 '"'
-  where
-    esc c acc
-      | c == '"' || c == '\\' = M.char8 '\\' <> M.char8 c <> acc
-      | otherwise = M.char8 c <> acc
+renderSoapAction SoapActionNoIntent = mempty
+renderSoapAction (QuotedSoapAction uri) = M.char7 '"' <> shortText uri <> M.char7 '"'
+{-# INLINE renderSoapAction #-}

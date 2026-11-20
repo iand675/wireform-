@@ -1,35 +1,43 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 {- |
-@DASL@ (RFC 5323 §9.1.4) — response header by which a WebDAV SEARCH
-server advertises a query grammar (a @Coded-URL@, e.g.
-@\<DAV:basicsearch\>@) that it supports. One @DASL@ header is sent per
-supported grammar.
+@DASL@ (RFC 5323 §3.2) — advertises the WebDAV SEARCH grammars supported
+by a resource. The advertised grammars are a nonempty list of coded URLs.
 
-The query-grammar production is server-defined and effectively
-opaque on the wire, so the value is preserved verbatim as a faithful
-raw newtype (per the depth guidance for opaque/host-specific values).
-
-Spec: <https://www.rfc-editor.org/rfc/rfc5323.html#section-9.1.4>
+Spec: <https://www.rfc-editor.org/rfc/rfc5323.html#section-3.2>
 
 See also: "Network.HTTP.Headers.DAV", "Network.HTTP.Headers.Depth", "Network.HTTP.Headers.If".
 -}
 module Network.HTTP.Headers.DASL (
-  DASL (..),
+  DASL (DASL, DASLGrammars, daslGrammar, daslGrammars),
   daslParser,
   renderDASL,
 ) where
 
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (codedURL)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hDASL)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (sepByCommas1, shortText)
 
 
--- | A single advertised DASL query grammar, preserved verbatim.
-newtype DASL = DASL {daslGrammar :: ST.ShortText}
+-- | All advertised grammar identifiers, including their angle brackets.
+newtype DASL = DASLGrammars {daslGrammars :: NonEmpty ST.ShortText}
   deriving stock (Eq, Show)
+
+
+-- | Construct a singleton or read the first grammar through the legacy API.
+pattern DASL :: ST.ShortText -> DASL
+pattern DASL {daslGrammar} <- DASLGrammars (daslGrammar :| _)
+  where
+    DASL grammar = DASLGrammars (grammar :| [])
+
+
+{-# COMPLETE DASL #-}
 
 
 instance KnownHeader DASL where
@@ -38,11 +46,8 @@ instance KnownHeader DASL where
   type Direction DASL = 'Response
 
 
-  parseFromHeaders _ headers = case runParser daslParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing DASL header: " <> show rest
-    Fail -> Left "Failed to parse DASL header"
-    Err e -> Left e
+  parseFromHeaders _ fields =
+    DASLGrammars <$> (parseListFieldLines "DASL" (httpList grammarParser) fields >>= requireNonEmptyList "DASL")
 
 
   renderToHeaders _ = M.toStrictByteString . renderDASL
@@ -52,8 +57,13 @@ instance KnownHeader DASL where
 
 
 daslParser :: ParserT st String DASL
-daslParser = DASL <$> takeRestShortText
+daslParser = DASLGrammars <$> (httpList grammarParser >>= maybe failed pure . NE.nonEmpty)
+
+
+grammarParser :: ParserT st String ST.ShortText
+grammarParser = shortASCIIFromParser_ codedURL
+{-# INLINE grammarParser #-}
 
 
 renderDASL :: DASL -> M.Builder
-renderDASL (DASL grammar) = shortText grammar
+renderDASL = sepByCommas1 . fmap shortText . daslGrammars

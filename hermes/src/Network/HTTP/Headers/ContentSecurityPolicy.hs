@@ -1,48 +1,40 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {- |
-W3C Content Security Policy Level 3 @Content-Security-Policy@ — the
-response header by which a server declares the policy a user agent
-must enforce for a given resource.
+@Content-Security-Policy@ carries an ordered list of independent policies.
+Use 'cspPolicies' to access the whole field and 'effectiveDirectives' to
+project the first occurrence of each directive within one policy.
 
-== Grammar
+<https://www.w3.org/TR/CSP3/#csp-header Content Security Policy Level 3>
 
-@
-serialized-policy = directive-set
-directive-set     = [ directive *( OWS \";\" OWS [ directive ] ) ]
-directive         = directive-name [ RWS directive-value ]
-directive-name    = 1*( ALPHA / DIGIT / \"-\" )
-directive-value   = *( RWS / ( %x21-2B / %x2D-3A / %x3C-7E ) )
-@
-
-A policy is an ordered list of directives; each directive is a
-name followed by zero or more whitespace-separated values. Values
-are preserved verbatim (the value grammar is any VCHAR except
-@\",\"@ and @\";\"@), so callers can route directive-specific
-syntax (source lists, sandbox flags, report endpoints, …) through
-their own logic. Directive order is preserved.
-
-Spec: <https://www.w3.org/TR/CSP3/>
-
-See also: "Network.HTTP.Headers.ContentSecurityPolicyReportOnly", "Network.HTTP.Headers.ReportingEndpoints", "Network.HTTP.Headers.XFrameOptions", "Network.HTTP.Headers.XXSSProtection", "Network.HTTP.Headers.PermissionsPolicy".
+See also: "Network.HTTP.Headers.ContentSecurityPolicyReportOnly",
+"Network.HTTP.Headers.ReportingEndpoints", "Network.HTTP.Headers.PermissionsPolicy".
 -}
 module Network.HTTP.Headers.ContentSecurityPolicy (
-  ContentSecurityPolicy (..),
+  ContentSecurityPolicy (ContentSecurityPolicy, cspDirectives, ContentSecurityPolicyList, cspPolicies),
+  CSPPolicy (..),
   Directive (..),
+  effectiveDirectives,
   contentSecurityPolicyParser,
   renderContentSecurityPolicy,
   directiveParser,
   renderDirective,
   directiveSetParser,
   renderDirectiveSet,
+  policyListParser,
+  parsePolicyFieldLines,
+  renderPolicyList,
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.ByteString as B
-import Data.CharSet (CharSet)
+import Data.ByteString (ByteString)
+import Data.Char (isAsciiUpper, toLower)
 import qualified Data.CharSet as CharSet
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
-import Data.Maybe (catMaybes)
+import qualified Data.Set as Set
+import qualified Data.Text as T
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentSecurityPolicy)
@@ -51,13 +43,7 @@ import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
 
 
--- ---------------------------------------------------------------------------
--- Data
--- ---------------------------------------------------------------------------
-
-{- | A single CSP directive: a @directive-name@ plus zero or more
-whitespace-separated @directive-value@ tokens, preserved verbatim.
--}
+-- | A directive's wire spelling and its whitespace-separated tokens.
 data Directive = Directive
   { directiveName :: !ST.ShortText
   , directiveValues :: ![ST.ShortText]
@@ -65,11 +51,46 @@ data Directive = Directive
   deriving stock (Eq, Show)
 
 
--- | A serialized policy: an ordered list of directives.
-newtype ContentSecurityPolicy = ContentSecurityPolicy
-  { cspDirectives :: [Directive]
-  }
+-- | One policy, retaining all serialized directives in wire order.
+newtype CSPPolicy = CSPPolicy {policyDirectives :: [Directive]}
   deriving stock (Eq, Show)
+
+
+newtype ContentSecurityPolicy = ContentSecurityPolicyList {cspPolicies :: NonEmpty CSPPolicy}
+  deriving stock (Eq, Show)
+
+
+{- | Construct one policy or read the first policy's directives. Use
+'cspPolicies' to inspect a field that may contain multiple policies.
+-}
+pattern ContentSecurityPolicy :: [Directive] -> ContentSecurityPolicy
+pattern ContentSecurityPolicy {cspDirectives} <- (policyDirectives . NE.head . cspPolicies -> cspDirectives)
+  where
+    ContentSecurityPolicy directives = ContentSecurityPolicyList (CSPPolicy directives :| [])
+
+
+{-# COMPLETE ContentSecurityPolicy #-}
+
+
+{- | CSP3 normalizes directive names and uses the first value of each name.
+Apply this within a single policy so directives from different policies
+remain independent.
+-}
+effectiveDirectives :: CSPPolicy -> [Directive]
+effectiveDirectives = go Set.empty . policyDirectives
+  where
+    go _ [] = []
+    go seen (directive : rest)
+      | Set.member name seen = go seen rest
+      | otherwise = directive {directiveName = name} : go (Set.insert name seen) rest
+      where
+        spelling = directiveName directive
+        name
+          | ST.any isAsciiUpper spelling = ST.fromText (T.map lowerAscii (ST.toText spelling))
+          | otherwise = spelling
+        lowerAscii c
+          | isAsciiUpper c = toLower c
+          | otherwise = c
 
 
 instance KnownHeader ContentSecurityPolicy where
@@ -78,15 +99,7 @@ instance KnownHeader ContentSecurityPolicy where
   type Direction ContentSecurityPolicy = 'Response
 
 
-  parseFromHeaders _ headers = case runParser contentSecurityPolicyParser (NE.head headers) of
-    OK csp leftover
-      | B.null (dropOws leftover) -> Right csp
-      | otherwise ->
-          Left ("Unconsumed input after parsing Content-Security-Policy: " <> show leftover)
-    Fail -> Left "Failed to parse Content-Security-Policy header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = fmap ContentSecurityPolicyList . parsePolicyFieldLines "Content-Security-Policy"
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentSecurityPolicy
@@ -95,71 +108,94 @@ instance KnownHeader ContentSecurityPolicy where
   headerName _ = hContentSecurityPolicy
 
 
--- ---------------------------------------------------------------------------
--- Parser
--- ---------------------------------------------------------------------------
-
--- | @directive-name@ characters: @ALPHA / DIGIT / \"-\"@.
-directiveNameCharSet :: CharSet
-directiveNameCharSet =
-  CharSet.range 'A' 'Z'
-    <> CharSet.range 'a' 'z'
-    <> CharSet.range '0' '9'
-    <> CharSet.singleton '-'
-
-
-{- | @directive-value@ characters: any VCHAR (@%x21-7E@) except
-@\",\"@ (@%x2C@) and @\";\"@ (@%x3B@), which delimit, respectively,
-multiple policies and multiple directives.
--}
-cspValueCharSet :: CharSet
-cspValueCharSet =
-  CharSet.range '\x21' '\x2B'
-    <> CharSet.range '\x2D' '\x3A'
-    <> CharSet.range '\x3C' '\x7E'
-
-
--- | Parse a single @directive@: a name optionally followed by values.
-directiveParser :: ParserT st String Directive
-directiveParser = do
-  name <- shortASCIIFromParser_ (some (satisfyAscii (`CharSet.member` directiveNameCharSet)))
-  values <- many (rws *> cspValue)
-  ows
-  pure Directive {directiveName = name, directiveValues = values}
-  where
-    cspValue = shortASCIIFromParser_ (some (satisfyAscii (`CharSet.member` cspValueCharSet)))
-
-
-{- | Parse a @directive-set@: a @\";\"@-separated list of directives,
-tolerating empty directives (e.g. a trailing @\";\"@).
--}
-directiveSetParser :: ParserT st String [Directive]
-directiveSetParser = do
-  ows
-  ds <- optional directiveParser `sepBy` ($(char ';') *> ows)
-  pure (catMaybes ds)
-
-
--- | Parse an entire @Content-Security-Policy@ value.
 contentSecurityPolicyParser :: ParserT st String ContentSecurityPolicy
-contentSecurityPolicyParser = ContentSecurityPolicy <$> directiveSetParser
+contentSecurityPolicyParser = ContentSecurityPolicyList <$> policyListParser
 
 
--- ---------------------------------------------------------------------------
--- Renderer
--- ---------------------------------------------------------------------------
+parsePolicyFieldLines :: String -> NonEmpty ByteString -> Either String (NonEmpty CSPPolicy)
+parsePolicyFieldLines name = fmap explicitEmptyPolicy . parseListFieldLines name nonemptyPoliciesParser
 
--- | Render a single directive as @name value1 value2 …@.
+
+policyListParser :: ParserT st String (NonEmpty CSPPolicy)
+policyListParser = explicitEmptyPolicy <$> nonemptyPoliciesParser
+
+
+explicitEmptyPolicy :: [CSPPolicy] -> NonEmpty CSPPolicy
+explicitEmptyPolicy [] = CSPPolicy [] :| []
+explicitEmptyPolicy (first : rest) = first :| rest
+
+
+-- HTTP field values admit SP and HTAB. Commas always delimit policies and
+-- never occur inside a directive, so physical lines can be parsed separately.
+nonemptyPoliciesParser :: ParserT st String [CSPPolicy]
+nonemptyPoliciesParser = do
+  directives <- directiveSetWith isOWS
+  rest <- branch $(char ',') nonemptyPoliciesParser (pure [])
+  pure $ case directives of
+    [] -> rest
+    _ -> CSPPolicy directives : rest
+
+
+-- | Read one serialized CSP directive using Infra ASCII whitespace.
+directiveParser :: ParserT st String Directive
+directiveParser = directiveWith isCSPWhitespace
+
+
+-- | Read a single serialized policy, including policies from HTML sources.
+directiveSetParser :: ParserT st String [Directive]
+directiveSetParser = directiveSetWith isCSPWhitespace
+
+
+isCSPWhitespace :: Char -> Bool
+isCSPWhitespace c = isOWS c || c == '\n' || c == '\r' || c == '\f'
+
+
+directiveSetWith :: (Char -> Bool) -> ParserT st String [Directive]
+directiveSetWith isSpace = space *> go
+  where
+    space = skipMany (skipSatisfyAscii isSpace)
+    separator = $(char ';') *> space
+    go =
+      branch separator go $
+        withOption
+          (directiveWith isSpace)
+          (\directive -> (directive :) <$> branch separator go (pure []))
+          (pure [])
+{-# INLINE directiveSetWith #-}
+
+
+directiveWith :: (Char -> Bool) -> ParserT st String Directive
+directiveWith isSpace = do
+  name <- shortASCIIFromParser_ (asciiSetBytes directiveNameChars)
+  values <- branch (skipSome space) (many (value <* skipMany space)) (pure [])
+  pure (Directive name values)
+  where
+    space = skipSatisfyAscii isSpace
+    value = shortASCIIFromParser_ (asciiSetBytes directiveValueChars)
+{-# INLINE directiveWith #-}
+
+
+directiveNameChars :: AsciiSet
+directiveNameChars = asciiSet (CharSet.range 'A' 'Z' <> CharSet.range 'a' 'z' <> CharSet.range '0' '9' <> "-")
+{-# NOINLINE directiveNameChars #-}
+
+
+directiveValueChars :: AsciiSet
+directiveValueChars = asciiSet (CharSet.range '\x21' '\x2b' <> CharSet.range '\x2d' '\x3a' <> CharSet.range '\x3c' '\x7e')
+{-# NOINLINE directiveValueChars #-}
+
+
 renderDirective :: Directive -> M.Builder
-renderDirective (Directive name values) =
-  M.intersperse " " (R.shortText name : map R.shortText values)
+renderDirective (Directive name values) = R.shortText name <> foldMap (\value -> " " <> R.shortText value) values
 
 
--- | Render a directive list, joining directives with @\"; \"@.
 renderDirectiveSet :: [Directive] -> M.Builder
-renderDirectiveSet = M.intersperse "; " . map renderDirective
+renderDirectiveSet = R.renderSeparated "; " renderDirective
 
 
--- | Render an entire @Content-Security-Policy@ value.
+renderPolicyList :: NonEmpty CSPPolicy -> M.Builder
+renderPolicyList = R.renderSeparated ", " (renderDirectiveSet . policyDirectives) . filter (not . null . policyDirectives) . NE.toList
+
+
 renderContentSecurityPolicy :: ContentSecurityPolicy -> M.Builder
-renderContentSecurityPolicy = renderDirectiveSet . cspDirectives
+renderContentSecurityPolicy = renderPolicyList . cspPolicies

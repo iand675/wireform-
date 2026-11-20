@@ -14,17 +14,26 @@ Usage:
 -}
 module Main (main) where
 
+import Arrow.Column qualified as AC
+import Arrow.Types qualified as AT
+import Columnar.Stream (iterIOToList, iterToList)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Vector qualified as V
+import Data.Vector.Storable qualified as VS
 import Data.Word (Word64)
 import Delta.Checkpoint qualified as DC
 import Delta.IO qualified as DIO
 import Delta.Log qualified as D
+import Delta.Scan qualified as Scan
+import GHC.Float (float2Double)
 import System.Directory (doesFileExist)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
@@ -48,6 +57,43 @@ main = do
       case readMaybe verStr of
         Just v -> probeAt v i o
         Nothing -> exitFailure
+    ["--validate-checksum", version, root] -> do
+      table <- case readMaybe version of
+        Just number -> DIO.openDeltaTableAt root number >>= either fail pure
+        Nothing -> fail "invalid version"
+      present <- DIO.validateVersionChecksum table >>= either fail pure
+      BL.putStr (Aeson.encode present)
+      System.Exit.exitSuccess
+    ["--scan-ids", root, out] -> do
+      table <- DIO.openDeltaTable root >>= either fail pure
+      values <- traverse (scanIDs root) (DIO.dtActiveFiles table)
+      BL.writeFile out (Aeson.encode (concat values))
+      System.Exit.exitSuccess
+    ["--scan-table", root, out] -> do
+      table <- DIO.openDeltaTable root >>= either fail pure
+      (schema, stream) <- either fail pure (Scan.scanTable table)
+      batches <- iterIOToList stream >>= either fail pure
+      rows <- either fail pure (concat <$> traverse (tableRows (AT.arrowFields schema)) batches)
+      readStats <- either fail pure (Scan.tableFileStats table)
+      stats <- either fail pure (traverse readStats (DIO.dtActiveFiles table))
+      BL.writeFile out (Aeson.encode (Aeson.object ["rows" Aeson..= rows, "stats" Aeson..= map (fmap statsJSON) stats]))
+      System.Exit.exitSuccess
+    "--scan-projected" : root : out : names -> do
+      table <- DIO.openDeltaTable root >>= either fail pure
+      (schema, stream) <- either fail pure (Scan.scanTableProjected (map T.pack names) table)
+      batches <- iterIOToList stream >>= either fail pure
+      rows <- either fail pure (concat <$> traverse (tableRows (AT.arrowFields schema)) batches)
+      BL.writeFile out (Aeson.encode (Aeson.object ["columns" Aeson..= fmap AT.fieldName (AT.arrowFields schema), "rows" Aeson..= rows]))
+      System.Exit.exitSuccess
+    ["--scan-tracked", root, out] -> do
+      table <- DIO.openDeltaTable root >>= either fail pure
+      (schema, stream) <- either fail pure (Scan.scanTrackedTable table)
+      batches <- iterIOToList stream >>= either fail pure
+      rows <- either fail pure (concat <$> traverse (tableRows (AT.arrowFields schema) . Scan.trackedData) batches)
+      let ids = concatMap (VS.toList . Scan.rowIds) batches
+          versions = concatMap (VS.toList . Scan.rowCommitVersions) batches
+      BL.writeFile out (Aeson.encode (Aeson.object ["rows" Aeson..= rows, "ids" Aeson..= ids, "versions" Aeson..= versions]))
+      System.Exit.exitSuccess
     [i] -> pure (i, Nothing)
     [i, o] -> pure (i, Just o)
     _ -> do
@@ -60,6 +106,58 @@ main = do
       putStrLn ("wireform-delta-interop-probe: " ++ err)
       exitFailure
     Right dt -> writeProbeOutput tableRoot outputDest dt
+
+
+scanIDs :: FilePath -> D.AddAction -> IO [Int64]
+scanIDs root file = do
+  (_, stream) <- Scan.openDataFile root file >>= either fail pure
+  batches <- either fail pure (iterToList stream)
+  fmap concat $ traverse oneColumn batches
+  where
+    oneColumn batch = case V.toList (Scan.batchColumns batch) of
+      [AC.ColInt64 _ ids] -> pure (VS.toList ids)
+      _ -> fail "expected one Int64 column"
+
+
+tableRows :: V.Vector AT.Field -> Scan.DataBatch -> Either String [Aeson.Value]
+tableRows fields batch = traverse row [0 .. Scan.batchRowCount batch - 1]
+  where
+    row i = Aeson.Object . KM.fromList . V.toList <$> V.zipWithM (fieldAt i) fields (Scan.batchColumns batch)
+    fieldAt i field column = (Key.fromText (AT.fieldName field),) <$> cell i column
+    cell i column
+      | not (AC.isValidAt (AC.validity column) i) = pure Aeson.Null
+      | otherwise = case column of
+          AC.ColNull _ -> pure Aeson.Null
+          AC.ColInt8 _ values -> pure (Aeson.toJSON (values VS.! i))
+          AC.ColInt16 _ values -> pure (Aeson.toJSON (values VS.! i))
+          AC.ColInt32 _ values -> pure (Aeson.toJSON (values VS.! i))
+          AC.ColInt64 _ values -> pure (Aeson.toJSON (values VS.! i))
+          AC.ColFloat _ values -> pure (floatingCell (float2Double (values VS.! i)))
+          AC.ColDouble _ values -> pure (floatingCell (values VS.! i))
+          AC.ColDecimal128 _ _ _ values -> pure (Aeson.toJSON (AC.decimal128ToInteger (values VS.! i)))
+          AC.ColDate32 _ values -> pure (Aeson.toJSON (values VS.! i))
+          AC.ColTimestamp _ values -> pure (Aeson.toJSON (values VS.! i))
+          AC.ColUtf8 {} -> pure (maybe Aeson.Null Aeson.String (AC.anyTextAt column i))
+          AC.ColBinary {} -> pure (maybe Aeson.Null (Aeson.toJSON . BS.unpack) (AC.anyBytesAt column i))
+          AC.ColStruct _ _ children -> do
+            entries <- V.mapM (\(name, values) -> (Key.fromText name,) <$> cell i values) children
+            pure (Aeson.Object (KM.fromList (V.toList entries)))
+          AC.ColList _ offsets values ->
+            Aeson.toJSON <$> traverse (`cell` values) [fromIntegral (offsets VS.! i) .. fromIntegral (offsets VS.! (i + 1)) - 1]
+          AC.ColMap _ offsets keys values ->
+            Aeson.Object . KM.fromList
+              <$> traverse
+                ( \j -> do
+                    k <- maybe (Left "expected UTF-8 map key") Right (AC.anyTextAt keys j)
+                    v <- cell j values
+                    pure (Key.fromText k, v)
+                )
+                [fromIntegral (offsets VS.! i) .. fromIntegral (offsets VS.! (i + 1)) - 1]
+          _ -> Left ("unsupported probe column " ++ AC.columnTag column)
+    floatingCell value
+      | isNegativeZero value = Aeson.String "-0"
+      | isNaN value = Aeson.String "NaN"
+      | otherwise = Aeson.toJSON (value :: Double)
 
 
 probeAt :: Word64 -> FilePath -> FilePath -> IO a
@@ -104,6 +202,7 @@ writeProbeOutput tableRoot outputDest dt = do
             , (Key.fromString "num_commits", Aeson.Number (fromIntegral (length (DIO.dtCommits dt))))
             , (Key.fromString "active_files", filesJSON snap)
             , (Key.fromString "active_file_count", Aeson.Number (fromIntegral (Map.size (D.tsFiles snap))))
+            , (Key.fromString "domains", Aeson.toJSON (D.tsDomains snap))
             , (Key.fromString "protocol", protocolJSON snap)
             , (Key.fromString "metadata", metadataJSON snap)
             ,
@@ -166,8 +265,8 @@ numW64 :: Word64 -> Aeson.Value
 numW64 = Aeson.Number . fromIntegral
 
 
-txnEntry :: (Text, Word64) -> (Key.Key, Aeson.Value)
-txnEntry (k, v) = (Key.fromText k, numW64 v)
+txnEntry :: (Text, Int64) -> (Key.Key, Aeson.Value)
+txnEntry (k, v) = (Key.fromText k, Aeson.Number (fromIntegral v))
 
 
 pad20 :: Word64 -> String
@@ -184,7 +283,7 @@ historyJSON xs = Aeson.Array $ V.fromList $ map entry xs
         KM.fromList
           [ (Key.fromString "version", numW64 (DIO.heVersion e))
           , (Key.fromString "operation", maybe Aeson.Null Aeson.String (DIO.heOperation e))
-          , (Key.fromString "timestamp", maybe Aeson.Null numW64 (DIO.heTimestamp e))
+          , (Key.fromString "timestamp", maybe Aeson.Null (Aeson.Number . fromIntegral) (DIO.heTimestamp e))
           ,
             ( Key.fromString "isolation_level"
             , maybe Aeson.Null Aeson.String (DIO.heIsolationLevel e)
@@ -201,7 +300,8 @@ filesJSON snap =
         KM.fromList
           [ (Key.fromString "path", Aeson.String path)
           , (Key.fromString "size", numW64 (D.addSize a))
-          , (Key.fromString "modificationTime", numW64 (D.addModificationTime a))
+          , (Key.fromString "modificationTime", Aeson.Number (fromIntegral (D.addModificationTime a)))
+          , (Key.fromString "stats", maybe Aeson.Null (either (Aeson.String . T.pack) statsJSON) (D.decodeAddStats a))
           ,
             ( Key.fromString "partition_values"
             , Aeson.Object $
@@ -210,6 +310,20 @@ filesJSON snap =
           ]
     pvEntry (k, Nothing) = (Key.fromText k, Aeson.Null)
     pvEntry (k, Just t) = (Key.fromText k, Aeson.String t)
+
+
+statsJSON :: D.AddStats -> Aeson.Value
+statsJSON stats =
+  Aeson.object
+    [ "numRecords" Aeson..= D.asNumRecords stats
+    , "minValues" Aeson..= D.asMinValues stats
+    , "maxValues" Aeson..= D.asMaxValues stats
+    , "nullCount" Aeson..= fmap nullCountJSON (D.asNullCounts stats)
+    , "tightBounds" Aeson..= D.effectiveTightBounds stats
+    ]
+  where
+    nullCountJSON (D.NullCount n) = Aeson.toJSON n
+    nullCountJSON (D.NestedNullCounts children) = Aeson.toJSON (fmap nullCountJSON children)
 
 
 protocolJSON :: D.TableSnapshot -> Aeson.Value

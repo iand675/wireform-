@@ -386,7 +386,7 @@ clientRequestToWai req = do
     Right uri ->
       pure
         ( let p = URI.uriPath uri in if BS.null p then "/" else p
-        , let q = URI.uriQuery uri in if BS.null q then "" else "?" <> q
+        , URI.uriRawQuery uri
         , Just (URI.uriHost uri <> portSuffix uri)
         , URI.uriScheme uri == URI.SchemeHttps
         )

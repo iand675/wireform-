@@ -5,6 +5,9 @@ module Test.Hermes.Framing (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import Data.Char (chr)
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
@@ -13,12 +16,19 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers
 import qualified Network.HTTP.Headers.Close as Close
+import qualified Network.HTTP.Headers.Connection as Connection
+import Network.HTTP.Headers.ContentLength (ContentLength (..))
+import Network.HTTP.Headers.HeaderFieldName (hContentLength, hHost, hTE, hTransferEncoding)
+import Network.HTTP.Headers.Host (Host (..))
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.MaxForwards as MaxForwards
-import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Headers.Parsing.Util (Result (..), eof, httpQuotedString, runParser)
+import Network.HTTP.Headers.Rendering.Util (renderHttpQuotedString)
 import qualified Network.HTTP.Headers.TE as TE
 import qualified Network.HTTP.Headers.Trailer as Trailer
+import qualified Network.HTTP.Headers.TransferEncoding as Transfer
 import qualified Network.HTTP.Headers.Upgrade as Upgrade
 import qualified Network.HTTP.Headers.Via as Via
 import Test.Syd
@@ -154,6 +164,107 @@ unit_te_render =
     in M.toStrictByteString (TE.renderTE v) `shouldBe` "trailers, gzip;q=0.5"
 
 
+unit_te_parameters :: Spec
+unit_te_parameters = it "combines TE fields and preserves extension parameters and weights" $ do
+  let params = Transfer.TransferParameter "note" (Transfer.TransferQuoted "a,b") :| []
+      value = TE.TE (TE.TECoding "Trailers" Nothing :| [TE.TEParameterizedCoding "custom" (Just 1) params, TE.TECoding "gzip" (Just 0)])
+      fields = headerMapFromList [("TE", " , Trailers,"), ("TE", "custom ; note \t= \"a,b\";Q=1., gzip;q=0.")]
+  lookupHeader fields `shouldBe` Right (Just value)
+  lookupRawHeader hTE (setHeader value fields) `shouldBe` Just ("Trailers, custom;note=\"a,b\";q=1, gzip;q=0" :| [])
+  lookupHeader @TE.TE (headerMapFromList [("TE", " , "), ("TE", "")]) `shouldBe` Right (Just TE.TEEmpty)
+  renderToHeaders defaultHeaderSettings TE.TEEmpty `shouldBe` [""]
+
+
+unit_te_rejects_invalid_weights :: Spec
+unit_te_rejects_invalid_weights =
+  it "enforces TE keyword, coding parameter, and qvalue rules" $
+    mapM_
+      reject
+      [ "ChUnKeD"
+      , "trailers;q=1"
+      , "trailers;hint=token"
+      , "gzip;level=1"
+      , "custom;q=1;Q=0"
+      , "custom;q=1;level=1"
+      , "custom;q = 1"
+      , "custom;q=\"1\""
+      , "custom;q=0.0001"
+      , "custom;q=1.001"
+      , "custom;q=2"
+      ]
+  where
+    reject wire = lookupHeader @TE.TE (headerMapFromList [("TE", wire)]) `shouldSatisfy` isLeft
+
+
+unit_te_decimal_values :: Spec
+unit_te_decimal_values =
+  it "round trips every representable TE qvalue" $
+    mapM_ check [0 .. 1000 :: Int]
+  where
+    check thousandths =
+      let value = TE.TE (TE.TECoding "gzip" (Just (fromIntegral thousandths / 1000)) :| [])
+      in parseTE (M.toStrictByteString (TE.renderTE value)) `shouldBe` Right value
+
+
+unit_http_quoted_octets :: Spec
+unit_http_quoted_octets =
+  it "checks every HTTP quoted-string octet against the wire grammar" $
+    mapM_ check [0 .. 255]
+  where
+    check byte = do
+      let allowed = byte == 9 || byte >= 32 && byte /= 127
+          special = byte == 34 || byte == 92
+          content = T.singleton (chr (fromIntegral byte))
+          directly = BS.pack [34, byte, 34]
+          quoted = BS.pack [34, 92, byte, 34]
+      decode directly `shouldBe` if allowed && not special then Just content else Nothing
+      decode quoted `shouldBe` if allowed then Just content else Nothing
+      if allowed
+        then M.toStrictByteString (renderHttpQuotedString content) `shouldBe` if special then quoted else directly
+        else pure ()
+    decode bytes = case runParser (httpQuotedString <* eof) bytes of
+      OK value "" -> Just value
+      _ -> Nothing
+
+
+unit_transfer_coding_order :: Spec
+unit_transfer_coding_order = it "combines Transfer-Encoding lines before applying framing rules" $ do
+  let fields = headerMapFromList [("Transfer-Encoding", " gzip, "), ("Transfer-Encoding", ", Chunked ")]
+      value = Transfer.TransferEncoding ("gzip" :| ["Chunked"])
+      closeDelimited = Transfer.TransferEncoding ("chunked" :| ["gzip"])
+  lookupHeader fields `shouldBe` Right (Just value)
+  lookupRawHeader hTransferEncoding (setHeader value fields) `shouldBe` Just ("gzip, Chunked" :| [])
+  Transfer.validateRequestTransferEncoding value `shouldBe` Right ()
+  lookupHeader @Transfer.TransferEncoding (headerMapFromList [("Transfer-Encoding", "chunked, gzip")])
+    `shouldBe` Right (Just closeDelimited)
+  Transfer.transferEncodingEndsInChunked closeDelimited `shouldBe` False
+  Transfer.validateRequestTransferEncoding closeDelimited `shouldSatisfy` isLeft
+  lookupHeader @Transfer.TransferEncoding (headerMapFromList [("Transfer-Encoding", " , ")])
+    `shouldBe` Right (Just Transfer.TransferEncodingEmpty)
+  Transfer.validateRequestTransferEncoding Transfer.TransferEncodingEmpty `shouldSatisfy` isLeft
+  lookupHeader @Transfer.TransferEncoding (headerMapFromList [("Transfer-Encoding", "gzip-custom, chunked-extra, chunked")])
+    `shouldBe` Right (Just (Transfer.TransferEncoding ("gzip-custom" :| ["chunked-extra", "chunked"])))
+
+
+unit_transfer_coding_parameters :: Spec
+unit_transfer_coding_parameters = it "retains quoted transfer parameter bytes and rejects invalid standard codings" $ do
+  let quoted = "a, \\\"b\\\" " <> BS.singleton 0xff
+      fields = headerMapFromList [("Transfer-Encoding", "example; mode\t = fast; note=\"" <> quoted <> "\""), ("Transfer-Encoding", "chunked")]
+      params =
+        [ Transfer.TransferParameter "mode" (Transfer.TransferToken "fast")
+        , Transfer.TransferParameter "note" (Transfer.TransferQuoted "a, \"b\" \xff")
+        ]
+      value = Transfer.ParameterizedTransferEncoding (Transfer.TransferCoding "example" params :| [Transfer.TransferCoding "chunked" []])
+  lookupHeader fields `shouldBe` Right (Just value)
+  renderToHeaders defaultHeaderSettings value `shouldBe` ("example;mode=fast;note=\"" <> quoted <> "\", chunked")
+  Transfer.validateRequestTransferEncoding value `shouldBe` Right ()
+  mapM_
+    (\wire -> lookupHeader @Transfer.TransferEncoding (headerMapFromList [("Transfer-Encoding", wire)]) `shouldSatisfy` isLeft)
+    ["chunked;hint=1", "GZip;level=1, chunked", "chunked, GZIP, CHUNKED", "custom;mode=", "custom;mode=\"unfinished"]
+  lookupHeader @Transfer.TransferEncoding (headerMapFromList [("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "CHUNKED")])
+    `shouldSatisfy` isLeft
+
+
 -- Trailer -----------------------------------------------------------------
 
 unit_trailer_parse :: Spec
@@ -226,6 +337,81 @@ unit_via_render =
     in M.toStrictByteString (Via.renderVia v) `shouldBe` "HTTP/1.1 proxy.example.com (fast)"
 
 
+unit_via_typed_lists :: Spec
+unit_via_typed_lists = it "combines Via hops and shares the nested comment codec" $ do
+  let headers = headerMapFromList [("Via", ", 1.1 proxy (at (edge), west), "), ("Via", "HTTP/2 cache,")]
+      value =
+        Via.Via
+          ( Via.ViaEntry (Via.ReceivedProtocol Nothing "1.1") "proxy" (Just "at (edge), west")
+              :| [Via.ViaEntry (Via.ReceivedProtocol (Just "HTTP") "2") "cache" Nothing]
+          )
+  lookupHeader headers `shouldBe` Right (Just value)
+  renderToHeaders defaultHeaderSettings value `shouldBe` ["1.1 proxy (at \\(edge\\), west), HTTP/2 cache"]
+  lookupHeader @Via.Via (headerMapFromList [("Via", " , ")]) `shouldBe` Right (Just Via.ViaEmpty)
+  lookupHeader @Via.Via (headerMapFromList [("Via", "1.1 proxy\rname")]) `shouldSatisfy` isLeft
+
+
+unit_content_length :: Spec
+unit_content_length = it "bounds Content-Length and checks the complete singleton field" $ do
+  let headers = headerMapFromList [("Content-Length", "\t 0042 ")]
+      single value = lookupHeader @ContentLength (headerMapFromList [("Content-Length", value)])
+      largest = M.toStrictByteString (M.wordDec maxBound)
+  lookupHeader headers `shouldBe` Right (Just (ContentLength 42))
+  lookupRawHeader hContentLength (setHeader (ContentLength 42) headers) `shouldBe` Just ("42" :| [])
+  single largest `shouldBe` Right (Just (ContentLength maxBound))
+  single (BS.replicate 1000 48 <> "42") `shouldBe` Right (Just (ContentLength 42))
+  mapM_
+    (\value -> single value `shouldSatisfy` isLeft)
+    [largest <> "0", BS.replicate 1000 57, "42, 42", "4 2", "-1", "+1", ""]
+  lookupHeader @ContentLength (headerMapFromList [("Content-Length", "42"), ("Content-Length", "42")])
+    `shouldSatisfy` isLeft
+
+
+unit_host_authority :: Spec
+unit_host_authority = it "parses Host literals, escaped registered names, and bounded ports" $ do
+  let lookupHost wire = lookupHeader @Host (headerMapFromList [("Host", wire)])
+      headers = headerMapFromList [("Host", "\t[2001:DB8::1]:00443 ")]
+      host = Host "[2001:DB8::1]" (Just 443)
+  lookupHeader headers `shouldBe` Right (Just host)
+  lookupRawHeader hHost (setHeader host headers) `shouldBe` Just ("[2001:DB8::1]:443" :| [])
+  lookupHost "[::ffff:192.0.2.1]:65535" `shouldBe` Right (Just (Host "[::ffff:192.0.2.1]" (Just 65535)))
+  lookupHost (BS.drop 1 "x[2001:DB8::1]") `shouldBe` Right (Just (Host "[2001:DB8::1]" Nothing))
+  lookupHost "[::]:" `shouldBe` Right (Just (Host "[::]" Nothing))
+  lookupHost "[vF.node:transport]" `shouldBe` Right (Just (Host "[vF.node:transport]" Nothing))
+  lookupHost "node%2dname.example:" `shouldBe` Right (Just (Host "node%2dname.example" Nothing))
+  lookupHost "%61pp%2d%62.example" `shouldBe` Right (Just (Host "%61pp%2d%62.example" Nothing))
+  lookupHost "\t " `shouldBe` Right (Just (Host "" Nothing))
+  mapM_
+    (\wire -> lookupHost wire `shouldSatisfy` isLeft)
+    [ "[127.0.0.1]"
+    , "[2001:::1]"
+    , "[2001:db8::1"
+    , "2001:db8::1"
+    , "name%4x"
+    , "name%"
+    , ":80"
+    , "node:65536"
+    , "node:" <> BS.replicate 1000 57
+    , "node:-1"
+    , "node:80 "
+        <> "more"
+    , "user@node"
+    , "node/path"
+    ]
+  lookupHeader @Host (headerMapFromList [("Host", "first"), ("Host", "second")]) `shouldSatisfy` isLeft
+
+
+unit_via_authority :: Spec
+unit_via_authority = it "accepts an authority or pseudonym for a Via hop" $ do
+  let lookupVia wire = lookupHeader @Via.Via (headerMapFromList [("Via", wire)])
+      protocol = Via.ReceivedProtocol Nothing "1.1"
+      value = Via.Via (Via.ViaEntry protocol "[::1]:443" Nothing :| [Via.ViaEntry protocol "edge#1:8443" Nothing])
+  lookupVia "1.1 [::1]:443, 1.1 edge#1:8443" `shouldBe` Right (Just value)
+  mapM_
+    (\wire -> lookupVia wire `shouldSatisfy` isLeft)
+    ["1.1 [::bad::1]", "1.1 host:65536", "1.1 user@host", "1.1 host/path", "1.1 [::1](comment)"]
+
+
 -- Max-Forwards ------------------------------------------------------------
 
 unit_maxforwards_parse :: Spec
@@ -238,6 +424,20 @@ unit_maxforwards_render :: Spec
 unit_maxforwards_render =
   it "renders Max-Forwards" $
     M.toStrictByteString (MaxForwards.renderMaxForwards (MaxForwards.MaxForwards 0)) `shouldBe` "0"
+
+
+unit_maxforwards_bounds :: Spec
+unit_maxforwards_bounds = it "checks the supported hop-count range through typed lookup" $ do
+  let field wire = ("Max-Forwards", wire)
+      typed = lookupHeader @MaxForwards.MaxForwards . headerMapFromList
+      wireOf n = BSC.pack (show n)
+  typed [field ("\t00" <> wireOf (maxBound :: Int) <> " ")] `shouldBe` Right (Just (MaxForwards.MaxForwards maxBound))
+  typed [field "999999999"] `shouldBe` Right (Just (MaxForwards.MaxForwards 999_999_999))
+  typed [field "1000000000"] `shouldBe` Right (Just (MaxForwards.MaxForwards 1_000_000_000))
+  typed [field "1", field "2"] `shouldSatisfy` isLeft
+  mapM_
+    (\wire -> typed [field wire] `shouldSatisfy` isLeft)
+    [wireOf (toInteger (maxBound :: Int) + 1), "18446744073709551616", "-1", "23x", ""]
 
 
 -- Close -------------------------------------------------------------------
@@ -254,6 +454,21 @@ unit_close_render =
     M.toStrictByteString (Close.renderClose Close.Close) `shouldBe` "close"
 
 
+unit_close_connection :: Spec
+unit_close_connection = it "reads and writes close as a Connection option" $ do
+  let fields = headerMapFromList [("Connection", "keep-alive"), ("Connection", "upgrade, ClOsE"), ("Close", "close")]
+      authored = setHeader Close.Close (headerMapFromList [])
+  lookupHeader @Close.Close fields `shouldBe` Right (Just Close.Close)
+  lookupHeader @Close.Close (headerMapFromList [("Close", "close")]) `shouldBe` Right Nothing
+  lookupRawHeader "Connection" authored `shouldBe` Just ("close" :| [])
+  lookupRawHeader "Close" authored `shouldBe` Nothing
+  fmap (fmap Connection.connectionHasClose) (lookupHeader @Connection.Connection fields) `shouldBe` Right (Just True)
+  fmap (fmap Connection.connectionHasClose) (lookupHeader @Connection.Connection (headerMapFromList [("Connection", "upgrade")]))
+    `shouldBe` Right (Just False)
+  lookupHeader @Close.Close (headerMapFromList [("Connection", "close"), ("Connection", "bad option")])
+    `shouldSatisfy` isLeft
+
+
 -- Suite -------------------------------------------------------------------
 
 tests :: Spec
@@ -262,7 +477,13 @@ tests =
     sequence_
       [ unit_te_parse
       , unit_te_render
+      , unit_te_parameters
+      , unit_te_rejects_invalid_weights
+      , unit_te_decimal_values
+      , unit_http_quoted_octets
       , it "TE round-trip" (roundtrip genTE parseTE TE.renderTE)
+      , unit_transfer_coding_order
+      , unit_transfer_coding_parameters
       , unit_trailer_parse
       , unit_trailer_render
       , it "Trailer round-trip" (roundtrip genTrailer parseTrailer Trailer.renderTrailer)
@@ -272,9 +493,15 @@ tests =
       , unit_via_parse
       , unit_via_render
       , it "Via round-trip" (roundtrip genVia parseVia Via.renderVia)
+      , unit_via_typed_lists
+      , unit_content_length
+      , unit_host_authority
+      , unit_via_authority
       , unit_maxforwards_parse
       , unit_maxforwards_render
       , it "Max-Forwards round-trip" (roundtrip genMaxForwards parseMaxForwards MaxForwards.renderMaxForwards)
+      , unit_maxforwards_bounds
       , unit_close_parse
       , unit_close_render
+      , unit_close_connection
       ]

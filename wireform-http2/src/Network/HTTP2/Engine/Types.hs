@@ -1,4 +1,6 @@
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 -- | Shared types for the wireform-http2 gRPC-friendly engine.
 --
 -- These follow the same shape as @http-semantics@'s @InpObj@ /
@@ -25,7 +27,9 @@ module Network.HTTP2.Engine.Types
     -- * Input / output objects
   , InpObj (..)
   , InpBody
-  , OutObj (..)
+  , OutObj (OutObj, outObjHeaders, outObjBody, outObjTrailers)
+  , outObjWithNoTrailers
+  , outObjTrailerMaker
   , OutBody (..)
   , OutBodyIface (..)
     -- * File specs (placeholder)
@@ -101,7 +105,8 @@ lookupToken name (hs, _) = go hs
       | CI.mk k == nameCI = Just v
       | otherwise         = go rest
 
--- | Trailer-block computer for streamed responses (RFC 9113 §8.1).
+-- | Trailer-block computer for an outgoing message (RFC 9113 §8.1).
+-- Each body chunk yields a successor. End-of-body yields the field list.
 type TrailersMaker = Maybe ByteString -> IO NextTrailersMaker
 
 data NextTrailersMaker
@@ -131,11 +136,22 @@ instance Show InpObj where
 
 -- | A message we're about to send: headers, body, and a trailers
 -- computer for trailing HEADERS frames.
-data OutObj = OutObj
-  { outObjHeaders :: ![Header]
-  , outObjBody :: !OutBody
-  , outObjTrailers :: !TrailersMaker
-  }
+data OutObj = MessageOutput ![Header] !OutBody !(Maybe TrailersMaker)
+
+pattern OutObj :: [Header] -> OutBody -> TrailersMaker -> OutObj
+pattern OutObj {outObjHeaders, outObjBody, outObjTrailers} <-
+  MessageOutput outObjHeaders outObjBody (maybe defaultTrailersMaker id -> outObjTrailers)
+  where
+    OutObj headers body maker = MessageOutput headers body (Just maker)
+{-# COMPLETE OutObj #-}
+
+-- | A message with no trailer producer. Its final DATA can carry
+-- END_STREAM immediately.
+outObjWithNoTrailers :: [Header] -> OutBody -> OutObj
+outObjWithNoTrailers headers body = MessageOutput headers body Nothing
+
+outObjTrailerMaker :: OutObj -> Maybe TrailersMaker
+outObjTrailerMaker (MessageOutput _ _ maker) = maker
 
 instance Show OutObj where
   show (OutObj hs _ _) = show hs

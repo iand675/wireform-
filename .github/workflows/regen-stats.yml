@@ -55,7 +55,7 @@ jobs:
         # solver evaluates even if we only build wireform-stats.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgmp-dev liblz4-dev libsnappy-dev libzstd-dev libbrotli-dev
+          sudo apt-get install -y libgmp-dev liblz4-dev libsnappy-dev libzstd-dev libbrotli-dev libre2-dev pkg-config
 
       - name: Build regen-stats
         run: cabal build wireform-stats:exe:regen-stats
@@ -112,7 +112,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libgmp-dev libsnappy-dev liblz4-dev libzstd-dev \
-            libbrotli-dev librdkafka-dev protobuf-compiler
+            libbrotli-dev librdkafka-dev protobuf-compiler libre2-dev pkg-config
 
       - name: Run per-package tests + coverage
         run: bash scripts/collect-stats.sh tests
@@ -177,7 +177,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libgmp-dev libsnappy-dev liblz4-dev libzstd-dev \
-            libbrotli-dev librdkafka-dev protobuf-compiler
+            libbrotli-dev librdkafka-dev protobuf-compiler libre2-dev pkg-config
 
       - name: Run benchmarks, distill summaries, re-render, check
         # Sequential by construction (criterion is noise-sensitive).

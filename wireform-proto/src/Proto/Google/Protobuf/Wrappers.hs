@@ -1,9 +1,12 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE StrictData #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-top-binds #-}
 
 {- | Auto-generated protobuf types from package @google.protobuf@.
@@ -57,7 +60,8 @@ import Proto.Internal.Encode.Archetype (
   archVarint,
   archVarintSize,
  )
-import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesFromJSON, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON qualified as PJ
 import Proto.Internal.JSON.Extension qualified as PJExt
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Encode (
@@ -92,7 +96,7 @@ import Proto.Internal.Wire.Encode (
  )
 import Proto.Registry (IsMessage)
 import Proto.Registry qualified
-import Proto.Schema (FieldDescriptor (..), FieldLabel' (..), FieldTypeDescriptor (..), ProtoMessage (..), ScalarFieldType (..), SomeFieldDescriptor (..))
+import Proto.Schema (FieldDescriptor (..), FieldLabel' (..), FieldTypeDescriptor (..), ProtoEnum (..), ProtoMessage (..), ScalarFieldType (..), SomeFieldDescriptor (..))
 import Wireform.Builder qualified as B
 
 
@@ -121,13 +125,13 @@ defaultDoubleValue =
 
 instance MessageEncode DoubleValue where
   buildMessage msg =
-    (if msg.doubleValueValue == 0 then mempty else archDouble 9 msg.doubleValueValue)
+    (if isDefaultDouble msg.doubleValueValue then mempty else archDouble 9 msg.doubleValueValue)
       <> encodeUnknownFields msg.doubleValueUnknownFields
 
 
 instance MessageSize DoubleValue where
   messageSize msg =
-    (if msg.doubleValueValue == 0 then 0 else archFixed64Size)
+    (if isDefaultDouble msg.doubleValueValue then 0 else archFixed64Size)
       + unknownFieldsSize msg.doubleValueUnknownFields
 
 
@@ -139,7 +143,7 @@ instance MessageDecode DoubleValue where
         withTagM
           (pure (DoubleValue {doubleValueValue = acc_0, doubleValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 1 -> do
                 v <- decodeFieldDouble
                 loop v acc_unknown_
               _ -> do
@@ -174,20 +178,11 @@ instance IsMessage DoubleValue
 
 
 instance Aeson.ToJSON DoubleValue where
-  toJSON msg =
-    jsonObject
-      [ "value" .=: msg.doubleValueValue
-      ]
+  toJSON (DoubleValue value _) = PJ.protoDoubleToJSON value
 
 
 instance Aeson.FromJSON DoubleValue where
-  parseJSON = Aeson.withObject "DoubleValue" $ \obj -> do
-    fld_doubleValueValue <- parseFieldMaybe obj "value"
-    pure
-      defaultDoubleValue
-        { doubleValueValue = maybe (doubleValueValue defaultDoubleValue) id fld_doubleValueValue
-        , doubleValueUnknownFields = []
-        }
+  parseJSON json = flip DoubleValue [] <$> PJ.protoDoubleFromJSON json
 
 
 instance Hashable DoubleValue where
@@ -202,7 +197,7 @@ instance Proto.Extension.HasExtensions DoubleValue where
 instance Semigroup DoubleValue where
   a <> b =
     DoubleValue
-      { doubleValueValue = if b.doubleValueValue == 0 then a.doubleValueValue else b.doubleValueValue
+      { doubleValueValue = if isDefaultDouble b.doubleValueValue then a.doubleValueValue else b.doubleValueValue
       , doubleValueUnknownFields = a.doubleValueUnknownFields <> b.doubleValueUnknownFields
       }
 
@@ -229,13 +224,13 @@ defaultFloatValue =
 
 instance MessageEncode FloatValue where
   buildMessage msg =
-    (if msg.floatValueValue == 0 then mempty else archFloat 13 msg.floatValueValue)
+    (if isDefaultFloat msg.floatValueValue then mempty else archFloat 13 msg.floatValueValue)
       <> encodeUnknownFields msg.floatValueUnknownFields
 
 
 instance MessageSize FloatValue where
   messageSize msg =
-    (if msg.floatValueValue == 0 then 0 else archFixed32Size)
+    (if isDefaultFloat msg.floatValueValue then 0 else archFixed32Size)
       + unknownFieldsSize msg.floatValueUnknownFields
 
 
@@ -247,7 +242,7 @@ instance MessageDecode FloatValue where
         withTagM
           (pure (FloatValue {floatValueValue = acc_0, floatValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 5 -> do
                 v <- decodeFieldFloat
                 loop v acc_unknown_
               _ -> do
@@ -282,20 +277,11 @@ instance IsMessage FloatValue
 
 
 instance Aeson.ToJSON FloatValue where
-  toJSON msg =
-    jsonObject
-      [ "value" .=: msg.floatValueValue
-      ]
+  toJSON (FloatValue value _) = PJ.protoFloatToJSON value
 
 
 instance Aeson.FromJSON FloatValue where
-  parseJSON = Aeson.withObject "FloatValue" $ \obj -> do
-    fld_floatValueValue <- parseFieldMaybe obj "value"
-    pure
-      defaultFloatValue
-        { floatValueValue = maybe (floatValueValue defaultFloatValue) id fld_floatValueValue
-        , floatValueUnknownFields = []
-        }
+  parseJSON json = flip FloatValue [] <$> PJ.protoFloatFromJSON json
 
 
 instance Hashable FloatValue where
@@ -310,7 +296,7 @@ instance Proto.Extension.HasExtensions FloatValue where
 instance Semigroup FloatValue where
   a <> b =
     FloatValue
-      { floatValueValue = if b.floatValueValue == 0 then a.floatValueValue else b.floatValueValue
+      { floatValueValue = if isDefaultFloat b.floatValueValue then a.floatValueValue else b.floatValueValue
       , floatValueUnknownFields = a.floatValueUnknownFields <> b.floatValueUnknownFields
       }
 
@@ -355,7 +341,7 @@ instance MessageDecode Int64Value where
         withTagM
           (pure (Int64Value {int64ValueValue = acc_0, int64ValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 0 -> do
                 v <- (fromIntegral <$> decodeFieldVarint)
                 loop v acc_unknown_
               _ -> do
@@ -390,20 +376,11 @@ instance IsMessage Int64Value
 
 
 instance Aeson.ToJSON Int64Value where
-  toJSON msg =
-    jsonObject
-      [ "value" .=: msg.int64ValueValue
-      ]
+  toJSON (Int64Value value _) = PJ.protoInt64ToJSON value
 
 
 instance Aeson.FromJSON Int64Value where
-  parseJSON = Aeson.withObject "Int64Value" $ \obj -> do
-    fld_int64ValueValue <- parseFieldMaybe obj "value"
-    pure
-      defaultInt64Value
-        { int64ValueValue = maybe (int64ValueValue defaultInt64Value) id fld_int64ValueValue
-        , int64ValueUnknownFields = []
-        }
+  parseJSON json = flip Int64Value [] <$> PJ.protoInt64FromJSON json
 
 
 instance Hashable Int64Value where
@@ -463,7 +440,7 @@ instance MessageDecode UInt64Value where
         withTagM
           (pure (UInt64Value {uInt64ValueValue = acc_0, uInt64ValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 0 -> do
                 v <- decodeFieldVarint
                 loop v acc_unknown_
               _ -> do
@@ -498,20 +475,11 @@ instance IsMessage UInt64Value
 
 
 instance Aeson.ToJSON UInt64Value where
-  toJSON msg =
-    jsonObject
-      [ "value" .=: msg.uInt64ValueValue
-      ]
+  toJSON (UInt64Value value _) = PJ.protoWord64ToJSON value
 
 
 instance Aeson.FromJSON UInt64Value where
-  parseJSON = Aeson.withObject "UInt64Value" $ \obj -> do
-    fld_uInt64ValueValue <- parseFieldMaybe obj "value"
-    pure
-      defaultUInt64Value
-        { uInt64ValueValue = maybe (uInt64ValueValue defaultUInt64Value) id fld_uInt64ValueValue
-        , uInt64ValueUnknownFields = []
-        }
+  parseJSON json = flip UInt64Value [] <$> PJ.protoWord64FromJSON json
 
 
 instance Hashable UInt64Value where
@@ -571,7 +539,7 @@ instance MessageDecode Int32Value where
         withTagM
           (pure (Int32Value {int32ValueValue = acc_0, int32ValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 0 -> do
                 v <- (fromIntegral <$> decodeFieldVarint)
                 loop v acc_unknown_
               _ -> do
@@ -606,20 +574,11 @@ instance IsMessage Int32Value
 
 
 instance Aeson.ToJSON Int32Value where
-  toJSON msg =
-    jsonObject
-      [ "value" .=: msg.int32ValueValue
-      ]
+  toJSON (Int32Value value _) = Aeson.toJSON value
 
 
 instance Aeson.FromJSON Int32Value where
-  parseJSON = Aeson.withObject "Int32Value" $ \obj -> do
-    fld_int32ValueValue <- parseFieldMaybe obj "value"
-    pure
-      defaultInt32Value
-        { int32ValueValue = maybe (int32ValueValue defaultInt32Value) id fld_int32ValueValue
-        , int32ValueUnknownFields = []
-        }
+  parseJSON json = flip Int32Value [] <$> PJ.protoInt32FromJSON json
 
 
 instance Hashable Int32Value where
@@ -679,7 +638,7 @@ instance MessageDecode UInt32Value where
         withTagM
           (pure (UInt32Value {uInt32ValueValue = acc_0, uInt32ValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 0 -> do
                 v <- (fromIntegral <$> decodeFieldVarint)
                 loop v acc_unknown_
               _ -> do
@@ -714,20 +673,11 @@ instance IsMessage UInt32Value
 
 
 instance Aeson.ToJSON UInt32Value where
-  toJSON msg =
-    jsonObject
-      [ "value" .=: msg.uInt32ValueValue
-      ]
+  toJSON (UInt32Value value _) = Aeson.toJSON value
 
 
 instance Aeson.FromJSON UInt32Value where
-  parseJSON = Aeson.withObject "UInt32Value" $ \obj -> do
-    fld_uInt32ValueValue <- parseFieldMaybe obj "value"
-    pure
-      defaultUInt32Value
-        { uInt32ValueValue = maybe (uInt32ValueValue defaultUInt32Value) id fld_uInt32ValueValue
-        , uInt32ValueUnknownFields = []
-        }
+  parseJSON json = flip UInt32Value [] <$> PJ.protoWord32FromJSON json
 
 
 instance Hashable UInt32Value where
@@ -787,7 +737,7 @@ instance MessageDecode BoolValue where
         withTagM
           (pure (BoolValue {boolValueValue = acc_0, boolValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 0 -> do
                 v <- decodeFieldBool
                 loop v acc_unknown_
               _ -> do
@@ -822,20 +772,11 @@ instance IsMessage BoolValue
 
 
 instance Aeson.ToJSON BoolValue where
-  toJSON msg =
-    jsonObject
-      [ "value" .=: msg.boolValueValue
-      ]
+  toJSON (BoolValue value _) = Aeson.toJSON value
 
 
 instance Aeson.FromJSON BoolValue where
-  parseJSON = Aeson.withObject "BoolValue" $ \obj -> do
-    fld_boolValueValue <- parseFieldMaybe obj "value"
-    pure
-      defaultBoolValue
-        { boolValueValue = maybe (boolValueValue defaultBoolValue) id fld_boolValueValue
-        , boolValueUnknownFields = []
-        }
+  parseJSON json = flip BoolValue [] <$> Aeson.parseJSON json
 
 
 instance Hashable BoolValue where
@@ -895,7 +836,7 @@ instance MessageDecode StringValue where
         withTagM
           (pure (StringValue {stringValueValue = acc_0, stringValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 2 -> do
                 v <- decodeFieldString
                 loop v acc_unknown_
               _ -> do
@@ -930,20 +871,11 @@ instance IsMessage StringValue
 
 
 instance Aeson.ToJSON StringValue where
-  toJSON msg =
-    jsonObject
-      [ "value" .=: msg.stringValueValue
-      ]
+  toJSON (StringValue value _) = Aeson.toJSON value
 
 
 instance Aeson.FromJSON StringValue where
-  parseJSON = Aeson.withObject "StringValue" $ \obj -> do
-    fld_stringValueValue <- parseFieldMaybe obj "value"
-    pure
-      defaultStringValue
-        { stringValueValue = maybe (stringValueValue defaultStringValue) id fld_stringValueValue
-        , stringValueUnknownFields = []
-        }
+  parseJSON json = flip StringValue [] <$> Aeson.parseJSON json
 
 
 instance Hashable StringValue where
@@ -1003,7 +935,7 @@ instance MessageDecode BytesValue where
         withTagM
           (pure (BytesValue {bytesValueValue = acc_0, bytesValueUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 2 -> do
                 v <- decodeFieldBytes
                 loop v acc_unknown_
               _ -> do
@@ -1038,20 +970,11 @@ instance IsMessage BytesValue
 
 
 instance Aeson.ToJSON BytesValue where
-  toJSON msg =
-    jsonObject
-      [ bytesFieldToJSON "value" msg.bytesValueValue
-      ]
+  toJSON (BytesValue value _) = PJ.protoBytesToJSON value
 
 
 instance Aeson.FromJSON BytesValue where
-  parseJSON = Aeson.withObject "BytesValue" $ \obj -> do
-    fld_bytesValueValue <- parseBytesFieldMaybe obj "value"
-    pure
-      defaultBytesValue
-        { bytesValueValue = maybe (bytesValueValue defaultBytesValue) id fld_bytesValueValue
-        , bytesValueUnknownFields = []
-        }
+  parseJSON json = flip BytesValue [] <$> PJ.protoBytesFromJSON json
 
 
 instance Hashable BytesValue where

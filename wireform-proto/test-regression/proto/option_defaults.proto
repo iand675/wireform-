@@ -1,0 +1,27 @@
+syntax = "proto3";
+package wireform.option_fixture;
+
+message OptionDefaults {
+  int32 number = 1;
+  bool flag = 2;
+  string label = 3;
+  optional int32 explicit_zero = 4;
+  map<string, int32> indexed = 5;
+  float signed_zero = 6;
+  DefaultChild empty = 7;
+  map<int32, DefaultChild> messages = 8;
+  map<bool, DefaultChoice> choices = 9;
+  DefaultChoice choice = 10;
+  repeated int32 repeat_zero = 11;
+  oneof variant {
+    uint64 explicit_arm = 12;
+  }
+  double positive_zero = 13;
+  float fractional_negative_zero = 14;
+}
+
+message DefaultChild {}
+
+enum DefaultChoice {
+  DEFAULT_CHOICE_UNSPECIFIED = 0;
+}

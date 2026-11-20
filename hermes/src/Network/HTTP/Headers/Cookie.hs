@@ -21,7 +21,8 @@ module Network.HTTP.Headers.Cookie (
   renderCookie,
 ) where
 
-import Control.Monad.Combinators (sepBy)
+import qualified Data.ByteString as BS
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
@@ -31,7 +32,7 @@ import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | A single cookie name-value pair
+-- | A single cookie pair. The value includes any surrounding double quotes.
 data CookiePair = CookiePair
   { cookieName :: !ST.ShortText
   , cookieValue :: !ST.ShortText
@@ -39,7 +40,7 @@ data CookiePair = CookiePair
   deriving stock (Eq, Show)
 
 
--- | Cookie header containing one or more cookie pairs
+-- | Cookie pairs in wire order. An empty field is represented by an empty list.
 newtype Cookie = Cookie {cookiePairs :: [CookiePair]}
   deriving stock (Eq, Show)
 
@@ -50,13 +51,11 @@ instance KnownHeader Cookie where
   type Direction Cookie = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser cookieParser header of
-      OK cookie "" -> Right cookie
-      OK _ rest -> Left $ "Unconsumed input after parsing Cookie header: " <> show rest
-      Fail -> Left "Failed to parse Cookie header"
-      Err e -> Left e
+  parseFromHeaders _ headers@(_ :| []) = parseSingleFieldLine "Cookie" cookieParser headers
+  -- RFC 9113 §8.2.3 and RFC 9114 §4.2.1 join split fields with "; ".
+  -- A semicolon cannot occur inside a pair, including a quoted value.
+  parseFromHeaders _ headers =
+    parseSingleFieldLine "Cookie" cookieParser (BS.intercalate "; " (NE.toList headers) :| [])
 
 
   renderToHeaders _ = M.toStrictByteString . renderCookie
@@ -69,12 +68,16 @@ cookiePairParser :: ParserT st String CookiePair
 cookiePairParser = do
   name <- rfc9110Token
   $(char '=')
-  value <- rfc9110Token <|> quotedString
+  value <- shortASCIIFromParser_ cookieValueBytes
   pure $ CookiePair name value
+{-# INLINE cookiePairParser #-}
 
 
 cookieParser :: ParserT st String Cookie
-cookieParser = Cookie <$> (cookiePairParser `sepBy` (ows *> $(char ';') *> ows))
+cookieParser = Cookie <$> (pairs <|> pure [])
+  where
+    pairs = (:) <$> cookiePairParser <*> many (ows *> $(char ';') *> ows *> cookiePairParser)
+{-# INLINE cookieParser #-}
 
 
 renderCookiePair :: CookiePair -> M.Builder
@@ -82,4 +85,7 @@ renderCookiePair (CookiePair name value) = shortText name <> "=" <> shortText va
 
 
 renderCookie :: Cookie -> M.Builder
-renderCookie (Cookie pairs) = M.intersperse "; " (map renderCookiePair pairs)
+renderCookie (Cookie []) = mempty
+renderCookie (Cookie (first : rest)) = renderCookiePair first <> foldMap renderNext rest
+  where
+    renderNext pair = "; " <> renderCookiePair pair

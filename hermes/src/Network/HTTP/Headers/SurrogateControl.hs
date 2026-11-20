@@ -1,61 +1,135 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 {- |
-@Surrogate-Control@ — Edge Architecture (Surrogate/1.0) response header by
-which an origin server controls the behaviour of downstream surrogates
-(edge caches \/ CDN nodes), analogous to @Cache-Control@.
+@Surrogate-Control@ carries processing and cache directives for edge
+surrogates. A directive may include an ordered list of device tokens
+that identify its recipients in @Surrogate-Capability@.
 
-== Grammar (Edge Architecture Specification §2.2)
+The codec checks the defined directive arguments, including the optional
+freshness extension in @max-age@ and the ordered capabilities in @content@.
+Extensions retain their unquoted argument, with opaque quoted bytes mapped
+one-for-one to Latin-1 code points. The typed projection also recognizes
+the stale-serving delay directives used by Fastly.
 
-@
-Surrogate-Control = 1#directive
-directive         = directive-name [ \"=\" ( token \/ quoted-string ) ]
-directive-name    = token
-@
-
-Common directives include @max-age@, @no-store@, @no-store-remote@ and
-@content=\"ESI\/1.0\"@.  Each directive is preserved as a name plus an optional
-raw value (light structure over a raw value); on render the value is emitted
-bare when it is a valid token and quoted otherwise.
-
-See <https://www.w3.org/TR/edge-arch> for the specification.
+Spec: <https://www.w3.org/TR/edge-arch/>
 
 See also: "Network.HTTP.Headers.SurrogateCapability", "Network.HTTP.Headers.CDNCacheControl", "Network.HTTP.Headers.CacheControl".
 -}
 module Network.HTTP.Headers.SurrogateControl (
   SurrogateControl (..),
-  SurrogateControlDirective (..),
+  SurrogateControlDirective (SurrogateControlDirective, TargetedSurrogateControlDirective, surrogateControlName, surrogateControlValue),
+  SurrogateControlKind (..),
+  SurrogateFreshness (..),
+  surrogateControlTargets,
+  surrogateControlKind,
+  surrogateControlFromKind,
   surrogateControlParser,
   renderSurrogateControl,
 ) where
 
-import Control.Monad.Combinators (option)
-import qualified Data.CharSet as CharSet
+import Data.Bits ((.|.))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
+import Data.Char (toLower)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Network.HTTP.Grammar.Parser
+import Network.HTTP.Grammar.Rendering (renderHttpQuotedString, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSurrogateControl)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.SurrogateCapability (SurrogateFeature, parseSurrogateFeatureSet, renderSurrogateFeatureSet, surrogateCapabilitySetParser)
 
 
--- | A @Surrogate-Control@ value: a non-empty list of control directives.
 newtype SurrogateControl = SurrogateControl
   { surrogateControlDirectives :: NonEmpty SurrogateControlDirective
   }
   deriving stock (Eq, Show)
 
 
--- | A single control directive: a name with an optional value.
-data SurrogateControlDirective = SurrogateControlDirective
-  { surrogateControlName :: !ST.ShortText
-  -- ^ The directive name (token), e.g. @max-age@ or @no-store@.
-  , surrogateControlValue :: !(Maybe ST.ShortText)
-  -- ^ The optional directive value (raw token-or-quoted contents).
+data SurrogateControlDirective
+  = SurrogateControlDirective
+      { surrogateControlName :: !ST.ShortText
+      , surrogateControlValue :: !(Maybe ST.ShortText)
+      }
+  | TargetedSurrogateControlDirective
+      { surrogateControlName :: !ST.ShortText
+      , surrogateControlValue :: !(Maybe ST.ShortText)
+      , targetedSurrogateDevices :: !(NonEmpty ST.ShortText)
+      }
+  deriving stock (Eq, Show)
+
+
+{- | A directive's recognized argument. Freshness and staleness delays
+are measured in seconds and saturate at the largest representable 'Word'.
+-}
+data SurrogateControlKind
+  = SurrogateNoStore
+  | SurrogateNoStoreRemote
+  | SurrogateMaxAge {-# UNPACK #-} !SurrogateFreshness
+  | SurrogateContent !(NonEmpty SurrogateFeature)
+  | SurrogateStaleWhileRevalidate {-# UNPACK #-} !Word
+  | SurrogateStaleIfError {-# UNPACK #-} !Word
+  | SurrogateExtension !ST.ShortText !(Maybe ST.ShortText)
+  deriving stock (Eq, Show)
+
+
+data SurrogateFreshness = SurrogateFreshness
+  { surrogateFreshSeconds :: {-# UNPACK #-} !Word
+  , surrogateFreshnessExtension :: {-# UNPACK #-} !Word
   }
   deriving stock (Eq, Show)
+
+
+-- | Target device tokens in wire order. An empty list denotes a global directive.
+surrogateControlTargets :: SurrogateControlDirective -> [ST.ShortText]
+surrogateControlTargets SurrogateControlDirective {} = []
+surrogateControlTargets (TargetedSurrogateControlDirective _ _ targets) = NE.toList targets
+
+
+{- | Interpret the argument. An invalid argument constructed by hand returns
+'Left'. Unknown directives retain their argument and original name.
+-}
+surrogateControlKind :: SurrogateControlDirective -> Either String SurrogateControlKind
+surrogateControlKind directive =
+  case foldedName (ST.toByteString (surrogateControlName directive)) of
+    "no-store" -> flag SurrogateNoStore
+    "no-store-remote" -> flag SurrogateNoStoreRemote
+    "max-age" -> argument (parseFieldLine "Surrogate-Control max-age" maxAge . ST.toByteString)
+    "content" -> argument (fmap SurrogateContent . parseSurrogateFeatureSet)
+    "stale-while-revalidate" -> stale SurrogateStaleWhileRevalidate
+    "stale-if-error" -> stale SurrogateStaleIfError
+    _ -> Right (SurrogateExtension (surrogateControlName directive) value)
+  where
+    value = surrogateControlValue directive
+    flag kind = case value of
+      Nothing -> Right kind
+      Just _ -> Left "Surrogate-Control flag contains an argument"
+    argument readValue = maybe (Left "Missing Surrogate-Control argument") readValue value
+    stale wrap = argument (fmap wrap . parseFieldLine "Surrogate-Control stale delay" delay . ST.toByteString)
+
+
+-- | Build a directive from its typed argument and ordered device targets.
+surrogateControlFromKind :: SurrogateControlKind -> [ST.ShortText] -> SurrogateControlDirective
+surrogateControlFromKind kind targets = case kind of
+  SurrogateNoStore -> make "no-store" Nothing
+  SurrogateNoStoreRemote -> make "no-store-remote" Nothing
+  SurrogateMaxAge (SurrogateFreshness fresh additional) ->
+    valued "max-age" (M.wordDec fresh <> if additional == 0 then mempty else M.char7 '+' <> M.wordDec additional)
+  SurrogateContent features -> valued "content" (renderSurrogateFeatureSet features)
+  SurrogateStaleWhileRevalidate seconds -> valued "stale-while-revalidate" (M.wordDec seconds)
+  SurrogateStaleIfError seconds -> valued "stale-if-error" (M.wordDec seconds)
+  SurrogateExtension name value -> make name value
+  where
+    make name value = case targets of
+      [] -> SurrogateControlDirective name value
+      first : rest -> TargetedSurrogateControlDirective name value (first :| rest)
+    valued name = make name . Just . STU.fromByteStringUnsafe . M.toStrictByteString
 
 
 instance KnownHeader SurrogateControl where
@@ -64,11 +138,8 @@ instance KnownHeader SurrogateControl where
   type Direction SurrogateControl = 'Response
 
 
-  parseFromHeaders _ headers = case runParser surrogateControlParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Surrogate-Control header: " <> show rest
-    Fail -> Left "Failed to parse Surrogate-Control header"
-    Err e -> Left e
+  parseFromHeaders _ fields =
+    SurrogateControl <$> (parseListFieldLines "Surrogate-Control" directiveList fields >>= requireNonEmptyList "Surrogate-Control")
 
 
   renderToHeaders _ = M.toStrictByteString . renderSurrogateControl
@@ -78,45 +149,74 @@ instance KnownHeader SurrogateControl where
 
 
 surrogateControlParser :: ParserT st String SurrogateControl
-surrogateControlParser = do
-  ows
-  first <- directiveParser
-  rest <- many (ows *> $(char ',') *> ows *> directiveParser)
-  ows
-  pure (SurrogateControl (first :| rest))
+surrogateControlParser =
+  directiveList >>= either err (pure . SurrogateControl) . requireNonEmptyList "Surrogate-Control"
+
+
+directiveList :: ParserT st String [SurrogateControlDirective]
+directiveList = httpList directiveParser
 
 
 directiveParser :: ParserT st String SurrogateControlDirective
 directiveParser = do
-  name <- rfc9110Token
-  value <- option Nothing (Just <$> ($(char '=') *> (rfc9110Token <|> quotedString)))
-  pure (SurrogateControlDirective name value)
+  nameBytes <- rfc9110TokenBS
+  let name = STU.fromByteStringUnsafe nameBytes
+  ows
+  value <- case foldedName nameBytes of
+    "no-store" -> pure Nothing
+    "no-store-remote" -> pure Nothing
+    "max-age" -> Just <$> (equals *> shortASCIIFromParser_ maxAge)
+    "content" -> Just <$> (equals *> surrogateCapabilitySetParser)
+    "stale-while-revalidate" -> numeric
+    "stale-if-error" -> numeric
+    _ -> withOption equals (const (Just <$> (rfc9110Token <|> (ST.fromText <$> httpQuotedString)))) (pure Nothing)
+  targets <- many (ows *> $(char ';') *> ows *> rfc9110Token)
+  pure $ case NE.nonEmpty targets of
+    Nothing -> SurrogateControlDirective name value
+    Just devices -> TargetedSurrogateControlDirective name value devices
+  where
+    equals = $(char '=') *> ows
+    numeric = Just <$> (equals *> shortASCIIFromParser_ delay)
+
+
+foldedName :: ByteString -> ByteString
+foldedName name
+  | BSC.any (\c -> c >= 'A' && c <= 'Z') name = BSC.map toLower name
+  | otherwise = name
+{-# INLINE foldedName #-}
+
+
+delay :: ParserT st String Word
+delay = saturatingDeltaSeconds maxBound
+{-# INLINE delay #-}
+
+
+maxAge :: ParserT st String SurrogateControlKind
+maxAge = SurrogateMaxAge <$> (SurrogateFreshness <$> delay <*> withOption $(char '+') (const delay) (pure 0))
+{-# INLINE maxAge #-}
 
 
 renderSurrogateControl :: SurrogateControl -> M.Builder
-renderSurrogateControl (SurrogateControl directives) =
-  M.intersperse ", " (map renderDirective (NE.toList directives))
+renderSurrogateControl (SurrogateControl (first :| rest)) =
+  renderDirective first <> foldMap ((", " <>) . renderDirective) rest
+{-# INLINE renderSurrogateControl #-}
 
 
 renderDirective :: SurrogateControlDirective -> M.Builder
-renderDirective (SurrogateControlDirective name value) =
-  shortText name <> case value of
-    Nothing -> mempty
-    Just v
-      | isToken v -> M.char7 '=' <> shortText v
-      | otherwise -> M.char7 '=' <> renderQuotedString v
-
-
--- | True when the text is a non-empty RFC 9110 token (so it needs no quoting).
-isToken :: ST.ShortText -> Bool
-isToken t = not (ST.null t) && ST.all (`CharSet.member` tokenCharSet) t
-
-
--- | Render a quoted-string, escaping embedded DQUOTE and backslash.
-renderQuotedString :: ST.ShortText -> M.Builder
-renderQuotedString t = M.char7 '"' <> ST.foldl' escape mempty t <> M.char7 '"'
+renderDirective directive =
+  shortText name
+    <> maybe mempty (\v -> M.char7 '=' <> renderValue v) (surrogateControlValue directive)
+    <> foldMap (\target -> M.char7 ';' <> shortText target) (surrogateControlTargets directive)
   where
-    escape b = \case
-      '"' -> b <> M.char7 '\\' <> M.char7 '"'
-      '\\' -> b <> M.char7 '\\' <> M.char7 '\\'
-      c -> b <> M.char7 c
+    name = surrogateControlName directive
+    renderValue v
+      | not (SBS.null bytes) && SBS.all (isTokenChar . toEnum . fromIntegral) bytes && not contentName = M.shortByteString bytes
+      | SBS.all plainQuotedByte bytes = M.char7 '"' <> M.shortByteString bytes <> M.char7 '"'
+      | otherwise = renderHttpQuotedString (ST.toText v)
+      where
+        bytes = ST.toShortByteString v
+    contentName =
+      let bytes = ST.toShortByteString name
+      in SBS.length bytes == 7 && SBSI.unsafeIndex bytes 0 .|. 32 == 99 && foldedName (ST.toByteString name) == "content"
+    plainQuotedByte byte = byte == 9 || (byte >= 32 && byte < 127 && byte /= 34 && byte /= 92)
+{-# INLINE renderDirective #-}

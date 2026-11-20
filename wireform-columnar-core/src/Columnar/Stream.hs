@@ -642,13 +642,12 @@ iterIOMap f = go
           Right (IterIOYield (f a) (go next))
 
 
--- | Take at most @n@ elements.
+-- | Take at most @n@ elements, without stepping the remaining iterator.
 iterIOTake :: Int -> IterIO a -> IterIO a
-iterIOTake n0 it0
-  | n0 <= 0 = IterIO (pure (Right IterIODone))
-  | otherwise = go n0 it0
+iterIOTake = go
   where
-    go n (IterIO step) = IterIO $ do
+    go !n _ | n <= 0 = IterIO (pure (Right IterIODone))
+    go !n (IterIO step) = IterIO $ do
       r <- step
       pure $ case r of
         Left e -> Left e

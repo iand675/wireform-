@@ -21,24 +21,31 @@ See also: "Network.HTTP.Headers.ContentDigest", "Network.HTTP.Headers.Digest", "
 -}
 module Network.HTTP.Headers.ContentMD5 (
   ContentMD5 (..),
+  mkContentMD5,
   contentMD5Parser,
   renderContentMD5,
 ) where
 
-import Data.ByteArray.Encoding (Base (Base64), convertFromBase, convertToBase)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString as BS
+import Data.List.NonEmpty (NonEmpty (..))
+import Network.HTTP.Grammar.Parser
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentMD5)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
+import Wireform.Base64 (encodeBase64)
 
 
 -- | The decoded 128-bit (16-byte) MD5 digest of the message body.
 newtype ContentMD5 = ContentMD5 {contentMD5Digest :: ByteString}
   deriving stock (Eq, Show)
+
+
+-- | Construct the field from exactly sixteen digest octets.
+mkContentMD5 :: ByteString -> Maybe ContentMD5
+mkContentMD5 bytes
+  | BS.length bytes == 16 = Just (ContentMD5 bytes)
+  | otherwise = Nothing
 
 
 instance KnownHeader ContentMD5 where
@@ -47,15 +54,17 @@ instance KnownHeader ContentMD5 where
   type Direction ContentMD5 = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser contentMD5Parser (NE.head headers) of
-    OK v rest
-      | B.null (dropOws rest) -> Right v
-      | otherwise -> Left ("Unconsumed input after parsing Content-MD5: " <> show rest)
-    Fail -> Left "Failed to parse Content-MD5 header"
-    Err e -> Left e
+  parseFromHeaders _ (wire :| []) =
+    maybe (Left "Invalid Content-MD5 digest") (Right . ContentMD5) $
+      decodeFixedBase64 16 (BS.dropWhileEnd isFieldSpace (BS.dropWhile isFieldSpace wire))
     where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
-  renderToHeaders _ = M.toStrictByteString . renderContentMD5
+      isFieldSpace byte = byte == 32 || byte == 9
+  parseFromHeaders _ _ = Left "Multiple Content-MD5 field lines"
+
+
+  renderToHeaders _ = encodeBase64 . contentMD5Digest
+
+
   headerName _ = hContentMD5
 
 
@@ -64,15 +73,7 @@ instance KnownHeader ContentMD5 where
 -- ---------------------------------------------------------------------------
 
 contentMD5Parser :: ParserT st String ContentMD5
-contentMD5Parser = do
-  ows
-  withByteString (skipSome (skipSatisfyAscii (`CharSet.member` base64CharSet))) $ \_ bs ->
-    case convertFromBase Base64 bs of
-      Left e -> err e
-      Right ok -> pure (ContentMD5 ok)
-  where
-    base64CharSet =
-      CharSet.range 'A' 'Z' <> CharSet.range 'a' 'z' <> CharSet.range '0' '9' <> "+/="
+contentMD5Parser = ows *> (ContentMD5 <$> fixedBase64Bytes 16)
 
 
 -- ---------------------------------------------------------------------------
@@ -80,4 +81,4 @@ contentMD5Parser = do
 -- ---------------------------------------------------------------------------
 
 renderContentMD5 :: ContentMD5 -> M.Builder
-renderContentMD5 (ContentMD5 bs) = M.byteString (convertToBase Base64 bs)
+renderContentMD5 = M.byteString . encodeBase64 . contentMD5Digest

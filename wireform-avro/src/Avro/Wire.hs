@@ -44,6 +44,7 @@ module Avro.Wire (
   avroDecodeDouble,
   avroDecodeBytes,
   avroDecodeString,
+  avroDecodeBlockEnd,
 
   -- * Decode result
   AvroDecodeResult (..),
@@ -327,6 +328,20 @@ avroDecodeLong !bs !(I# off) =
 {-# INLINE avroDecodeLong #-}
 
 
+{- | Decode the byte size after a negative array or map count. Returns the
+absolute end of the block and the offset of its first payload byte.
+-}
+avroDecodeBlockEnd :: ByteString -> Int -> AvroDecodeResult Int
+avroDecodeBlockEnd bs off =
+  case avroDecodeLong bs off of
+    AvroDecodeOK size start
+      | size < 0 -> AvroDecodeFail "Avro: negative collection block size"
+      | size > fromIntegral (BS.length bs - start) -> AvroDecodeFail "Avro: collection block exceeds input"
+      | otherwise -> AvroDecodeOK (start + fromIntegral size) start
+    AvroDecodeFail e -> AvroDecodeFail e
+{-# INLINE avroDecodeBlockEnd #-}
+
+
 -- | Decode Avro @float@: 4 bytes little-endian.
 avroDecodeFloat :: ByteString -> Int -> AvroDecodeResult Float
 avroDecodeFloat !bs !off
@@ -351,14 +366,12 @@ avroDecodeDouble !bs !off
 avroDecodeBytes :: ByteString -> Int -> AvroDecodeResult ByteString
 avroDecodeBytes !bs !off =
   case avroDecodeLong bs off of
-    AvroDecodeOK !lenI64 !off' ->
-      let !len = fromIntegral lenI64 :: Int
-      in if len < 0
-           then AvroDecodeFail "avroDecodeBytes: negative length"
-           else
-             if off' + len > BS.length bs
-               then AvroDecodeFail "avroDecodeBytes: unexpected end of input"
-               else AvroDecodeOK (BSU.unsafeTake len (BSU.unsafeDrop off' bs)) (off' + len)
+    AvroDecodeOK lenI64 off'
+      | lenI64 < 0 -> AvroDecodeFail "avroDecodeBytes: negative length"
+      | lenI64 > fromIntegral (BS.length bs - off') -> AvroDecodeFail "avroDecodeBytes: unexpected end of input"
+      | otherwise ->
+          let !len = fromIntegral lenI64
+          in AvroDecodeOK (BSU.unsafeTake len (BSU.unsafeDrop off' bs)) (off' + len)
     AvroDecodeFail e -> AvroDecodeFail e
 {-# INLINE avroDecodeBytes #-}
 

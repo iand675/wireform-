@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9530 §3 @Repr-Digest@ — integrity digest(s) computed over the
 selected /representation/ (the content together with the
@@ -25,16 +23,14 @@ See also: "Network.HTTP.Headers.ContentDigest", "Network.HTTP.Headers.WantReprDi
 module Network.HTTP.Headers.ReprDigest (
   ReprDigest (..),
   ReprDigestEntry (..),
+  reprDigestEntryList,
   reprDigestParser,
   renderReprDigest,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
 import Data.List.NonEmpty (NonEmpty)
-import Data.Semigroup (sconcat)
+import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hReprDigest)
@@ -54,10 +50,25 @@ data ReprDigestEntry = ReprDigestEntry
   deriving stock (Eq, Show)
 
 
--- | A non-empty dictionary of representation digests.
-newtype ReprDigest = ReprDigest {reprDigestEntries :: NonEmpty ReprDigestEntry}
+{- | A dictionary with zero or more members. Use 'reprDigestEntryList' to
+read both forms.
+-}
+data ReprDigest
+  = ReprDigest {reprDigestEntries :: !(NonEmpty ReprDigestEntry)}
+  | ReprDigestEmpty
   deriving stock (Eq, Show)
-  deriving newtype (Semigroup)
+
+
+instance Semigroup ReprDigest where
+  ReprDigestEmpty <> other = other
+  other <> ReprDigestEmpty = other
+  ReprDigest first <> ReprDigest second =
+    fromEntries (orderedFieldEntries reprDigestAlgorithm (NE.toList (first <> second)))
+
+
+reprDigestEntryList :: ReprDigest -> [ReprDigestEntry]
+reprDigestEntryList ReprDigestEmpty = []
+reprDigestEntryList (ReprDigest entries) = NE.toList entries
 
 
 instance KnownHeader ReprDigest where
@@ -66,75 +77,40 @@ instance KnownHeader ReprDigest where
   type Direction ReprDigest = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = sconcat <$> traverse runReprDigest headers
-  renderToHeaders _ = pure . M.toStrictByteString . renderReprDigest
+  parseFromHeaders _ fields = parseStructuredFieldDictionary "Repr-Digest" fields >>= fromDictionary
+  renderToHeaders _ ReprDigestEmpty = []
+  renderToHeaders _ value = [M.toStrictByteString (renderReprDigest value)]
+
+
+  omitHeaderValue ReprDigestEmpty = True
+  omitHeaderValue _ = False
+  {-# INLINE omitHeaderValue #-}
+
+
   headerName _ = hReprDigest
 
 
-runReprDigest :: ByteString -> Either String ReprDigest
-runReprDigest bs = case runParser reprDigestParser bs of
-  OK v rest
-    | B.null (dropOws rest) -> Right v
-    | otherwise -> Left ("Unconsumed input after parsing Repr-Digest: " <> show rest)
-  Fail -> Left "Failed to parse Repr-Digest header"
-  Err e -> Left e
-  where
-    dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
-
-
--- ---------------------------------------------------------------------------
--- Parser
--- ---------------------------------------------------------------------------
-
 reprDigestParser :: ParserT st String ReprDigest
-reprDigestParser = do
-  ows
-  ReprDigest <$> (member `sepBy1` (ows *> $(char ',') *> ows))
+reprDigestParser = structuredFieldDictionary >>= either err pure . fromDictionary
+
+
+fromDictionary :: [StructuredFieldDictionaryEntry] -> Either String ReprDigest
+fromDictionary = fmap fromEntries . projectStructuredFieldItems "Repr-Digest" accept ReprDigestEntry
   where
-    member = do
-      k <- sfDictKey
-      $(char '=')
-      v <- sfBinary
-      ps <- rfc8941Parameters
-      pure ReprDigestEntry {reprDigestAlgorithm = k, reprDigestValue = v, reprDigestParameters = ps}
+    accept (Binary value) = Just value
+    accept _ = Nothing
 
 
--- ---------------------------------------------------------------------------
--- Renderer
--- ---------------------------------------------------------------------------
+fromEntries :: [ReprDigestEntry] -> ReprDigest
+fromEntries = maybe ReprDigestEmpty ReprDigest . NE.nonEmpty
+
 
 renderReprDigest :: ReprDigest -> M.Builder
-renderReprDigest = M.intersperse ", " . fmap renderEntry . reprDigestEntries
+renderReprDigest = M.intersperse ", " . map renderEntry . orderedFieldEntries reprDigestAlgorithm . reprDigestEntryList
   where
-    renderEntry (ReprDigestEntry k v ps) =
-      R.shortText k <> M.char7 '=' <> renderSfBinary v <> foldMap renderParam ps
-    renderParam (k, mv) = R.rfc8941Parameter R.IncludeIfEmpty R.rfc8941ItemValue k mv
-
-
--- ---------------------------------------------------------------------------
--- Structured-field helpers
--- ---------------------------------------------------------------------------
-
-{- | RFC 8941 §3.1.2 dictionary @key@:
-@( lcalpha \/ \"*\" ) *( lcalpha \/ DIGIT \/ \"_\" \/ \"-\" \/ \".\" \/ \"*\" )@.
--}
-sfDictKey :: ParserT st e ShortText
-sfDictKey =
-  shortASCIIFromParser_ $
-    skipSatisfyAscii (`CharSet.member` firstChar) *> skipMany (skipSatisfyAscii (`CharSet.member` restChar))
-  where
-    firstChar = CharSet.range 'a' 'z' <> CharSet.singleton '*'
-    restChar = CharSet.range 'a' 'z' <> CharSet.range '0' '9' <> "_-.*"
-
-
-{- | RFC 8941 §3.3.5 sf-binary @\":\" *base64 \":\"@. The shared
-'rfc8941Binary' parser consumes the opening colon and the base64 body
-but leaves the trailing colon in place, so we consume it here.
--}
-sfBinary :: ParserT st String ByteString
-sfBinary = rfc8941Binary <* $(char ':')
-
-
--- | Render bytes as a complete sf-binary, both colons included.
-renderSfBinary :: ByteString -> M.Builder
-renderSfBinary bs = R.rfc8941Binary bs <> M.char7 ':'
+    renderEntry entry =
+      R.shortText (reprDigestAlgorithm entry)
+        <> M.char7 '='
+        <> R.rfc8941Binary (reprDigestValue entry)
+        <> foldMap renderParam (orderedFieldEntries fst (reprDigestParameters entry))
+    renderParam (key, parameter) = R.renderStructuredFieldParameter key (maybe (Boolean True) id parameter)

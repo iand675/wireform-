@@ -1,0 +1,17 @@
+
+==================== Tidy Core ====================
+
+Result size of Tidy Core
+  = {terms: 14, types: 5, coercions: 0, joins: 0/0}
+
+$trModule4 = "main"#
+
+$trModule3 = TrNameS $trModule4
+
+$trModule2 = "Wireform.Builder"#
+
+$trModule1 = TrNameS $trModule2
+
+$trModule = Module $trModule3 $trModule1
+
+

@@ -57,7 +57,7 @@ import Proto.Internal.Encode.Archetype (
   archVarint,
   archVarintSize,
  )
-import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, formatRfc3339, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, parseTimestampRfc3339, protoBytesToJSON, (.=:))
 import Proto.Internal.JSON.Extension qualified as PJExt
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Encode (
@@ -143,10 +143,10 @@ instance MessageDecode Timestamp where
         withTagM
           (pure (Timestamp {timestampSeconds = acc_0, timestampNanos = acc_1, timestampUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 0 -> do
                 v <- (fromIntegral <$> decodeFieldVarint)
                 loop v acc_1 acc_unknown_
-              2 -> do
+              2 | wt == 0 -> do
                 v <- (fromIntegral <$> decodeFieldVarint)
                 loop acc_0 v acc_unknown_
               _ -> do
@@ -193,46 +193,11 @@ instance IsMessage Timestamp
 
 
 instance Aeson.ToJSON Timestamp where
-  toJSON msg =
-    let s = msg.timestampSeconds
-        n = msg.timestampNanos
-        (rawDays, remSec) = s `divMod` 86400
-        (hours, remH) = remSec `divMod` 3600
-        (mins, secs) = remH `divMod` 60
-        z = rawDays + 719468
-        era = (if z >= 0 then z else z - 146096) `div` 146097
-        doe = z - era * 146097
-        yoe = (doe - doe `div` 1460 + doe `div` 36524 - doe `div` 146096) `div` 365
-        y = yoe + era * 400
-        doy = doe - (365 * yoe + yoe `div` 4 - yoe `div` 100)
-        mp = (5 * doy + 2) `div` 153
-        d = doy - (153 * mp + 2) `div` 5 + 1
-        m = mp + (if mp < 10 then 3 else -9)
-        y' = y + (if m <= 2 then 1 else 0)
-        pad2 x = let sx = T.pack (show (abs x)) in if T.length sx < 2 then T.pack "0" <> sx else sx
-        pad4 x = let sx = T.pack (show (abs x)) in T.replicate (4 - T.length sx) (T.pack "0") <> sx
-        pad9 x = let sx = T.pack (show (abs x)) in T.replicate (9 - T.length sx) (T.pack "0") <> sx
-        nanoStr = if n == 0 then T.pack "" else T.pack "." <> dropTrailingZeros (pad9 (fromIntegral n))
-        dropTrailingZeros t = case T.stripSuffix (T.pack "0") t of Just t' -> dropTrailingZeros t'; Nothing -> t
-    in Aeson.String
-        ( pad4 y'
-            <> T.pack "-"
-            <> pad2 (fromIntegral m)
-            <> T.pack "-"
-            <> pad2 (fromIntegral d)
-            <> T.pack "T"
-            <> pad2 hours
-            <> T.pack ":"
-            <> pad2 mins
-            <> T.pack ":"
-            <> pad2 secs
-            <> nanoStr
-            <> T.pack "Z"
-        )
+  toJSON (Timestamp seconds nanos _) = Aeson.String (formatRfc3339 seconds nanos)
 
 
 instance Aeson.FromJSON Timestamp where
-  parseJSON (Aeson.String _) = pure defaultTimestamp
+  parseJSON (Aeson.String t) = either fail pure (parseTimestampRfc3339 (\s n -> Timestamp s n []) t)
   parseJSON _ = fail "Expected RFC 3339 timestamp string"
 
 

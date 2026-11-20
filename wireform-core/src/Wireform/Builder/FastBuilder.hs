@@ -61,6 +61,7 @@ module Wireform.Builder.FastBuilder (
   primMapListBounded,
   primMapListFixed,
   byteString,
+  shortByteString,
   byteStringThreshold,
   byteStringCopy,
   byteStringCopyNoCheck,
@@ -85,6 +86,7 @@ import Data.ByteString.Builder.Prim qualified as P
 import Data.ByteString.Builder.Prim.Internal qualified as PI
 import Data.ByteString.Internal qualified as S
 import Data.ByteString.Lazy qualified as L
+import Data.ByteString.Short.Internal qualified as SBS
 import Data.ByteString.Unsafe qualified as S
 import Data.IORef
 import Data.Semigroup as Sem
@@ -1092,6 +1094,31 @@ primMapListFixed prim = primMapListBounded (PI.toB prim)
 byteString :: S.ByteString -> Builder
 byteString = byteStringThreshold maximalCopySize
 {-# INLINE byteString #-}
+
+
+{- | Copy compact bytes directly into the current output buffer. A fragment
+that does not fit uses the regular byte-string path, including its chunked
+fallback for ring buffers.
+-}
+shortByteString :: SBS.ShortByteString -> Builder
+shortByteString bytes
+  | len == 0 = mempty
+  | otherwise = mkBuilder $ do
+      remaining <- remainingBytes
+      if len <= remaining
+        then do
+          cur <- getCur
+          io (SBS.copyToPtr bytes 0 cur len)
+          setCur (cur `plusPtr` len)
+        else useBuilder (shortByteStringOverflow bytes)
+  where
+    len = SBS.length bytes
+{-# INLINE shortByteString #-}
+
+
+shortByteStringOverflow :: SBS.ShortByteString -> Builder
+shortByteStringOverflow = byteString . SBS.fromShort
+{-# NOINLINE shortByteStringOverflow #-}
 
 
 maximalCopySize :: Int

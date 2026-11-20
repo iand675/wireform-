@@ -39,6 +39,7 @@ module Network.HTTP.Headers.Mason (
   doubleDec,
   word16Dec,
   word32Dec,
+  word64Dec,
 
   -- * Padding helpers
   intDecPadded,
@@ -58,7 +59,7 @@ import qualified Data.Foldable as F
 import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
-import Data.Word (Word16, Word32, Word8)
+import Data.Word (Word16, Word32, Word64, Word8)
 import qualified Wireform.Builder as WB
 import qualified Wireform.Builder.Internal.Prim as WBP
 
@@ -164,6 +165,11 @@ word32Dec = WBP.word32Dec
 {-# INLINE word32Dec #-}
 
 
+word64Dec :: Word64 -> Builder
+word64Dec = WBP.word64Dec
+{-# INLINE word64Dec #-}
+
+
 -- ---------------------------------------------------------------------------
 -- Padding
 -- ---------------------------------------------------------------------------
@@ -174,9 +180,17 @@ formatting where every component is zero-padded.
 -}
 intDecPadded :: Int -> Int -> Builder
 intDecPadded width n =
-  let s = show n
-      pad = replicate (width - length s) '0'
-  in WBP.string7 (pad <> s)
+  let minimumWidth = digitCount n + if n < 0 then 1 else 0
+  in if width > minimumWidth
+       then zeroes (width - minimumWidth) <> intDec n
+       else intDec n
+  where
+    digitCount value
+      | value > -10 && value < 10 = 1
+      | otherwise = 1 + digitCount (value `quot` 10)
+    zeroes count
+      | count <= 0 = mempty
+      | otherwise = char7 '0' <> zeroes (count - 1)
 
 
 -- ---------------------------------------------------------------------------
@@ -184,7 +198,7 @@ intDecPadded width n =
 -- ---------------------------------------------------------------------------
 
 shortByteString :: SBS.ShortByteString -> Builder
-shortByteString = WB.byteString . SBS.fromShort
+shortByteString = WB.shortByteString
 {-# INLINE shortByteString #-}
 
 

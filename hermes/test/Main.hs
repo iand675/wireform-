@@ -16,10 +16,12 @@ import qualified Test.Hermes.ClientCert
 import qualified Test.Hermes.ClientHints
 import qualified Test.Hermes.Conditional
 import qualified Test.Hermes.ContentMeta
+import qualified Test.Hermes.Cookie
 import qualified Test.Hermes.ContentRange
 import qualified Test.Hermes.Cors
 import qualified Test.Hermes.CrossOrigin
 import qualified Test.Hermes.Csp
+import qualified Test.Hermes.Date
 import qualified Test.Hermes.DefactoCorrelation
 import qualified Test.Hermes.DefactoForwarding
 import qualified Test.Hermes.DefactoMisc
@@ -27,6 +29,7 @@ import qualified Test.Hermes.DefactoSecurity
 import qualified Test.Hermes.DeltaEncoding
 import qualified Test.Hermes.Digest
 import qualified Test.Hermes.Expect
+import qualified Test.Hermes.FieldLists
 import qualified Test.Hermes.Forwarded
 import qualified Test.Hermes.Framing
 import qualified Test.Hermes.IPAddress
@@ -34,6 +37,7 @@ import qualified Test.Hermes.Link
 import qualified Test.Hermes.Mailbox
 import qualified Test.Hermes.Memento
 import qualified Test.Hermes.MiscProvisional
+import qualified Test.Hermes.Negotiation
 import qualified Test.Hermes.OAuthDpop
 import qualified Test.Hermes.OData
 import qualified Test.Hermes.ObsoleteContent
@@ -53,10 +57,12 @@ import qualified Test.Hermes.SecurityMisc
 import qualified Test.Hermes.Server
 import qualified Test.Hermes.Signature
 import qualified Test.Hermes.Sse
+import qualified Test.Hermes.StructuredFields
 import qualified Test.Hermes.Surrogate
 import qualified Test.Hermes.TCN
 import qualified Test.Hermes.TokenBinding
 import qualified Test.Hermes.Tracing
+import qualified Test.Hermes.URIReference
 import qualified Test.Hermes.WWWAuthenticate
 import qualified Test.Hermes.WebDavCore
 import qualified Test.Hermes.WebDavExt
@@ -90,10 +96,12 @@ main = do
         , Test.Hermes.ClientHints.tests
         , Test.Hermes.Conditional.tests
         , Test.Hermes.ContentMeta.tests
+        , Test.Hermes.Cookie.tests
         , Test.Hermes.ContentRange.tests
         , Test.Hermes.Cors.tests
         , Test.Hermes.CrossOrigin.tests
         , Test.Hermes.Csp.tests
+        , Test.Hermes.Date.tests
         , Test.Hermes.DefactoCorrelation.tests
         , Test.Hermes.DefactoForwarding.tests
         , Test.Hermes.DefactoMisc.tests
@@ -101,6 +109,7 @@ main = do
         , Test.Hermes.DeltaEncoding.tests
         , Test.Hermes.Digest.tests
         , Test.Hermes.Expect.tests
+        , Test.Hermes.FieldLists.tests
         , Test.Hermes.Forwarded.tests
         , Test.Hermes.Framing.tests
         , Test.Hermes.IPAddress.tests
@@ -108,6 +117,7 @@ main = do
         , Test.Hermes.Mailbox.tests
         , Test.Hermes.Memento.tests
         , Test.Hermes.MiscProvisional.tests
+        , Test.Hermes.Negotiation.tests
         , Test.Hermes.OAuthDpop.tests
         , Test.Hermes.OData.tests
         , Test.Hermes.ObsoleteContent.tests
@@ -127,10 +137,12 @@ main = do
         , Test.Hermes.Server.tests
         , Test.Hermes.Signature.tests
         , Test.Hermes.Sse.tests
+        , Test.Hermes.StructuredFields.tests
         , Test.Hermes.Surrogate.tests
         , Test.Hermes.TCN.tests
         , Test.Hermes.TokenBinding.tests
         , Test.Hermes.Tracing.tests
+        , Test.Hermes.URIReference.tests
         , Test.Hermes.WWWAuthenticate.tests
         , Test.Hermes.WebDavCore.tests
         , Test.Hermes.WebDavExt.tests

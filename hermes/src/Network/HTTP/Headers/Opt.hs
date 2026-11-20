@@ -1,76 +1,80 @@
-{- |
-RFC 2774 §4.1 @Opt@ — the end-to-end /optional/ extension declaration
-general header of the (experimental) HTTP Extension Framework.
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
-== Grammar (RFC 2774 §3, §4.1)
+{- | @Opt@ declares end-to-end extensions in an HTTP request or response.
+Each declaration identifies an extension used by the message. The sender
+uses the extension and lets the ultimate recipient decide whether to honor it.
 
-@
-optional        = \"Opt\" \":\" 1#ext-decl
-ext-decl        = \<\"\> ( absoluteURI | field-name ) \<\"\> [ namespace ] [ decl-extensions ]
-namespace       = \";\" \"ns\" \"=\" header-prefix
-header-prefix   = 2*DIGIT
-decl-extensions = *( decl-ext )
-decl-ext        = \";\" token [ \"=\" ( token | quoted-string ) ]
-@
+Spec: <https://www.rfc-editor.org/rfc/rfc2774.html#section-4.1>
 
-An @Opt@ header lists one or more /optional/ extension declarations: the
-ultimate recipient MAY consult and obey each, or ignore it entirely.  The
-declaration shape is identical to 'Network.HTTP.Headers.Man.Man' — a
-quoted absolute URI (or Standards-Track field-name) with an optional
-@ns=NN@ header-prefix and @;token[=value]@ declaration parameters.
-
-The HTTP Extension Framework is Experimental and never saw wide
-deployment; faithful structured parsing of this comma-separated,
-prefix-binding grammar is not warranted, so the field value is preserved
-verbatim as a round-tripping 'ST.ShortText' (mirroring
-'Network.HTTP.Headers.Referer.Referer').
-
-Spec: <https://www.rfc-editor.org/rfc/rfc2774#section-4.1> (RFC 2774, Experimental HTTP Extension Framework).
-
-See also: "Network.HTTP.Headers.Man", "Network.HTTP.Headers.Ext", "Network.HTTP.Headers.PEP", "Network.HTTP.Headers.PEPInfo".
+See also: "Network.HTTP.Headers.Man", "Network.HTTP.Headers.Ext", "Network.HTTP.Headers.PEP".
 -}
 module Network.HTTP.Headers.Opt (
-  Opt (..),
+  Opt (Opt, rawOpt),
+  optDeclarations,
+  optFromDeclarations,
   optParser,
   renderOpt,
 ) where
 
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.ExtensionDeclaration
+import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hOpt)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | The raw, verbatim value of an @Opt@ optional extension declaration list.
-newtype Opt = Opt {rawOpt :: ST.ShortText}
-  deriving stock (Eq, Show)
+newtype Opt = OptDeclarations ExtensionDeclarations
+  deriving stock (Eq)
+
+
+-- | The legacy field spelling. Use 'optFromDeclarations' for checked authoring.
+pattern Opt :: ST.ShortText -> Opt
+pattern Opt {rawOpt} <- (legacyText -> rawOpt)
+  where
+    Opt text = OptDeclarations (rawDeclarations text)
+
+
+{-# COMPLETE Opt #-}
+
+
+instance Show Opt where
+  showsPrec precedence (Opt text) =
+    showParen (precedence > 10) $ showString "Opt {rawOpt = " . shows text . showChar '}'
+
+
+legacyText :: Opt -> ST.ShortText
+legacyText (OptDeclarations declarations) = declarationsText declarations
+
+
+optDeclarations :: Opt -> Either String (NE.NonEmpty ExtensionDeclaration)
+optDeclarations (OptDeclarations declarations) = declarationsEntries "Opt" declarations
+
+
+optFromDeclarations :: NE.NonEmpty ExtensionDeclaration -> Either String Opt
+optFromDeclarations = fmap OptDeclarations . declarationsFromEntries "Opt"
 
 
 instance KnownHeader Opt where
   type ParseFailure Opt = String
-  type Cardinality Opt = 'ZeroOrOne
+  type Cardinality Opt = 'ZeroOrMore
   type Direction Opt = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser optParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Opt header: " <> show rest
-    Fail -> Left "Failed to parse Opt header"
-    Err e -> Left e
+  parseFromHeaders _ fields = OptDeclarations <$> decodeDeclarations "Opt" fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderOpt
+  renderToHeaders _ (OptDeclarations declarations) = NE.toList (declarationsLines declarations)
 
 
   headerName _ = hOpt
 
 
 optParser :: ParserT st String Opt
-optParser = Opt <$> takeRestShortText
+optParser = OptDeclarations <$> declarationsParser "Opt"
 
 
 renderOpt :: Opt -> M.Builder
-renderOpt (Opt v) = shortText v
+renderOpt (OptDeclarations declarations) = renderDeclarations declarations

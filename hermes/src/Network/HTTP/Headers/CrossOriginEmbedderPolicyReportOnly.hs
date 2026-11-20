@@ -18,7 +18,6 @@ module Network.HTTP.Headers.CrossOriginEmbedderPolicyReportOnly (
   renderCrossOriginEmbedderPolicyReportOnly,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.CrossOriginEmbedderPolicy (
   CrossOriginEmbedderPolicy,
@@ -43,14 +42,10 @@ instance KnownHeader CrossOriginEmbedderPolicyReportOnly where
   type Direction CrossOriginEmbedderPolicyReportOnly = 'Response
 
 
-  parseFromHeaders _ headers = case runParser crossOriginEmbedderPolicyReportOnlyParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Cross-Origin-Embedder-Policy-Report-Only header: " <> show rest
-    Fail -> Left "Failed to parse Cross-Origin-Embedder-Policy-Report-Only header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Cross-Origin-Embedder-Policy-Report-Only" crossOriginEmbedderPolicyReportOnlyParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderCrossOriginEmbedderPolicyReportOnly
+  renderToHeaders settings = renderToHeaders settings . getCrossOriginEmbedderPolicyReportOnly
 
 
   headerName _ = hCrossOriginEmbedderPolicyReportOnly

@@ -51,19 +51,25 @@ module Network.HTTP.Headers.AltSvc (
   renderAltValue,
 ) where
 
-import qualified Control.Monad.Combinators.NonEmpty as NE1
+import Control.Monad (unless)
+import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
-import Data.CharSet (CharSet)
-import qualified Data.CharSet as CharSet
+import qualified Data.ByteString.Short as SBS
+import Data.Char (chr)
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.Text as Text
 import Data.Text.Short (ShortText)
-import Data.Word (Word16)
+import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Data.Word (Word16, Word8)
+import Network.HTTP.Grammar.Authority (portNumber, uriHost)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAltSvc)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import qualified Wireform.Builder as Builder
 
 
 -- ---------------------------------------------------------------------------
@@ -127,7 +133,7 @@ instance KnownHeader AltSvc where
   type Direction AltSvc = 'Response
 
 
-  parseFromHeaders _ headers = combineAltSvc <$> traverse runAltSvcParser headers
+  parseFromHeaders _ = runAltSvcParser . combineFieldLines ", "
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderAltSvc
@@ -136,30 +142,11 @@ instance KnownHeader AltSvc where
   headerName _ = hAltSvc
 
 
-{- | Combine the per-line parses of a multi-line @Alt-Svc@ header.
-@clear@ is absorbing (it invalidates everything); otherwise the
-alternative lists are concatenated in order.
--}
-combineAltSvc :: NonEmpty AltSvc -> AltSvc
-combineAltSvc (x :| xs) = foldl step x xs
-  where
-    step AltSvcClear _ = AltSvcClear
-    step _ AltSvcClear = AltSvcClear
-    step (AltSvcValues a) (AltSvcValues b) = AltSvcValues (a <> b)
-
-
-{- | Run 'altSvcParser' over one physical header line, rejecting
+{- | Run 'altSvcParser' over the combined field value, rejecting
 trailing junk (optional whitespace excepted).
 -}
 runAltSvcParser :: ByteString -> Either String AltSvc
-runAltSvcParser bs = case runParser altSvcParser bs of
-  OK v leftover
-    | B.null (B.dropWhile isOwsByte leftover) -> Right v
-    | otherwise -> Left ("Unconsumed input after parsing Alt-Svc header: " <> show leftover)
-  Fail -> Left "Failed to parse Alt-Svc header"
-  Err e -> Left e
-  where
-    isOwsByte w = w == 0x20 || w == 0x09
+runAltSvcParser = parseFieldLine "Alt-Svc" altSvcParser
 
 
 -- ---------------------------------------------------------------------------
@@ -167,67 +154,59 @@ runAltSvcParser bs = case runParser altSvcParser bs of
 -- ---------------------------------------------------------------------------
 
 altSvcParser :: ParserT st String AltSvc
-altSvcParser = do
-  ows
-  (AltSvcValues <$> (altValueParser `NE1.sepBy1` (ows *> $(char ',') *> ows)))
-    <|> (AltSvcClear <$ $(string "clear"))
+altSvcParser =
+  maybe AltSvcClear AltSvcValues . sequenceA
+    <$> httpList1 "Alt-Svc" ((Just <$> altValueParser) <|> (Nothing <$ $(string "clear")))
 
 
 altValueParser :: ParserT st String AltValue
 altValueParser = do
-  proto <- rfc9110Token
+  protocol <- rfc9110TokenBS
   $(char '=')
+  unless (canonicalProtocolId protocol) (err "Non-canonical Alt-Svc protocol identifier")
   auth <- altAuthorityParser
   params <- many (ows *> $(char ';') *> ows *> altParameterParser)
-  pure AltValue {altProtocolId = proto, altAuthority = auth, altParameters = params}
+  pure AltValue {altProtocolId = STU.fromByteStringUnsafe protocol, altAuthority = auth, altParameters = params}
+
+
+canonicalProtocolId :: ByteString -> Bool
+canonicalProtocolId bytes = case B.elemIndex 37 bytes of
+  Nothing -> True
+  Just offset
+    | B.length bytes - offset >= 3
+    , Just high <- uppercaseHex (B.index bytes (offset + 1))
+    , Just low <- uppercaseHex (B.index bytes (offset + 2)) ->
+        let octet = high `shiftL` 4 .|. low
+        in (octet == 37 || not (isTokenChar (chr (fromIntegral octet))))
+             && canonicalProtocolId (B.drop (offset + 3) bytes)
+  _ -> False
+  where
+    uppercaseHex :: Word8 -> Maybe Word8
+    uppercaseHex w
+      | w >= 48 && w <= 57 = Just (w - 48)
+      | w >= 65 && w <= 70 = Just (w - 55)
+      | otherwise = Nothing
 
 
 altAuthorityParser :: ParserT st String AltAuthority
-altAuthorityParser = do
-  $(char '"')
-  mHost <- optional hostParser
-  $(char ':')
-  port <- anyAsciiDecimalWord
-  $(char '"')
-  pure AltAuthority {altAuthHost = mHost, altAuthPort = fromIntegral port}
+altAuthorityParser = unescaped <|> withQuotedPairs
+  where
+    unescaped = $(char '"') *> authority <* $(char '"')
+    authority = AltAuthority <$> optional uriHost <*> ($(char ':') *> portNumber)
+    withQuotedPairs = do
+      decoded <- httpQuotedBytes
+      case runParser authority decoded of
+        OK value "" -> pure value
+        Err e -> err e
+        _ -> failed
 
 
 altParameterParser :: ParserT st String AltParameter
 altParameterParser = do
   name <- rfc9110Token
-  ows
   $(char '=')
-  ows
-  val <- (AltParamToken <$> rfc9110Token) <|> (AltParamQuoted <$> quotedString)
+  val <- (AltParamToken <$> rfc9110Token) <|> (AltParamQuoted . shortTextFromLatin1 <$> httpQuotedBytes)
   pure AltParameter {altParamName = name, altParamValue = val}
-
-
-{- | @uri-host@: a bracketed IP-literal (e.g. @[::1]@, captured with
-its brackets) or a @reg-name@ \/ IPv4address (no colon).
--}
-hostParser :: ParserT st e ShortText
-hostParser = bracketed <|> regName
-  where
-    bracketed = shortASCIIFromParser_ $ do
-      $(char '[')
-      skipSome (skipSatisfyAscii (/= ']'))
-      $(char ']')
-    regName =
-      shortASCIIFromParser_ $
-        skipSome (skipSatisfyAscii (`CharSet.member` hostCharSet))
-
-
-{- | Characters permitted in a non-bracketed @uri-host@: @unreserved@
-plus @sub-delims@ (minus @,@) plus @%@ for pct-encoding.  Excludes
-@:@, @\"@, @[@ and @]@ so parsing stops at the port separator and
-closing quote.
--}
-hostCharSet :: CharSet
-hostCharSet =
-  CharSet.range 'A' 'Z'
-    <> CharSet.range 'a' 'z'
-    <> CharSet.range '0' '9'
-    <> "-._~%!$&'()*+;="
 
 
 -- ---------------------------------------------------------------------------
@@ -236,7 +215,8 @@ hostCharSet =
 
 renderAltSvc :: AltSvc -> M.Builder
 renderAltSvc AltSvcClear = "clear"
-renderAltSvc (AltSvcValues vs) = R.sepByCommas1 (fmap renderAltValue vs)
+renderAltSvc (AltSvcValues (first :| rest)) =
+  renderAltValue first <> foldMap (\value -> ", " <> renderAltValue value) rest
 
 
 renderAltValue :: AltValue -> M.Builder
@@ -249,7 +229,14 @@ renderAltValue (AltValue proto auth params) =
     renderParam (AltParameter name val) =
       "; " <> R.shortText name <> M.char7 '=' <> renderVal val
     renderVal (AltParamToken t) = R.shortText t
-    renderVal (AltParamQuoted t) = R.rfc8941String (RFC8941String t)
+    renderVal (AltParamQuoted t)
+      | SBS.any (>= 128) (ST.toShortByteString t) =
+          M.char7 '"' <> Text.foldr (\c rest -> opaqueChar c <> rest) mempty (ST.toText t) <> M.char7 '"'
+      | otherwise = R.rfc8941String (RFC8941String t)
+    opaqueChar c
+      | c == '"' || c == '\\' = M.char7 '\\' <> M.char7 c
+      | c <= '\xff' = M.char8 c
+      | otherwise = Builder.charUtf8 c
 
 
 renderAltAuthority :: AltAuthority -> M.Builder

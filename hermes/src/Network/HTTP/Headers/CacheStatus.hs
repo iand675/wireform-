@@ -20,20 +20,14 @@ module Network.HTTP.Headers.CacheStatus (
   Forward (..),
   Hit (..),
   ForwardInfo (..),
+  effectiveForwardStatus,
   FailureAccum,
   cacheStatusParser,
   renderCacheStatus,
 ) where
 
-import Control.Monad.Combinators
-import qualified Data.ByteString as B
 import qualified Data.List.NonEmpty as NE
-import qualified Data.Map.Strict as M
--- Importing 'Data.Validation' unqualified would bring its
--- 'either' Iso (validation 1.2+) into scope alongside
--- 'Prelude.either'. The latter is what the renderers below want,
--- so we expose only the constructors and the Validation type.
-
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text.Short (ShortText)
 import Data.Validation (Validation (..))
 import Network.HTTP.Headers
@@ -66,6 +60,7 @@ data CacheStatusCommonFields = CacheStatusCommonFields
   { cacheStatusTtl :: !(Maybe Int)
   , cacheStatusKey :: !(Maybe P.RFC8941String)
   , cacheStatusDetail :: !(Maybe (Either P.RFC8941Token P.RFC8941String))
+  -- | Extension parameters and forwarding-only parameters on members without @fwd@.
   , cacheStatusUnknownParameters :: ![(ShortText, Maybe P.ItemValue)]
   }
   deriving stock (Eq, Show)
@@ -82,14 +77,17 @@ data Forward
     Method
   | -- | The cache did not contain any responses that matched the request URI.
     UriMiss
-  | -- | The cache contained a response that matched the request URI, but it could not select a response based
-    --     upon this request's header fields and stored Vary header fields.
+  | {- | The cache contained a response that matched the request URI, but it could not select a response based
+    upon this request's header fields and stored Vary header fields.
+    -}
     VaryMiss
-  | -- | The cache did not contain any responses that could be used to satisfy this request
-    --     (to be used when an implementation cannot distinguish between uri-miss and vary-miss).
+  | {- | The cache did not contain any responses that could be used to satisfy this request
+    (to be used when an implementation cannot distinguish between uri-miss and vary-miss).
+    -}
     Miss
-  | -- | The cache was able to select a fresh response for the request, but the request's
-    --     semantics (e.g., Cache-Control request directives) did not allow its use.
+  | {- | The cache was able to select a fresh response for the request, but the request's
+    semantics (e.g., Cache-Control request directives) did not allow its use.
+    -}
     Request
   | -- | The cache was able to select a response for the request, but it was stale.
     Stale
@@ -108,7 +106,12 @@ data ForwardInfo = ForwardInfo
   deriving stock (Eq, Show)
 
 
-data Hit = Hit
+-- | The next hop's status, defaulting to the enclosing response status.
+effectiveForwardStatus :: Int -> ForwardInfo -> Int
+effectiveForwardStatus responseStatus = fromMaybe responseStatus . forwardStatus
+
+
+data Hit = Hit | NoHit | HitUnspecified
   deriving stock (Eq, Show)
 
 
@@ -121,44 +124,41 @@ instance KnownHeader CacheStatus where
   type Direction CacheStatus = 'Response
 
 
-  parseFromHeaders _ headers = case P.runParser cacheStatusParser (B.intercalate ", " $ NE.toList headers) of
+  parseFromHeaders _ headers = case P.runParser cacheStatusParser (P.combineStructuredFieldLines headers) of
     P.OK cs "" -> Right cs
     P.OK _ rest -> Left $ pure (Nothing, "Unconsumed input after parsing Cache-Status header: " <> show rest)
     P.Fail -> Left $ pure (Nothing, "Failed to parse Cache-Status header")
     P.Err e -> Left e
 
 
-  renderToHeaders _ = pure . M.toStrictByteString . renderCacheStatus
+  renderToHeaders _ (CacheStatus []) = []
+  renderToHeaders _ value = [M.toStrictByteString (renderCacheStatus value)]
+
+
+  omitHeaderValue = null . cacheStatus
+  {-# INLINE omitHeaderValue #-}
 
 
   headerName _ = hCacheStatus
 
 
-unvalidatedCacheStatusEntryParser
-  :: forall st
-   . P.ParserT st FailureAccum (Either P.RFC8941Token P.RFC8941String, [(ShortText, Maybe P.ItemValue)])
-unvalidatedCacheStatusEntryParser = do
-  ident <- eitherP P.rfc8941Token P.rfc8941String
-  params <- P.embedError P.rfc8941Parameters $ \msg -> P.err $ pure (Nothing, msg)
-  pure (ident, params)
-
-
 cacheStatusEntryParser :: forall st. P.ParserT st FailureAccum (Validation FailureAccum CacheStatusEntry)
 cacheStatusEntryParser = do
-  (k, ps) <- unvalidatedCacheStatusEntryParser
-  let mps :: M.Map ShortText (Maybe P.ItemValue)
-      mps = M.fromList ps
-      debugName = either P.unsafeToRFC8941Token P.unsafeToRFC8941String k
-  pure $ CacheStatusEntry k <$> vHitOrForward debugName mps <*> vCommonFields debugName mps
+  ident <- P.structuredFieldTokenOrString
+  parameters <- P.embedError P.structuredFieldParameters $ \msg -> P.err (pure (Nothing, msg))
+  let debugName = either P.unsafeToRFC8941Token P.unsafeToRFC8941String ident
+      forwarded = lookupParameter "fwd" parameters
+  pure $ CacheStatusEntry ident <$> vHitOrForward debugName forwarded parameters <*> vCommonFields debugName (isJust forwarded) parameters
   where
-    vHitOrForward :: ShortText -> M.Map ShortText (Maybe P.ItemValue) -> Validation FailureAccum (Either Hit ForwardInfo)
-    vHitOrForward k mps = case (M.lookup "hit" mps, M.lookup "fwd" mps) of
-      (Just _, Nothing) -> Success $ Left Hit
-      (Nothing, Just (Just (P.Token t))) -> Right <$> vForward k (P.unsafeToRFC8941Token t) mps
+    vHitOrForward :: ShortText -> Maybe P.ItemValue -> [P.StructuredFieldParameter] -> Validation FailureAccum (Either Hit ForwardInfo)
+    vHitOrForward k forwarded mps = case (lookupParameter "hit" mps, forwarded) of
+      (Just (P.Boolean b), Nothing) -> Success $ Left (if b then Hit else NoHit)
+      (Just _, Nothing) -> Failure $ pure (Nothing, show k <> " 'hit' parameter must be a boolean")
+      (Nothing, Just (P.Token t)) -> Right <$> vForward k (P.unsafeToRFC8941Token t) mps
       (Nothing, Just _) -> Failure $ pure (Nothing, show k <> " 'fwd' parameter must be a token")
       (Just _, Just _) -> Failure $ pure (Nothing, show k <> " cannot have both 'hit' and 'fwd' parameters")
-      (Nothing, Nothing) -> Failure $ pure (Nothing, show k <> " must have either 'hit' or 'fwd' parameter")
-    vForward :: ShortText -> ShortText -> M.Map ShortText (Maybe P.ItemValue) -> Validation FailureAccum ForwardInfo
+      (Nothing, Nothing) -> Success $ Left HitUnspecified
+    vForward :: ShortText -> ShortText -> [P.StructuredFieldParameter] -> Validation FailureAccum ForwardInfo
     vForward k t mps = ForwardInfo <$> vForwardType <*> vForwardStatus <*> vForwardStored <*> vForwardCollapsed
       where
         vForwardType = case t of
@@ -171,43 +171,57 @@ cacheStatusEntryParser = do
           "stale" -> pure Stale
           "partial" -> pure Partial
           _ -> pure $ UnknownForward t
-        vForwardStatus = case M.lookup "fwd-status" mps of
-          Just (Just (P.Integer i)) -> pure $ Just i
-          Just (Just _) -> Failure $ pure (Just k, "fwd-status must be an integer")
-          Just Nothing -> Failure $ pure (Just k, "fwd-status if provided must have a value")
+        vForwardStatus = case lookupParameter "fwd-status" mps of
+          Just (P.Integer i)
+            | i >= 100 && i <= 599 -> pure $ Just i
+          Just _ -> Failure $ pure (Just k, "fwd-status must be an HTTP status code from 100 through 599")
           Nothing -> pure Nothing
-        vForwardStored = case M.lookup "stored" mps of
-          Just (Just (P.Boolean b)) -> pure $ Just b
-          Just (Just _) -> Failure $ pure (Just k, "stored must be a boolean")
-          _ -> pure Nothing
-        vForwardCollapsed = case M.lookup "collapsed" mps of
-          Just (Just (P.Boolean b)) -> pure $ Just b
-          Just (Just _) -> Failure $ pure (Just k, "collapsed must be a boolean")
-          _ -> pure Nothing
-    vCommonFields k mps = CacheStatusCommonFields <$> vTtl <*> vKey <*> vDetail <*> vUnknownParameters
+        vForwardStored = optionalBoolean "stored"
+        vForwardCollapsed = optionalBoolean "collapsed"
+        optionalBoolean name = case lookupParameter name mps of
+          Nothing -> pure Nothing
+          Just (P.Boolean b) -> pure (Just b)
+          Just _ -> Failure $ pure (Just k, show name <> " must be a boolean")
+    vCommonFields k forwarded mps = CacheStatusCommonFields <$> vTtl <*> vKey <*> vDetail <*> vUnknownParameters
       where
-        vTtl = case M.lookup "ttl" mps of
-          Just (Just (P.Integer i)) -> pure $ Just i
-          Just (Just _) -> Failure $ pure (Just k, "ttl must be an integer")
+        vTtl = case lookupParameter "ttl" mps of
+          Just (P.Integer i) -> pure $ Just i
+          Just _ -> Failure $ pure (Just k, "ttl must be an integer")
           _ -> pure Nothing
-        vKey = case M.lookup "key" mps of
-          Just (Just (P.String s)) -> pure $ Just s
-          Just (Just _) -> Failure $ pure (Just k, "key must be a string")
+        vKey = case lookupParameter "key" mps of
+          Just (P.String s) -> pure $ Just s
+          Just _ -> Failure $ pure (Just k, "key must be a string")
           _ -> pure Nothing
-        vDetail = case M.lookup "detail" mps of
-          Just (Just (P.String s)) -> pure $ Just $ Right s
-          Just (Just (P.Token s)) -> pure $ Just $ Left s
-          Just (Just _) -> Failure $ pure (Just k, "detail must be a string or token")
+        vDetail = case lookupParameter "detail" mps of
+          Just (P.String s) -> pure $ Just $ Right s
+          Just (P.Token s) -> pure $ Just $ Left s
+          Just _ -> Failure $ pure (Just k, "detail must be a string or token")
           _ -> pure Nothing
         vUnknownParameters =
-          pure $
-            M.toList $
-              M.filterWithKey (\k' _ -> k' `notElem` ["hit", "fwd", "fwd-status", "stored", "collapsed", "ttl", "key", "detail"]) mps
+          pure (P.structuredFieldParameterPairs (filter (not . projectedParameter forwarded . P.structuredParameterKey) mps))
+
+    projectedParameter forwarded = \case
+      "hit" -> True
+      "fwd" -> True
+      "ttl" -> True
+      "key" -> True
+      "detail" -> True
+      "fwd-status" -> forwarded
+      "stored" -> forwarded
+      "collapsed" -> forwarded
+      _ -> False
+
+
+lookupParameter :: ShortText -> [P.StructuredFieldParameter] -> Maybe P.ItemValue
+lookupParameter _ [] = Nothing
+lookupParameter key (P.StructuredFieldParameter name value : rest)
+  | key == name = Just value
+  | otherwise = lookupParameter key rest
 
 
 cacheStatusParser :: forall st. P.ParserT st FailureAccum CacheStatus
 cacheStatusParser = do
-  entries <- P.rfc8941List cacheStatusEntryParser
+  entries <- P.structuredFieldList cacheStatusEntryParser
   case sequenceA entries of
     Failure acc -> P.err acc
     Success es -> pure $ CacheStatus es
@@ -226,7 +240,9 @@ renderCacheStatusEntry (CacheStatusEntry k hf cf) =
 
 renderHitOrForward :: Either Hit ForwardInfo -> M.Builder
 renderHitOrForward = \case
-  Left Hit -> R.rfc8941Parameter R.IncludeIfEmpty R.rfc8941Binary "hit" Nothing
+  Left Hit -> ";hit"
+  Left NoHit -> ";hit=?0"
+  Left HitUnspecified -> mempty
   Right (ForwardInfo t s st c) ->
     R.rfc8941Parameter R.ExcludeIfEmpty renderForwardType "fwd" (Just t)
       <> renderForwardStatus s
@@ -253,11 +269,17 @@ renderForwardStatus = R.rfc8941Parameter R.ExcludeIfEmpty R.rfc8941Integer "fwd-
 
 
 renderForwardStored :: Maybe Bool -> M.Builder
-renderForwardStored = R.rfc8941Parameter R.ExcludeIfEmpty R.rfc8941Boolean "stored"
+renderForwardStored = renderBooleanParameter "stored"
 
 
 renderForwardCollapsed :: Maybe Bool -> M.Builder
-renderForwardCollapsed = R.rfc8941Parameter R.ExcludeIfEmpty R.rfc8941Boolean "collapsed"
+renderForwardCollapsed = renderBooleanParameter "collapsed"
+
+
+renderBooleanParameter :: ShortText -> Maybe Bool -> M.Builder
+renderBooleanParameter _ Nothing = mempty
+renderBooleanParameter name (Just True) = M.char7 ';' <> R.shortText name
+renderBooleanParameter name (Just False) = M.char7 ';' <> R.shortText name <> "=?0"
 
 
 renderTtl :: Maybe Int -> M.Builder
@@ -274,9 +296,11 @@ renderDetail = R.rfc8941Parameter R.ExcludeIfEmpty (either R.rfc8941Token R.rfc8
 
 renderUnknownParameter :: (ShortText, Maybe P.ItemValue) -> M.Builder
 renderUnknownParameter (k, mv) =
-  R.shortText k
+  M.char7 ';'
+    <> R.shortText k
     <> case mv of
       Nothing -> mempty
+      Just (P.Boolean True) -> mempty
       Just v -> M.char7 '=' <> R.rfc8941ItemValue v
 
 
@@ -285,4 +309,4 @@ renderCommonFields (CacheStatusCommonFields ttl key detail ups) =
   renderTtl ttl
     <> renderKey key
     <> renderDetail detail
-    <> M.intersperse " " (renderUnknownParameter <$> ups)
+    <> foldMap renderUnknownParameter (P.orderedFieldEntries fst ups)

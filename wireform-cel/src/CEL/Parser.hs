@@ -17,13 +17,14 @@ module CEL.Parser (
   parseExpr,
 ) where
 
+import CEL.Internal.Number (parseDecimalDouble)
 import CEL.Syntax
+import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Char (chr, digitToInt, ord)
 import Data.Functor (($>))
 import Data.Int (Int64)
-import Data.List (foldl')
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -314,8 +315,7 @@ hexLiteral :: L Tok
 hexLiteral = do
   _ <- byteString "0x" <|> byteString "0X"
   digits <- byteStringOf (skipSome (satisfyAscii isHexDigit)) `cut` "malformed hex literal"
-  let n = foldl' (\acc d -> acc * 16 + toInteger (digitToInt d)) 0 (decodeBytes digits)
-  withUintSuffix (TkUIntLit n) (TkIntLit n)
+  integerToken 16 16 digits
 
 
 decimalLiteral :: L Tok
@@ -326,33 +326,55 @@ decimalLiteral = do
   case (mFrac, mExp) of
     (Nothing, Nothing)
       | BS.null intPart -> empty -- a lone '.' is not a number
-      | otherwise ->
-          let n = readInteger (decodeBytes intPart)
-          in withUintSuffix (TkUIntLit n) (TkIntLit n)
+      | otherwise -> integerToken 10 20 intPart
     _ ->
-      let lexeme =
-            (if BS.null intPart then "0" else decodeBytes intPart)
-              ++ maybe "" id mFrac
-              ++ maybe "" id mExp
-      in case readDoubleMaybe lexeme of
+      let lexeme = TE.decodeLatin1 (intPart <> maybe BS.empty id mFrac <> maybe BS.empty id mExp)
+      in case parseDecimalDouble lexeme of
+           Just d | isInfinite d -> err "double literal out of range"
            Just d -> pure (TkDoubleLit d)
-           Nothing -> err ("malformed float literal: " ++ lexeme)
+           Nothing -> err "malformed double literal"
+
+
+-- Bound the accumulation before converting. Leading zeros do not affect
+-- either the range or the signed and unsigned suffix rules.
+integerToken :: Word64 -> Int -> ByteString -> L Tok
+integerToken base maxDigits digits
+  | count > maxDigits = outOfRange
+  -- Nineteen decimal or sixteen hexadecimal digits always fit a Word64.
+  -- Check the twentieth decimal digit before multiplying the prefix.
+  | base == 10, count == 20, Just (prefix, lastByte) <- BS.unsnoc significant =
+      let leading = BS.foldl' step 0 prefix
+          trailing = digitValue lastByte
+          (bound, lastAllowed) = (maxBound :: Word64) `quotRem` 10
+      in if leading > bound || (leading == bound && trailing > lastAllowed)
+           then outOfRange
+           else emit (leading * 10 + trailing)
+  | otherwise = emit (BS.foldl' step 0 significant)
+  where
+    significant = BS.dropWhile (== 48) digits
+    count = BS.length significant
+    outOfRange = err "integer literal out of range"
+    step acc d = acc * base + digitValue d
+    digitValue d
+      | d <= 57 = fromIntegral (d - 48)
+      | d <= 70 = fromIntegral (d - 55)
+      | otherwise = fromIntegral (d - 87)
+    emit n = let magnitude = toInteger n in withUintSuffix (TkUIntLit magnitude) (TkIntLit magnitude)
 
 
 -- A fraction @.digits@ — the dot is only consumed when a digit follows.
-fraction :: L String
-fraction = decodeBytes <$> byteStringOf (word8 dot *> skipSome (satisfyAscii isDigit))
+fraction :: L ByteString
+fraction = byteStringOf (word8 dot *> skipSome (satisfyAscii isDigit))
 
 
 -- An exponent @e[+-]?digits@.
-exponentPart :: L String
+exponentPart :: L ByteString
 exponentPart =
-  decodeBytes
-    <$> byteStringOf
-      ( satisfyAscii (\c -> c == 'e' || c == 'E')
-          *> optional_ (satisfyAscii (\c -> c == '+' || c == '-'))
-          *> skipSome (satisfyAscii isDigit)
-      )
+  byteStringOf
+    ( satisfyAscii (\c -> c == 'e' || c == 'E')
+        *> optional_ (satisfyAscii (\c -> c == '+' || c == '-'))
+        *> skipSome (satisfyAscii isDigit)
+    )
 
 
 -- Optionally consume a @u@/@U@ suffix, choosing the unsigned vs signed token.
@@ -410,16 +432,6 @@ isIdentChar c = isIdentStart c || (c >= '0' && c <= '9')
 ----------------------------------------------------------------------
 -- Numeric value helpers
 ----------------------------------------------------------------------
-
-readInteger :: String -> Integer
-readInteger = foldl' (\acc d -> acc * 10 + toInteger (digitToInt d)) 0
-
-
-readDoubleMaybe :: String -> Maybe Double
-readDoubleMaybe s = case reads s of
-  [(d, "")] -> Just d
-  _ -> Nothing
-
 
 isHexDigit :: Char -> Bool
 isHexDigit c = isDigit c || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
@@ -802,6 +814,7 @@ parseMemberSuffix e = do
       case t2 of
         TkLParen -> do
           args <- parseCallArgs
+          validateMacroBinders sel args
           parseMemberSuffix (ECall (Just e) sel args)
         _ -> parseMemberSuffix (ESelect e sel)
     TkLBracket -> do
@@ -814,6 +827,26 @@ parseMemberSuffix e = do
           fields <- parseFieldInits
           parseMemberSuffix (EStruct root segs fields)
     _ -> pure e
+
+
+-- Recognized macro signatures require identifiers before evaluation.
+validateMacroBinders :: Text -> [Expr] -> P ()
+validateMacroBinders name args = case args of
+  [v, _] | quantifier || name == "map" || name == "filter" -> void (binder v)
+  [v, _, _] | name == "map" -> void (binder v)
+  [a, b, _] | quantifier || transform -> validatePair a b
+  [a, b, _, _] | transform -> validatePair a b
+  _ -> pure ()
+  where
+    quantifier = name `elem` ["all", "exists", "exists_one", "existsOne"]
+    transform = name == "transformList" || name == "transformMap"
+    binder (EIdent False v) = pure v
+    binder _ = parseError ("iteration variable in " <> T.unpack name <> " must be a simple identifier")
+    validatePair a b = do
+      first <- binder a
+      second <- binder b
+      when (first == second) $
+        parseError ("duplicate iteration variable in " <> T.unpack name <> ": " <> T.unpack first)
 
 
 parsePrimary :: P Expr
@@ -847,9 +880,7 @@ parsePrimary = do
       name <- identName
       t2 <- peek
       case t2 of
-        TkLParen -> do
-          args <- parseCallArgs
-          pure (ECall Nothing name args)
+        TkLParen -> parseGlobalCall ("." <> name)
         _ -> pure (EIdent True name)
     TkIdent n
       | Set.member n reservedWords -> parseError ("reserved word used as name: " ++ T.unpack n)
@@ -857,11 +888,19 @@ parsePrimary = do
           _ <- advance
           t2 <- peek
           case t2 of
-            TkLParen -> do
-              args <- parseCallArgs
-              pure (ECall Nothing n args)
+            TkLParen -> parseGlobalCall n
             _ -> pure (EIdent False n)
     _ -> parseError ("unexpected token: " ++ show t)
+
+
+parseGlobalCall :: Text -> P Expr
+parseGlobalCall name = do
+  args <- parseCallArgs
+  case (name, args) of
+    ("has", [ESelect _ _]) -> pure ()
+    ("has", [_]) -> parseError "has() requires a field selection argument, e.g. has(x.y)"
+    _ -> pure ()
+  pure (ECall Nothing name args)
 
 
 parseCallArgs :: P [Expr]

@@ -11,17 +11,17 @@ remains widely emitted.
 
 @
 X-XSS-Protection = "0"
-                 / "1" *( OWS ";" OWS directive )
+                 / "1" *( OWS ";" OWS directive ) [ OWS ";" ]
 directive        = "mode" "=" "block"
-                 / "report" "=" reporting-uri
+                 / "report" "=" URI-reference
 @
 
 @0@ disables the auditor; @1@ enables it. @mode=block@ asks the browser to
-block rendering rather than sanitise, and @report=\<uri\>@ (a Chromium
-extension) names a violation-report endpoint.
+block rendering rather than sanitise. @report@ carries a URI-reference
+for a violation-report endpoint. Directive keywords use ASCII case
+folding and each directive can appear once.
 
-This is a /de-facto/ header with no governing RFC; see MDN
-<https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-XSS-Protection>.
+<https://github.com/chromium/chromium/blob/3b8be2124e3f1d3ce09d534315fb9a8f50ead086/third_party/WebKit/Source/platform/network/HTTPParsers.cpp Chromium's historical parser>
 
 See also: "Network.HTTP.Headers.ContentSecurityPolicy", "Network.HTTP.Headers.XContentTypeOptions", "Network.HTTP.Headers.XFrameOptions".
 -}
@@ -31,14 +31,15 @@ module Network.HTTP.Headers.XXSSProtection (
   renderXXSSProtection,
 ) where
 
-import qualified Data.ByteString as B
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (uriReference)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXXSSProtection)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- | A parsed @X-XSS-Protection@ value.
@@ -50,7 +51,7 @@ data XXSSProtection
       { xxssModeBlock :: !Bool
       -- ^ Whether @; mode=block@ was present (block instead of sanitise).
       , xxssReport :: !(Maybe ST.ShortText)
-      -- ^ The @; report=\<uri\>@ reporting endpoint, if present.
+      -- ^ The original reporting URI-reference spelling.
       }
   deriving stock (Eq, Show)
 
@@ -61,54 +62,57 @@ instance KnownHeader XXSSProtection where
   type Direction XXSSProtection = 'Response
 
 
-  parseFromHeaders _ headers = case runParser xXSSProtectionParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise -> Left ("Unconsumed input after parsing X-XSS-Protection header: " <> show leftover)
-    Fail -> Left "Failed to parse X-XSS-Protection header"
-    Err e -> Left e
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ ("0" :| []) = Right XXSSDisabled
+  parseFromHeaders _ ("1" :| []) = Right (XXSSEnabled False Nothing)
+  parseFromHeaders _ ("1; mode=block" :| []) = Right (XXSSEnabled True Nothing)
+  parseFromHeaders _ fields = parseSingleFieldLine "X-XSS-Protection" xXSSProtectionParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderXXSSProtection
+  renderToHeaders _ XXSSDisabled = "0"
+  renderToHeaders _ (XXSSEnabled False Nothing) = "1"
+  renderToHeaders _ (XXSSEnabled True Nothing) = "1; mode=block"
+  renderToHeaders _ value = M.toStrictByteString (renderXXSSProtection value)
 
 
   headerName _ = hXXSSProtection
 
 
--- | One parsed directive (internal).
-data XXSSParam
-  = ParamModeBlock
-  | ParamReport !ST.ShortText
-
-
 xXSSProtectionParser :: ParserT st String XXSSProtection
-xXSSProtectionParser =
-  (XXSSDisabled <$ $(char '0'))
-    <|> ($(char '1') *> (assembleParams <$> many xxssParam))
+xXSSProtectionParser = ows *> branch $(char '0') (pure XXSSDisabled) ($(char '1') *> enabled False Nothing)
   where
-    xxssParam = ows *> $(char ';') *> ows *> paramBody
-    paramBody =
-      $( switch
-          [|
-            case _ of
-              "mode" -> ows *> $(char '=') *> ows *> (ParamModeBlock <$ $(string "block"))
-              "report" -> ows *> $(char '=') *> ows *> (ParamReport <$> reportValue)
-            |]
+    enabled blocked endpoint =
+      let result = pure (XXSSEnabled blocked endpoint)
+      in branch (ows *> $(char ';') *> ows) (branch eof result (directive blocked endpoint)) result
+
+    directive blocked endpoint =
+      $( switchAsciiCI
+           [|
+             case _ of
+               "mode" ->
+                 if blocked
+                   then err "Duplicate X-XSS-Protection mode"
+                   else equals *> blockKeyword *> enabled True endpoint
+               "report" -> case endpoint of
+                 Just _ -> err "Duplicate X-XSS-Protection report"
+                 Nothing -> do
+                   value <- equals *> reportReference
+                   enabled blocked (Just value)
+             |]
        )
-    reportValue =
-      shortASCIIFromParser_ (some (satisfyAscii (\c -> c /= ';' && c /= ' ' && c /= '\t')))
+    equals = ows *> $(char '=') *> ows
 
 
--- | Fold parsed directives into the structured enabled value.
-assembleParams :: [XXSSParam] -> XXSSProtection
-assembleParams = go False Nothing
+blockKeyword :: ParserT st e ()
+blockKeyword = $(switchAsciiCI [|case _ of "block" -> pure ()|])
+
+
+reportReference :: ParserT st String ST.ShortText
+reportReference = withByteString (skipSome (skipSatisfyAscii reportByte)) $ \() bytes ->
+  case parseByteString (uriReference <* eof) bytes of
+    Right result -> pure result
+    Left _ -> err "Invalid X-XSS-Protection reporting URI-reference"
   where
-    go mode report [] = XXSSEnabled mode report
-    go mode report (p : ps) = case p of
-      ParamModeBlock -> go True report ps
-      ParamReport u -> go mode (Just u) ps
+    reportByte c = c >= '!' && c <= '~' && c /= ';'
 
 
 renderXXSSProtection :: XXSSProtection -> M.Builder

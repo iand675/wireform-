@@ -45,6 +45,9 @@ module Network.HTTP.Client (
   addHeader,
   removeHeader,
   addRequestHeader,
+  withRequestTrailers,
+  withoutRequestTrailers,
+  RequestTrailerError (..),
   withBody,
   withRawBody,
   addSpanAttribute,
@@ -53,7 +56,9 @@ module Network.HTTP.Client (
   SpanAttribute (..),
   RawResponse (RawResponse, statusCode, bodyPopper, protocolInfo),
   rawResponseBytes,
+  rawResponseTrailers,
   Response (Response, responseStatus, responseHeaders, responseBody, responseProtocolInfo),
+  responseTrailers,
   mapResponse,
 
   -- * URIs and base URLs

@@ -179,7 +179,7 @@ withEnsure# :: forall m e a. ParserMode m => Int# -> Parser m e a -> Parser m e 
 withEnsure# n# (Parser p) = Parser \env eob s st ->
   case n# <=# minusAddr# eob s of
     1# -> p env eob s st
-    _ -> case readEnd# env st of
+    _ -> case refreshEnd# @m env eob st of
       (# st', eob' #) -> case n# <=# minusAddr# eob' s of
         1# -> p env eob' s st'
         _ -> case onEnsureFail @m env eob' s n# st' of

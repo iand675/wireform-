@@ -10,8 +10,11 @@ module Proto.Internal.CodeGen.Combinators (
   -- * Structural helpers
   braceBlock,
   instanceHead,
+  chooseGeneratedName,
 ) where
 
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Prettyprinter
@@ -50,3 +53,14 @@ braceBlock (f : fs) =
 -- | @instance C T where@
 instanceHead :: Text -> Text -> Doc ann
 instanceHead cls ty = txt "instance " <> txt cls <> txt " " <> txt ty <> txt " where"
+
+
+-- | Keep the original binding when available and disambiguate collisions.
+chooseGeneratedName :: Set Text -> Text -> Text -> Text
+chooseGeneratedName used name suffix
+  | Set.notMember name used = name
+  | otherwise = unused (name <> "''" <> suffix)
+  where
+    unused candidate
+      | Set.member candidate used = unused (candidate <> "'")
+      | otherwise = candidate

@@ -8,7 +8,7 @@ reflected in the status code.
 == Grammar
 
 @
-Warning       = #warning-value
+Warning       = 1#warning-value
 warning-value = warn-code SP warn-agent SP warn-text [ SP warn-date ]
 warn-code     = 3DIGIT
 warn-agent    = ( uri-host [ ":" port ] ) / pseudonym
@@ -17,10 +17,9 @@ warn-date     = DQUOTE HTTP-date DQUOTE
 @
 
 The @warn-code@ is kept as a 'Word' and always rendered as exactly three
-digits. The @warn-agent@ is captured verbatim (it never contains
-whitespace, DQUOTE, or a comma). The @warn-text@ is the decoded
-quoted-string body, re-quoted on render. The optional @warn-date@ is an
-HTTP-date.
+digits. The @warn-agent@ retains its validated spelling. The @warn-text@
+is the decoded quoted-string body, with Latin-1 code points for the
+original wire octets. The optional @warn-date@ is an HTTP-date.
 
 The header was obsoleted by RFC 9111, which removed @Warning@; it is
 parsed\/rendered faithfully here for compatibility with existing traffic.
@@ -36,19 +35,23 @@ module Network.HTTP.Headers.Warning (
   renderWarning,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
-import Data.ByteString (ByteString)
-import Data.Char (digitToInt)
-import Data.Foldable1 (fold1)
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
+import Data.Char (ord)
 import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
+import Data.Maybe (fromMaybe)
 import Data.Text.Short (ShortText)
 import Data.Time.Clock (UTCTime)
+import Data.Word (Word8)
+import Foreign.Storable (pokeByteOff)
+import Network.HTTP.Grammar.Authority (warningAgent)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
 import Network.HTTP.Headers.HeaderFieldName (hWarning)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import qualified Wireform.Builder as B
 
 
 -- | A non-empty comma-separated list of warning-values.
@@ -73,32 +76,31 @@ instance KnownHeader Warning where
   type Direction Warning = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = fold1 <$> traverse runWarningParser headers
-  renderToHeaders _ = pure . M.toStrictByteString . renderWarning
+  parseFromHeaders settings = parseFieldLine "Warning" (warningParserWith (dateParserWith settings)) . combineFieldLines ", "
+
+
+  renderToHeaders _ = maybe [] (pure . M.toStrictByteString) . warningBuilder
+
+
   headerName _ = hWarning
 
 
-runWarningParser :: ByteString -> Either String Warning
-runWarningParser bs = case runParser warningParser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left $ "Unconsumed input after parsing Warning header: " <> show rest
-  Fail -> Left "Failed to parse Warning header"
-  Err e -> Left e
-
-
 warningParser :: ParserT st String Warning
-warningParser =
-  Warning <$> (ows *> (warningValueParser `sepBy1` (ows *> $(char ',') *> ows)) <* ows)
+warningParser = warningParserWith dateParser
 
 
-warningValueParser :: ParserT st String WarningValue
-warningValueParser = do
+warningParserWith :: ParserT st String UTCTime -> ParserT st String Warning
+warningParserWith parseDate = Warning <$> httpList1 "Warning" (warningValueParser parseDate)
+
+
+warningValueParser :: ParserT st String UTCTime -> ParserT st String WarningValue
+warningValueParser parseDate = do
   code <- warnCodeParser
   $(char ' ')
-  agent <- warnAgentParser
+  agent <- warningAgent
   $(char ' ')
-  text <- rfc8941String
-  date <- optional ($(char ' ') *> warnDateParser)
+  text <- RFC8941String . shortTextFromLatin1 <$> httpQuotedBytes
+  date <- optional ($(char ' ') *> $(char '"') *> parseDate <* $(char '"'))
   pure WarningValue {warnCode = code, warnAgent = agent, warnText = text, warnDate = date}
 
 
@@ -110,41 +112,40 @@ warnCodeParser = do
   c <- digitVal
   pure (a * 100 + b * 10 + c)
   where
-    digitVal = fromIntegral . digitToInt <$> satisfyAscii isDigit
+    digitVal = fromIntegral . (subtract 48) . ord <$> satisfyAscii isDigit
 
 
--- | A @warn-agent@: a run of characters up to the next SP, DQUOTE, or comma.
-warnAgentParser :: ParserT st e ShortText
-warnAgentParser = shortASCIIFromParser_ (some (satisfyAscii isAgentChar))
-  where
-    isAgentChar ch = ch /= ' ' && ch /= '"' && ch /= ','
-
-
--- | @warn-date = DQUOTE HTTP-date DQUOTE@.
-warnDateParser :: ParserT st String UTCTime
-warnDateParser = $(char '"') *> dateParser <* $(char '"')
-
-
+-- | Render a Warning field. The builder is empty if any code falls
+-- outside the three-digit range.
 renderWarning :: Warning -> M.Builder
-renderWarning = R.sepByCommas1 . fmap renderWarningValue . warningValues
+renderWarning = fromMaybe mempty . warningBuilder
+
+
+warningBuilder :: Warning -> Maybe M.Builder
+warningBuilder (Warning entries)
+  | any ((> 999) . warnCode) entries = Nothing
+  | otherwise = Just (R.renderSeparated ", " renderWarningValue (NE.toList entries))
 
 
 renderWarningValue :: WarningValue -> M.Builder
-renderWarningValue (WarningValue code agent text date) =
-  renderWarnCode code
-    <> M.char7 ' '
+renderWarningValue (WarningValue code agent (RFC8941String text) date) =
+  renderWarnCodePrefix code
     <> R.shortText agent
     <> M.char7 ' '
-    <> R.rfc8941String text
+    <> R.renderHttpQuotedShortText text
     <> maybe mempty (\d -> M.char7 ' ' <> renderWarnDate d) date
 
 
--- | Render a @warn-code@ zero-padded to three digits.
-renderWarnCode :: Word -> M.Builder
-renderWarnCode c
-  | c < 10 = M.string8 "00" <> M.wordDec c
-  | c < 100 = M.char7 '0' <> M.wordDec c
-  | otherwise = M.wordDec c
+-- The checked builder supplies a code in the range 0 through 999.
+renderWarnCodePrefix :: Word -> M.Builder
+renderWarnCodePrefix = B.primFixed $ Prim.fixedPrim 4 $ \code ptr -> do
+  let (prefix, ones) = code `quotRem` 10
+      (hundreds, tens) = prefix `quotRem` 10
+      digit n = 48 + fromIntegral n :: Word8
+  pokeByteOff ptr 0 (digit hundreds)
+  pokeByteOff ptr 1 (digit tens)
+  pokeByteOff ptr 2 (digit ones)
+  pokeByteOff ptr 3 (32 :: Word8)
 
 
 renderWarnDate :: UTCTime -> M.Builder

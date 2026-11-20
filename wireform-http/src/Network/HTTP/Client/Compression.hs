@@ -111,15 +111,26 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BSL
 import Data.ByteString.Lazy.Internal qualified as BSLI
+import Data.CaseInsensitive qualified as CI
 import Data.IORef (atomicModifyIORef', newIORef)
 import Data.List qualified as List
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
+import Data.Text.Short qualified as ShortText
 import Network.HTTP.Client.BodyStream
+import Network.HTTP.Client.Protocol (mapProtocolTrailers, protocolRequestTrailers, withProtocolRequestTrailers)
 import Network.HTTP.Client.Request qualified as WReq
 import Network.HTTP.Client.Response qualified as Resp
 import Network.HTTP.Client.Transport
 import Network.HTTP.ContentCoding qualified as Hermes
+import Network.HTTP.Headers qualified as Header
+import Network.HTTP.Headers.ContentEncoding qualified as ContentEncoding
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Headers.Trailer qualified as Trailer
+import Network.HTTP.Internal.Validation (isBodyDigestField)
 import Network.HTTP.Types.Header qualified as H
+import Network.HTTP.Types.Method qualified as Method
+import Network.HTTP.Types.Status qualified as Status
 import System.IO.Unsafe (unsafeInterleaveIO)
 import Wireform.Builder qualified as WB
 
@@ -467,11 +478,15 @@ chainStreamHandlers (h : hs) p = do
 -- Middleware
 -- ---------------------------------------------------------------------------
 
-{- | Decompression middleware using 'defaultDecompressors'. Sets
-@Accept-Encoding@ on outgoing requests (if the caller hasn't
-already), dispatches on @Content-Encoding@ on responses, strips
-@Content-Encoding@ \/ @Content-Length@ after a successful
-decode, and falls through for unknown or absent encodings.
+{- | Decompression middleware using 'defaultDecompressors'. Adds
+@Accept-Encoding@ when absent, using @identity@ for ranged requests.
+Partial responses retain the bytes and fields as sent by the server,
+since @Content-Range@ addresses the encoded representation. Responses
+without content retain their representation metadata. For complete
+coded bodies, the middleware removes @Content-Encoding@,
+@Content-Length@, and the digests of the encoded bytes. It removes those
+digests from the trailer section and its announcement as well. Origin
+validators remain available for revalidation.
 -}
 withDecompression :: Middleware IO
 withDecompression = withDecompressionPolicy defaultDecompressors
@@ -488,32 +503,41 @@ incrementally rather than materialised in full before the first
 byte reaches the caller.
 -}
 withDecompressionPolicy :: [EncodingHandler] -> Middleware IO
+withDecompressionPolicy [] inner = inner
 withDecompressionPolicy handlers inner = Transport $ \req -> do
-  let hdrs0 = WReq.headers req
-      req'
-        | null handlers = req
-        | H.hasHeader H.hAcceptEncoding hdrs0 = req
-        | otherwise =
-            req
-              { WReq.headers =
-                  H.insertHeader
-                    H.hAcceptEncoding
-                    (renderAcceptEncoding handlers)
-                    hdrs0
-              }
-  raw <- sendRaw inner req'
-  case H.lookupHeader H.hContentEncoding (Resp.headers raw) of
-    Nothing -> pure raw
-    Just enc -> case parseContentEncodings enc of
-      [] -> pure raw
-      codings -> case lookupHandlers codings handlers of
-        Nothing -> pure raw -- unknown coding: leave body alone
-        Just hs -> do
-          -- RFC 9110 §8.4: encodings listed in the order applied,
-          -- so reverse to undo them. @gzip, br@ means "gzip then br":
-          -- body is br-compressed gzip, so decompress br first.
-          newPopper <- chainStreamHandlers (reverse hs) (Resp.bodyPopper raw)
-          pure (stripEncoding raw) {Resp.bodyPopper = newPopper}
+  let advertise preference [] = WReq.addHeader H.hAcceptEncoding preference req
+      advertise preference ((name, _) : rest)
+        | name == H.hAcceptEncoding = req
+        | name == H.hRange = advertise "identity" rest
+        | otherwise = advertise preference rest
+  raw <- sendRaw inner (advertise supported (WReq.headers req))
+  case H.lookupHeaders H.hContentEncoding (Resp.headers raw) of
+    first : rest
+      | canDecodeResponse (WReq.method req) (Resp.statusCode raw)
+      , Just hs@(_ : _) <- lookupHandlers (parseContentEncodingLines (first :| rest)) handlers -> do
+          -- Undo the codings in reverse order of application (RFC 9110 §8.4).
+          let source = Resp.bodyPopper raw
+          decoded <- chainStreamHandlers (reverse hs) source
+          let consume = do
+                chunk <- decoded
+                -- A decoder can reach its end marker before the transport
+                -- has consumed the trailing field section.
+                if BS.null chunk then drainPopper source >> pure chunk else pure chunk
+          pure (stripEncoding raw) {Resp.bodyPopper = consume}
+    _ -> pure raw
+  where
+    supported = renderAcceptEncoding handlers
+
+
+canDecodeResponse :: Method.Method -> Status.Status -> Bool
+canDecodeResponse method status
+  | method == Method.mHead = False
+  | otherwise = case Status.statusCode status of
+      204 -> False
+      205 -> False
+      206 -> False
+      304 -> False
+      code -> code >= 200 && (code >= 300 || method /= Method.mConnect)
 
 
 -- ---------------------------------------------------------------------------
@@ -522,9 +546,10 @@ withDecompressionPolicy handlers inner = Transport $ \req -> do
 
 {- | Compress outgoing request bodies with @tag@. Buffers the request
 body, compresses, sets @Content-Encoding@, and refreshes
-@Content-Length@ to match the compressed payload. If the request
-already carries a @Content-Encoding@ header the middleware leaves
-it untouched.
+@Content-Length@ to match the compressed payload. The middleware
+removes the source digests from the headers, trailers, and announcement.
+The identity handler and requests with an explicit @Content-Encoding@
+pass through directly.
 
 > withClient cfg { ccExtra = [withCompression @Brotli] } $ \t -> ...
 -}
@@ -539,27 +564,34 @@ withCompression = withCompressionUsing (asCompressor @tag)
 explicitly. Useful for plugging in a runtime-chosen codec.
 -}
 withCompressionUsing :: EncodingHandler -> Middleware IO
-withCompressionUsing handler inner = Transport $ \req -> do
-  let hdrs0 = WReq.headers req
-  if H.hasHeader H.hContentEncoding hdrs0
-    then sendRaw inner req
-    else do
-      raw <- bodyStreamBytes (WReq.body req)
-      encoded <- ehRun handler raw
-      bs' <- streamFromStrict encoded
-      let token = ehToken handler
-          hdrs1 = H.insertHeader H.hContentEncoding token hdrs0
-          hdrs2 =
-            H.insertHeader
-              H.hContentLength
-              (BS8.pack (show (BS.length encoded)))
-              hdrs1
-      sendRaw
-        inner
-        req
-          { WReq.body = bs'
-          , WReq.headers = hdrs2
-          }
+withCompressionUsing handler inner
+  | ehCoding handler == Hermes.Identity = inner
+  | otherwise = Transport $ \req -> do
+      let hdrs0 = WReq.headers req
+      if H.hasHeader H.hContentEncoding hdrs0
+        then sendRaw inner req
+        else do
+          raw <- bodyStreamBytes (WReq.body req)
+          encoded <- ehRun handler raw
+          bs' <- streamFromStrict encoded
+          let token = ehToken handler
+              hdrs1 = H.insertHeader H.hContentEncoding token (stripDigestFields (const False) hdrs0)
+              hdrs2 =
+                H.insertHeader
+                  H.hContentLength
+                  (BS8.pack (show (BS.length encoded)))
+                  hdrs1
+          sendRaw
+            inner
+            req
+              { WReq.body = bs'
+              , WReq.headers = hdrs2
+              , WReq.protocolHints = stripRequestDigestTrailers (WReq.protocolHints req)
+              }
+  where
+    stripRequestDigestTrailers hints = case protocolRequestTrailers hints of
+      Nothing -> hints
+      Just produce -> withProtocolRequestTrailers (Just (stripDigestTrailers <$> produce)) hints
 
 
 -- ---------------------------------------------------------------------------
@@ -587,14 +619,13 @@ into the underlying tokens, in the order they appeared. Returns
 body alone rather than half-decoding).
 -}
 parseContentEncodings :: ByteString -> [Hermes.ContentCoding]
-parseContentEncodings raw =
-  let toks = filter (not . BS.null) $ map trim (BS.split 0x2C raw)
-  in case traverse parseContentEncoding toks of
-       Just cs -> cs
-       Nothing -> []
-  where
-    isWS w = w == 0x20 || w == 0x09
-    trim = BS.dropWhile isWS . BS.dropWhileEnd isWS
+parseContentEncodings raw = parseContentEncodingLines (raw :| [])
+
+
+parseContentEncodingLines :: NonEmpty ByteString -> [Hermes.ContentCoding]
+parseContentEncodingLines fields =
+  either (const []) ContentEncoding.contentCodings $
+    Header.parseFromHeaders Header.defaultHeaderSettings fields
 
 
 {- | Resolve a list of codings against a handler set. Returns 'Nothing'
@@ -621,14 +652,36 @@ renderAcceptEncoding = BS.intercalate ", " . map ehToken
 
 
 findHandler :: Hermes.ContentCoding -> [EncodingHandler] -> Maybe EncodingHandler
-findHandler coding = List.find ((== coding) . ehCoding)
+findHandler coding = List.find (Hermes.sameContentCoding coding . ehCoding)
 
 
 stripEncoding :: Resp.RawResponse -> Resp.RawResponse
 stripEncoding raw =
   raw
-    { Resp.headers =
-        H.deleteHeader H.hContentEncoding $
-          H.deleteHeader H.hContentLength $
-            Resp.headers raw
+    { Resp.headers = stripDigestFields removeCoding (Resp.headers raw)
+    , Resp.protocolInfo = mapProtocolTrailers stripDigestTrailers (Resp.protocolInfo raw)
     }
+  where
+    removeCoding name = name == H.hContentEncoding || name == H.hContentLength
+
+
+stripDigestTrailers :: H.Headers -> H.Headers
+stripDigestTrailers = filter (not . isBodyDigestField . fst)
+
+
+stripDigestFields :: (H.HeaderName -> Bool) -> H.Headers -> H.Headers
+stripDigestFields removeField = foldr stripField []
+  where
+    stripField field@(name, value) rest
+      | removeField name || isBodyDigestField name = rest
+      | name == H.hTrailer =
+          case Header.parseFromHeaders Header.defaultHeaderSettings (value :| []) of
+            Right Trailer.TrailerEmpty -> field : rest
+            Right (Trailer.Trailer names)
+              | not (any digestName names) -> field : rest
+              | Just remaining <- NE.nonEmpty (NE.filter (not . digestName) names) ->
+                  (name, WB.toStrictByteString (Trailer.renderTrailer (Trailer.Trailer remaining))) : rest
+            _ -> rest
+      | otherwise = field : rest
+    digestName = isBodyDigestField . CI.mk . ShortText.toByteString
+{-# INLINE stripDigestFields #-}

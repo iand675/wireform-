@@ -1,18 +1,27 @@
 module Test.CBOR (cborTests) where
 
+import CBOR.Class (FromCBOR, decodeCBOR, encodeCBOR, encodeCBORDirect)
 import CBOR.Decode (decode, decodeSequence)
 import CBOR.Encode (encode, encodeDeterministic, encodeSequence)
+import CBOR.Encoding qualified as Encoding
 import CBOR.JSON (fromJSON, toJSON)
+import CBOR.Stream qualified as Stream
+import CBOR.TagRegistry (defaultCBORTagRegistry, lookupTag, thValidate)
 import CBOR.Value qualified as C
+import Control.Exception (ErrorCall, evaluate, try)
 import Data.Aeson qualified as Aeson
+import Data.Bits ((.|.))
 import Data.ByteString qualified as BS
+import Data.Either (isLeft)
+import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
-import Data.Word (Word64, Word8)
+import Data.Word (Word8, Word16, Word32, Word64)
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import Numeric.Natural (Natural)
 import Test.Syd
 import Test.Syd.Hedgehog ()
 
@@ -23,12 +32,147 @@ cborTests =
     sequence_
       [ rfc8949AppendixA
       , rfc8949ConformanceVectors
+      , streamingConformance
       , propertyRoundtrips
       , edgeCases
+      , numericConformance
       , jsonTests
       , deterministicTests
       , sequenceTests
       ]
+
+
+streamingConformance :: Spec
+streamingConformance = describe "Incremental CBOR" $ do
+  it "suspends inside a byte string chunk and resumes across later chunks" $ do
+    let wire = BS.pack [0x5f, 0x43, 1, 2, 3, 0x40, 0x42, 4, 5, 0xff]
+        expected = C.ByteString (BS.pack [1, 2, 3, 4, 5])
+    checkStreamSplits wire expected
+    checkByteFeeds (BS.unpack wire) expected
+
+  it "feeds a nested CBOR item one byte at a time" $ do
+    let wire = BS.pack [0x9f, 0xbf, 0x01, 0x7f, 0x62, 0xc3, 0xa9, 0x61, 0x21, 0xff, 0xff, 0xd8, 0x64, 0x82, 0x00, 0x19, 0x01, 0x00, 0xff]
+        expected =
+          C.Array (V.fromList
+            [ C.Map (V.singleton (C.UInt 1, C.TextString "é!"))
+            , C.Tag 100 (C.Array (V.fromList [C.UInt 0, C.UInt 256]))
+            ])
+    checkStreamSplits wire expected
+    checkByteFeeds (BS.unpack wire) expected
+
+  it "can reuse the same continuation after suspending inside a header" $ do
+    let step = Stream.streamDecode (BS.pack [0x82, 0x59, 0x00])
+    expectDone
+      (C.Array (V.fromList [C.ByteString "a", C.UInt 2]))
+      (BS.singleton 0xf6)
+      (Stream.feedMore step (BS.pack [1, 0x61, 2, 0xf6]))
+    expectDone
+      (C.Array (V.fromList [C.ByteString "bc", C.UInt 3]))
+      BS.empty
+      (Stream.feedMore step (BS.pack [2, 0x62, 0x63, 3]))
+
+  it "rejects an overflowing combined string size before waiting for its body" $ do
+    let limit = encode (C.UInt (fromIntegral (maxBound :: Int)))
+        check prefix major =
+          case Stream.feedMore (Stream.streamDecode (BS.pack (prefix ++ [major .|. BS.head limit]))) (BS.tail limit) of
+            Stream.Fail _ -> pure ()
+            step -> expectationFailure ("Expected impossible length to fail, got " ++ show step)
+    check [0x5f, 0x41, 0x61] 0x40
+    check [0x7f, 0x61, 0x61] 0x60
+
+  it "rejects RFC 8949 Appendix F syntax errors at every split" $ do
+    let reserved = concatMap (\major -> map (\arg -> [major + arg]) [28 .. 30]) [0, 32 .. 224]
+        wires = reserved ++
+          [ [0xf8, 0], [0xf8, 1], [0xf8, 0x18], [0xf8, 0x1f]
+          , [0x5f, 0, 0xff], [0x5f, 0x21, 0xff], [0x5f, 0x61, 0, 0xff]
+          , [0x5f, 0x80, 0xff], [0x5f, 0xa0, 0xff], [0x5f, 0xc0, 0, 0xff]
+          , [0x5f, 0xe0, 0xff], [0x7f, 0x41, 0, 0xff]
+          , [0x5f, 0x5f, 0x41, 0, 0xff, 0xff], [0x7f, 0x7f, 0x61, 0, 0xff, 0xff]
+          , [0xff], [0x81, 0xff], [0x82, 0, 0xff], [0xa1, 0xff], [0xa1, 0xff, 0]
+          , [0xa1, 0, 0xff], [0xa2, 0, 0, 0xff], [0x9f, 0x81, 0xff]
+          , [0x9f, 0x82, 0x9f, 0x81, 0x9f, 0x9f, 0xff, 0xff, 0xff, 0xff]
+          , [0xbf, 0, 0xff], [0xbf, 0, 0, 0, 0xff], [0x1f], [0x3f], [0xdf]
+          ]
+        check wire split = do
+          let (prefix, rest) = BS.splitAt split wire
+          case Stream.feedMore (Stream.streamDecode prefix) rest of
+            Stream.Fail _ -> pure ()
+            step -> expectationFailure ("Expected syntax failure for " ++ show wire ++ ", got " ++ show step)
+    mapM_ (\bytes -> let wire = BS.pack bytes in mapM_ (check wire) [0 .. BS.length wire]) wires
+
+  it "rejects truncated RFC 8949 Appendix F inputs at EOF" $ do
+    let wires =
+          [ [0x18], [0x19], [0x1a], [0x1b], [0x19, 1], [0x1a, 1, 2]
+          , [0x1b, 1, 2, 3, 4, 5, 6, 7], [0x38], [0x58], [0x78], [0x98]
+          , [0x9a, 1, 0xff, 0], [0xb8], [0xd8], [0xf8], [0xf9, 0], [0xfa, 0, 0], [0xfb, 0, 0, 0]
+          , [0x41], [0x61], [0x5a, 0xff, 0xff, 0xff, 0xff, 0]
+          , (0x5b : replicate 8 0xff) ++ [1, 2, 3]
+          , [0x7a, 0xff, 0xff, 0xff, 0xff, 0]
+          , (0x7b : 0x7f : replicate 7 0xff) ++ [1, 2, 3]
+          , [0x81], replicate 9 0x81, [0x82, 0], [0xa1], [0xa2, 1, 2], [0xa1, 0], [0xa2, 0, 0, 0]
+          , [0xc0], [0x5f, 0x41, 0], [0x7f, 0x61, 0]
+          , [0x9f], [0x9f, 1, 2], [0xbf], [0xbf, 1, 2, 1, 2], [0x81, 0x9f], [0x9f, 0x80, 0]
+          , [0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0xff, 0xff, 0xff, 0xff]
+          , [0x9f, 0x81, 0x9f, 0x81, 0x9f, 0x9f, 0xff, 0xff, 0xff]
+          ]
+    mapM_ (shouldReject . BS.pack) wires
+
+  it "agrees with the strict decoder on arbitrary short inputs and leftover bytes" $
+    withTests 2000 $ property $ do
+      wire <- forAll (Gen.bytes (Range.linear 0 32))
+      width <- forAll (Gen.int (Range.linear 1 8))
+      let expected = firstStrictItem wire
+          observed = collect (Stream.streamDecode BS.empty) (splitBytes width wire)
+      observed === expected
+  where
+    firstStrictItem wire = seek 1
+      where
+        seek n
+          | n > BS.length wire = Nothing
+          | otherwise = case decode (BS.take n wire) of
+              Right value -> Just (encode value, BS.drop n wire)
+              Left _ -> seek (n + 1)
+
+    collect (Stream.Done value rest) chunks = Just (encode value, BS.concat (rest : chunks))
+    collect (Stream.Partial more) (chunk : chunks) = collect (more chunk) chunks
+    collect _ _ = Nothing
+
+    splitBytes width bytes
+      | BS.null bytes = []
+      | otherwise = let (chunk, rest) = BS.splitAt width bytes in chunk : splitBytes width rest
+
+
+checkStreamSplits :: BS.ByteString -> C.Value -> IO ()
+checkStreamSplits wire expected = mapM_ check [0 .. BS.length wire - 1]
+  where
+    trailing = BS.singleton 0xf6
+
+    check split = do
+      let (prefix, rest) = BS.splitAt split wire
+      case Stream.streamDecode prefix of
+        step@(Stream.Partial _) -> do
+          case Stream.feedMore step BS.empty of
+            Stream.Fail _ -> pure ()
+            eof -> expectationFailure ("Expected truncation, got " ++ show eof)
+          expectDone expected trailing (Stream.feedMore step (rest <> trailing))
+        early -> expectationFailure ("Expected partial input at split " ++ show split ++ ", got " ++ show early)
+
+
+checkByteFeeds :: [Word8] -> C.Value -> IO ()
+checkByteFeeds = go (Stream.streamDecode BS.empty)
+  where
+    go step [] expected = expectDone expected BS.empty step
+    go step@(Stream.Partial _) (byte : rest) expected =
+      go (Stream.feedMore step (BS.singleton byte)) rest expected
+    go early _ _ = expectationFailure ("Finished before the last feed: " ++ show early)
+
+
+expectDone :: C.Value -> BS.ByteString -> Stream.DecodeStep C.Value -> IO ()
+expectDone expected trailing = \case
+  Stream.Done value leftover -> do
+    value `shouldBe` expected
+    leftover `shouldBe` trailing
+  step -> expectationFailure ("Expected a complete item, got " ++ show step)
 
 
 -- | RFC 8949 Appendix A test vectors: exact byte sequences.
@@ -188,7 +332,43 @@ rfc8949AppendixA =
             , it "indefinite map {_ 1:2}" $
                 decode (BS.pack [0xbf, 0x01, 0x02, 0xff])
                   `shouldBe` Right (C.Map (V.fromList [(C.UInt 1, C.UInt 2)]))
+            , it "rejects a UTF-8 code point split across CBOR text chunks" $
+                shouldReject (BS.pack [0x7f, 0x61, 0xc3, 0x61, 0xa9, 0xff])
+            , it "accepts a UTF-8 code point split across transport chunks" $ do
+                let first = BS.pack [0x7f, 0x62, 0xc3]
+                    rest = BS.pack [0xa9, 0x60, 0x61, 0x21, 0xff]
+                    expected = C.TextString "é!"
+                decode (first <> rest) `shouldBe` Right expected
+                case Stream.feedMore (Stream.streamDecode first) (rest <> BS.singleton 0x01) of
+                  Stream.Done value leftover -> do
+                    value `shouldBe` expected
+                    leftover `shouldBe` BS.singleton 0x01
+                  step -> expectationFailure ("Expected decoded text, got " ++ show step)
             ]
+      , describe "Decode lengths and counts" $
+          sequence_
+            [ it "rejects byte strings, text, arrays, maps and chunks with overflowing lengths" $ do
+                let prefixes = [[0x5b], [0x7b], [0x9b], [0xbb], [0x5f, 0x5b], [0x7f, 0x7b]]
+                    sizes = [replicate 8 0xff, 0x7f : replicate 7 0xff]
+                mapM_ (\prefix -> mapM_ (\size -> shouldReject (BS.pack (prefix ++ size))) sizes) prefixes
+            , it "rejects representable counts that exceed the minimum possible payload" $ do
+                shouldReject (BS.pack [0x85, 0x01])
+                shouldReject (BS.pack [0xa2, 0x01, 0x02, 0x03])
+            ]
+      , it "fails on malformed streaming input as soon as it is detected" $ do
+          let malformed = map BS.pack [[0xff], [0x61, 0xff], [0x9f, 0xf8, 0x00]]
+          mapM_ (\wire -> case Stream.streamDecode wire of
+            Stream.Fail _ -> pure ()
+            step -> expectationFailure ("Expected immediate stream failure, got " ++ show step)) malformed
+          let partial = Stream.streamDecode (BS.singleton 0xf8)
+          case partial of
+            Stream.Partial _ -> pure ()
+            step -> expectationFailure ("Expected more bytes, got " ++ show step)
+          case Stream.feedMore partial (BS.singleton 0x20) of
+            Stream.Done value rest -> do
+              value `shouldBe` C.Simple 32
+              rest `shouldBe` BS.empty
+            step -> expectationFailure ("Expected completed simple value, got " ++ show step)
       , describe "Float encoding/decoding" $
           sequence_
             [ it "float32 100000.0" $ do
@@ -203,6 +383,103 @@ rfc8949AppendixA =
                 decode bs `shouldBe` Right val
             ]
       ]
+
+shouldReject :: BS.ByteString -> IO ()
+shouldReject bytes = do
+  isLeft (decode bytes) `shouldBe` True
+  isLeft (decodeSequence bytes) `shouldBe` True
+  case Stream.feedMore (Stream.streamDecode bytes) BS.empty of
+    Stream.Fail _ -> pure ()
+    step -> expectationFailure ("Expected stream rejection, got " ++ show step)
+
+numericConformance :: Spec
+numericConformance = describe "Numeric conformance" $ do
+  it "rejects every two-byte simple value below 32" $
+    mapM_ (\n -> shouldReject (BS.pack [0xf8, n])) [0 .. 31]
+
+  it "rejects reserved simple codes before encoding" $ do
+    result <- try (evaluate (encode (C.Simple 24))) :: IO (Either ErrorCall BS.ByteString)
+    isLeft result `shouldBe` True
+
+  it "encodes binary16 subnormals and rounds ties to even through both encoders" $ do
+    let unit = 2 ** (-24) :: Float
+        cases =
+          [ (unit, [0x00, 0x01])
+          , (2 ** (-14) - unit, [0x03, 0xff])
+          , (2 ** (-14) - unit / 2, [0x04, 0x00])
+          , (1 + 2 ** (-11), [0x3c, 0x00])
+          , (1 + 3 * 2 ** (-11), [0x3c, 0x02])
+          , (-unit / 2, [0x80, 0x00])
+          , (65520, [0x7c, 0x00])
+          ]
+    mapM_
+      (\(number, bits) -> do
+          let expected = BS.pack (0xf9 : bits)
+          encode (C.Float16 number) `shouldBe` expected
+          Encoding.encodingToByteString (Encoding.float16 number) `shouldBe` expected)
+      cases
+
+  it "preserves the smallest binary16 subnormal through decode and encode" $ do
+    let wire = BS.pack [0xf9, 0x00, 0x01]
+    (encode <$> decode wire) `shouldBe` Right wire
+    case Stream.streamDecode wire of
+      Stream.Done value _ -> encode value `shouldBe` wire
+      step -> expectationFailure ("Expected decoded subnormal, got " ++ show step)
+
+  it "rejects integer overflow instead of wrapping into fixed-width types" $ do
+    let readAs :: forall a. FromCBOR a => C.Value -> Either String a
+        readAs = decodeCBOR . encode
+    isLeft (readAs @Int8 (C.UInt 128)) `shouldBe` True
+    isLeft (readAs @Int16 (C.NInt 32768)) `shouldBe` True
+    isLeft (readAs @Int32 (C.UInt 2147483648)) `shouldBe` True
+    isLeft (readAs @Int64 (C.NInt 9223372036854775808)) `shouldBe` True
+    isLeft (readAs @Int (C.UInt 18446744073709551615)) `shouldBe` True
+    isLeft (readAs @Word (C.NInt 0)) `shouldBe` True
+    isLeft (readAs @Word8 (C.UInt 256)) `shouldBe` True
+    isLeft (readAs @Word16 (C.UInt 65536)) `shouldBe` True
+    isLeft (readAs @Word32 (C.UInt 4294967296)) `shouldBe` True
+    readAs @Int8 (C.NInt 127) `shouldBe` Right minBound
+    readAs @Int64 (C.UInt 9223372036854775807) `shouldBe` Right maxBound
+    readAs @Word32 (C.UInt 4294967295) `shouldBe` Right maxBound
+    readAs @Word64 (C.UInt maxBound) `shouldBe` Right maxBound
+
+  it "uses bignum tags at the 64-bit integer boundaries" $ do
+    let limit = 18446744073709551616 :: Integer
+        magnitude = 0x49 : 0x01 : replicate 8 0
+        cases =
+          [ (limit - 1, BS.pack (0x1b : replicate 8 0xff))
+          , (-limit, BS.pack (0x3b : replicate 8 0xff))
+          , (limit, BS.pack (0xc2 : magnitude))
+          , (-limit - 1, BS.pack (0xc3 : magnitude))
+          ]
+    mapM_
+      (\(number, expected) -> do
+          encodeCBOR number `shouldBe` expected
+          encodeCBORDirect number `shouldBe` expected
+          decodeCBOR @Integer expected `shouldBe` Right number)
+      cases
+    decodeCBOR @Natural (BS.pack (0xc2 : magnitude)) `shouldBe` Right (fromInteger limit)
+    encodeCBORDirect (fromInteger limit :: Natural) `shouldBe` BS.pack (0xc2 : magnitude)
+    isLeft (decodeCBOR @Natural (BS.pack (0xc3 : magnitude))) `shouldBe` True
+    isLeft (decodeCBOR @Integer (BS.pack [0xc2, 0x01])) `shouldBe` True
+
+  it "uses the shortest exact floating point width for deterministic output" $ do
+    encodeDeterministic (C.Float64 1.5) `shouldBe` BS.pack [0xf9, 0x3e, 0x00]
+    encodeDeterministic (C.Float64 1000000.5) `shouldBe` BS.pack [0xfa, 0x49, 0x74, 0x24, 0x08]
+    encodeDeterministic (C.Float32 (-0.0)) `shouldBe` BS.pack [0xf9, 0x80, 0x00]
+    encodeDeterministic (C.Float64 (1 / 0)) `shouldBe` BS.pack [0xf9, 0x7c, 0x00]
+    encodeDeterministic (C.Float64 (0 / 0)) `shouldBe` BS.pack [0xf9, 0x7e, 0x00]
+    encodeDeterministic (C.Float64 1.1) `shouldBe` encode (C.Float64 1.1)
+    let value = C.Map (V.fromList [(C.TextString "pad", C.UInt 2), (C.Float64 1.5, C.UInt 1)])
+    encodeDeterministic value
+      `shouldBe` BS.pack [0xa2, 0xf9, 0x3e, 0x00, 0x01, 0x63, 0x70, 0x61, 0x64, 0x02]
+
+  it "accepts a half-precision epoch timestamp in the default tag registry" $ do
+    let wire = encodeDeterministic (C.Tag 1 (C.Float64 1.5))
+    case (lookupTag 1 defaultCBORTagRegistry, decode wire) of
+      (Just handler, Right (C.Tag 1 value)) ->
+        thValidate handler value `shouldBe` Right (C.Float16 1.5)
+      _ -> expectationFailure "Expected an epoch tag and its handler"
 
 
 {- | RFC 8949 Appendix A conformance vectors (embedded).
@@ -220,13 +497,17 @@ rfc8949ConformanceVectors =
       ]
   where
     mkDecodeTest (name, hexBytes, expected) =
-      it name $ decode (BS.pack hexBytes) `shouldBe` Right expected
+      it name $ do
+        let wire = BS.pack hexBytes
+        decode wire `shouldBe` Right expected
+        checkStreamSplits wire expected
 
     mkRoundtripTest (name, hexBytes, expected) =
       it name $ do
         let bs = BS.pack hexBytes
         decode bs `shouldBe` Right expected
         encode expected `shouldBe` bs
+        checkStreamSplits bs expected
 
     -- Vectors where roundtrip==true and we have a decoded value
     roundtripVectors :: [(String, [Word8], C.Value)]
@@ -263,7 +544,7 @@ rfc8949ConformanceVectors =
       , ("undefined", [0xf7], C.Undefined)
       , -- Simple values
         ("simple(16)", [0xf0], C.Simple 16)
-      , ("simple(24)", [0xf8, 0x18], C.Simple 24)
+      , ("simple(32)", [0xf8, 0x20], C.Simple 32)
       , ("simple(255)", [0xf8, 0xff], C.Simple 255)
       , -- Byte strings
         ("bytes empty", [0x40], C.ByteString BS.empty)
@@ -743,6 +1024,8 @@ jsonTests =
           toJSON C.Null `shouldBe` Aeson.Null
       , it "TextString to JSON" $
           toJSON (C.TextString "hello") `shouldBe` Aeson.String "hello"
+      , it "uses unpadded base64url for byte strings" $
+          toJSON (C.ByteString (BS.pack [0xff, 0xef])) `shouldBe` Aeson.String "_-8"
       , it "Array to JSON" $
           toJSON (C.Array (V.fromList [C.UInt 1, C.UInt 2]))
             `shouldBe` Aeson.Array (V.fromList [Aeson.Number 1, Aeson.Number 2])
@@ -761,6 +1044,15 @@ jsonTests =
           fromJSON (Aeson.Number 42) `shouldBe` C.UInt 42
       , it "fromJSON negative int" $
           fromJSON (Aeson.Number (-1)) `shouldBe` C.NInt 0
+      , it "preserves both ends of CBOR's basic integer range" $ do
+          let boundaryValues = [C.UInt 9223372036854775809, C.UInt maxBound, C.NInt 9223372036854775808, C.NInt maxBound]
+          mapM_ (\value -> fromJSON (toJSON value) `shouldBe` value) boundaryValues
+          fromJSON (Aeson.Number (-1.5)) `shouldBe` C.Float64 (-1.5)
+      , it "keeps extra fields on an object with tag and value keys" $ do
+          let value = C.Map (V.fromList [(C.TextString "tag", C.UInt 1), (C.TextString "value", C.UInt 2), (C.TextString "name", C.TextString "client")])
+              json = toJSON value
+          toJSON (fromJSON json) `shouldBe` json
+          fromJSON (toJSON (C.Tag 1 (C.UInt 2))) `shouldBe` C.Tag 1 (C.UInt 2)
       , it "fromJSON array" $
           fromJSON (Aeson.Array (V.fromList [Aeson.Number 1]))
             `shouldBe` C.Array (V.fromList [C.UInt 1])

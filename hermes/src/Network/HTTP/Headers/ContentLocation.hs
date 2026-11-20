@@ -1,8 +1,7 @@
 {- |
 RFC 9110 §8.7 @Content-Location@ — representation metadata giving a URI
-reference for a specific representation of the resource. The value is a single
-@URI-reference@; we keep it as an opaque 'ST.ShortText' rather than fabricating
-a URI parser, faithfully preserving the bytes on the wire.
+reference for a specific representation of the resource. The value is a single fragmentless URI
+reference. The codec validates its syntax and preserves its spelling.
 
 == Grammar
 
@@ -20,8 +19,8 @@ module Network.HTTP.Headers.ContentLocation (
   renderContentLocation,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (fragmentlessReference)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentLocation)
 import qualified Network.HTTP.Headers.Mason as M
@@ -29,7 +28,7 @@ import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | The (opaque) URI reference carried by a @Content-Location@ header.
+-- | The fragmentless URI reference carried by a @Content-Location@ header.
 newtype ContentLocation = ContentLocation {contentLocationUri :: ST.ShortText}
   deriving stock (Eq, Show)
 
@@ -40,11 +39,7 @@ instance KnownHeader ContentLocation where
   type Direction ContentLocation = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser contentLocationParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Content-Location header: " <> show rest
-    Fail -> Left "Failed to parse Content-Location header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Content-Location" contentLocationParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentLocation
@@ -54,7 +49,7 @@ instance KnownHeader ContentLocation where
 
 
 contentLocationParser :: ParserT st String ContentLocation
-contentLocationParser = ContentLocation <$> takeRestShortText
+contentLocationParser = ContentLocation <$> fragmentlessReference
 
 
 renderContentLocation :: ContentLocation -> M.Builder

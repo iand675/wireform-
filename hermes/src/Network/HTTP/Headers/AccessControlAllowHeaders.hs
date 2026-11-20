@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Access-Control-Allow-Headers@ (WHATWG Fetch / W3C CORS) response header used in
 a preflight (@OPTIONS@) response to indicate which request header field-names a
@@ -9,7 +7,7 @@ wildcard for requests without credentials.
 == Grammar
 
 @
-Access-Control-Allow-Headers = "*" / 1#field-name
+Access-Control-Allow-Headers = #field-name
 @
 
 Spec: <https://fetch.spec.whatwg.org/#http-access-control-allow-headers>
@@ -37,6 +35,7 @@ data AccessControlAllowHeaders
     AllowHeadersWildcard
   | -- | An explicit, comma-separated list of field-names.
     AllowHeaders !(NE.NonEmpty ST.ShortText)
+  | AllowHeadersEmpty
   deriving stock (Eq, Show)
 
 
@@ -46,11 +45,7 @@ instance KnownHeader AccessControlAllowHeaders where
   type Direction AccessControlAllowHeaders = 'Response
 
 
-  parseFromHeaders _ headers = case runParser accessControlAllowHeadersParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Access-Control-Allow-Headers header: " <> show rest
-    Fail -> Left "Failed to parse Access-Control-Allow-Headers header"
-    Err e -> Left e
+  parseFromHeaders _ = fmap fromEntries . parseListFieldLines "Access-Control-Allow-Headers" (httpList fieldName)
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccessControlAllowHeaders
@@ -60,16 +55,17 @@ instance KnownHeader AccessControlAllowHeaders where
 
 
 accessControlAllowHeadersParser :: ParserT st String AccessControlAllowHeaders
-accessControlAllowHeadersParser = wildcard <|> list
-  where
-    wildcard = AllowHeadersWildcard <$ $(char '*')
-    list = do
-      first <- fieldName
-      rest <- many (ows *> $(char ',') *> ows *> fieldName)
-      pure $ AllowHeaders (first NE.:| rest)
+accessControlAllowHeadersParser = fromEntries <$> httpList fieldName
+
+
+fromEntries :: [ST.ShortText] -> AccessControlAllowHeaders
+fromEntries [] = AllowHeadersEmpty
+fromEntries ["*"] = AllowHeadersWildcard
+fromEntries (first : rest) = AllowHeaders (first NE.:| rest)
 
 
 renderAccessControlAllowHeaders :: AccessControlAllowHeaders -> M.Builder
 renderAccessControlAllowHeaders = \case
+  AllowHeadersEmpty -> mempty
   AllowHeadersWildcard -> "*"
   AllowHeaders names -> M.intersperse ", " (map shortText (NE.toList names))

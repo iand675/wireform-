@@ -17,9 +17,10 @@ trailing list of parameters.
   word       = token / quoted-string
 @
 
-Each preference's optional value and each parameter value are captured verbatim
-(including any surrounding quoting) rather than fabricating semantics for the
-open-ended preference space, so values round-trip exactly.
+Preference and parameter values retain their token or quoted spelling.
+Quoted values represent each wire octet with its Latin-1 code point.
+'lookupPreference' applies the first-occurrence rule for preference
+names, and 'decodePreferenceValue' gives the unescaped value.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc7240> (RFC 7240).
 
@@ -29,20 +30,22 @@ See also: "Network.HTTP.Headers.PreferenceApplied", "Network.HTTP.Headers.Repeat
 module Network.HTTP.Headers.Prefer (
   Prefer (..),
   Preference (..),
+  lookupPreference,
+  decodePreferenceValue,
   preferParser,
   renderPrefer,
 ) where
 
 import qualified Data.ByteString as B
-import Data.Foldable1 (fold1)
+import qualified Data.CaseInsensitive as CI
+import Data.Foldable (find)
 import qualified Data.List.NonEmpty as NE
-import Data.Maybe (catMaybes)
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPrefer)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (renderHttpWordValue, renderSeparated, shortText)
 
 
 -- | A @Prefer@ header value: a non-empty list of preferences.
@@ -69,7 +72,9 @@ instance KnownHeader Prefer where
   type Direction Prefer = 'Request
 
 
-  parseFromHeaders _ headers = fold1 <$> traverse runPreferParser headers
+  parseFromHeaders _ (line NE.:| []) = parseFieldLine "Prefer" preferParser line
+  parseFromHeaders _ fields =
+    Prefer <$> (parseListFieldLines "Prefer" (httpList preferenceParser) fields >>= requireNonEmptyList "Prefer")
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderPrefer
@@ -78,50 +83,56 @@ instance KnownHeader Prefer where
   headerName _ = hPrefer
 
 
-runPreferParser :: B.ByteString -> Either String Prefer
-runPreferParser bs = case runParser preferParser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left $ "Unconsumed input after parsing Prefer header: " <> show rest
-  Fail -> Left "Failed to parse Prefer header"
-  Err e -> Left e
+-- | Find the first occurrence of a preference name, ignoring ASCII case.
+lookupPreference :: ST.ShortText -> Prefer -> Maybe Preference
+lookupPreference name = find matches . preferPreferences
+  where
+    folded = CI.foldCase (ST.toByteString name)
+    matches preference =
+      let key = preferenceName preference
+      in key == name || CI.foldCase (ST.toByteString key) == folded
+
+
+-- | Decode a retained preference or parameter value. An empty quoted
+-- string and an absent value both yield 'Nothing'.
+decodePreferenceValue :: Maybe ST.ShortText -> Either String (Maybe B.ByteString)
+decodePreferenceValue Nothing = Right Nothing
+decodePreferenceValue (Just raw) = do
+  let bytes = ST.toByteString raw
+      spelling
+        | B.isPrefixOf "\"" bytes && B.any (>= 128) bytes = M.toStrictByteString (renderHttpWordValue raw)
+        | otherwise = bytes
+  value <- parseFieldLine "preference value" (rfc9110TokenBS <|> httpQuotedBytes) spelling
+  pure (if B.null value then Nothing else Just value)
 
 
 preferParser :: ParserT st String Prefer
-preferParser = do
-  first <- preferenceParser
-  rest <- many (ows *> $(char ',') *> ows *> preferenceParser)
-  pure $ Prefer (first NE.:| rest)
+preferParser = Prefer <$> httpList1 "Prefer" preferenceParser
 
 
 preferenceParser :: ParserT st String Preference
 preferenceParser = do
   name <- rfc9110Token
-  val <- optional ($(char '=') *> shortASCIIFromParser_ (quotedString <|> rfc9110Token))
-  params <- catMaybes <$> many parameterParser
-  pure $ Preference name val params
-
-
--- | One iteration of @OWS ";" [ OWS parameter ]@; the parameter itself is optional.
-parameterParser :: ParserT st String (Maybe (ST.ShortText, Maybe ST.ShortText))
-parameterParser = ows *> $(char ';') *> ows *> optional parameterKV
+  value <- optionalHttpWordValue
+  Preference name value <$> parameters
   where
-    parameterKV = do
-      pn <- rfc9110Token
-      pv <- optional ($(char '=') *> shortASCIIFromParser_ (quotedString <|> rfc9110Token))
-      pure (pn, pv)
+    parameters =
+      withOption (skipSome (ows *> $(char ';') *> ows)) (const nextParameter) (pure [])
+    nextParameter = withOption parameter (\first -> (first :) <$> parameters) (pure [])
+    parameter = (,) <$> rfc9110Token <*> optionalHttpWordValue
 
 
 renderPrefer :: Prefer -> M.Builder
-renderPrefer (Prefer ps) = M.intersperse ", " $ map renderPreference $ NE.toList ps
+renderPrefer (Prefer ps) = renderSeparated ", " renderPreference (NE.toList ps)
 
 
 renderPreference :: Preference -> M.Builder
 renderPreference (Preference name val params) =
   shortText name
-    <> maybe mempty (\v -> M.char7 '=' <> shortText v) val
+    <> foldMap (\v -> M.char7 '=' <> renderHttpWordValue v) val
     <> foldMap renderParameter params
 
 
 renderParameter :: (ST.ShortText, Maybe ST.ShortText) -> M.Builder
 renderParameter (pn, pv) =
-  M.char7 ';' <> shortText pn <> maybe mempty (\v -> M.char7 '=' <> shortText v) pv
+  M.char7 ';' <> shortText pn <> foldMap (\v -> M.char7 '=' <> renderHttpWordValue v) pv

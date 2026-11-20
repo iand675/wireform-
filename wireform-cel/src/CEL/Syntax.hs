@@ -59,8 +59,9 @@ data Expr
     ESelect !Expr !Text
   | -- | Indexing @e[i]@.
     EIndex !Expr !Expr
-  | {- | A function or macro call. @'Just' recv@ is receiver/method style
-    (@recv.f(args)@); 'Nothing' is a global call (@f(args)@).
+  | {- | A function or macro call. @'Just' recv@ is written as @recv.f(args)@.
+    'Nothing' is a global call, whose name retains a leading dot for a
+    root-qualified call such as @.f(args)@.
     -}
     ECall !(Maybe Expr) !Text ![Expr]
   | -- | List literal @[e1, e2, ...]@.

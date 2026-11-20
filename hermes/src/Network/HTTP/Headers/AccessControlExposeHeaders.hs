@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Access-Control-Expose-Headers@ (WHATWG Fetch / W3C CORS) response header listing
 the response header field-names that browsers are allowed to expose to client
@@ -9,7 +7,7 @@ The value @*@ exposes every header for requests without credentials.
 == Grammar
 
 @
-Access-Control-Expose-Headers = "*" / 1#field-name
+Access-Control-Expose-Headers = #field-name
 @
 
 Spec: <https://fetch.spec.whatwg.org/#http-access-control-expose-headers>
@@ -37,6 +35,7 @@ data AccessControlExposeHeaders
     ExposeHeadersWildcard
   | -- | An explicit, comma-separated list of field-names.
     ExposeHeaders !(NE.NonEmpty ST.ShortText)
+  | ExposeHeadersEmpty
   deriving stock (Eq, Show)
 
 
@@ -46,11 +45,7 @@ instance KnownHeader AccessControlExposeHeaders where
   type Direction AccessControlExposeHeaders = 'Response
 
 
-  parseFromHeaders _ headers = case runParser accessControlExposeHeadersParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Access-Control-Expose-Headers header: " <> show rest
-    Fail -> Left "Failed to parse Access-Control-Expose-Headers header"
-    Err e -> Left e
+  parseFromHeaders _ = fmap fromEntries . parseListFieldLines "Access-Control-Expose-Headers" (httpList fieldName)
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccessControlExposeHeaders
@@ -60,16 +55,17 @@ instance KnownHeader AccessControlExposeHeaders where
 
 
 accessControlExposeHeadersParser :: ParserT st String AccessControlExposeHeaders
-accessControlExposeHeadersParser = wildcard <|> list
-  where
-    wildcard = ExposeHeadersWildcard <$ $(char '*')
-    list = do
-      first <- fieldName
-      rest <- many (ows *> $(char ',') *> ows *> fieldName)
-      pure $ ExposeHeaders (first NE.:| rest)
+accessControlExposeHeadersParser = fromEntries <$> httpList fieldName
+
+
+fromEntries :: [ST.ShortText] -> AccessControlExposeHeaders
+fromEntries [] = ExposeHeadersEmpty
+fromEntries ["*"] = ExposeHeadersWildcard
+fromEntries (first : rest) = ExposeHeaders (first NE.:| rest)
 
 
 renderAccessControlExposeHeaders :: AccessControlExposeHeaders -> M.Builder
 renderAccessControlExposeHeaders = \case
+  ExposeHeadersEmpty -> mempty
   ExposeHeadersWildcard -> "*"
   ExposeHeaders names -> M.intersperse ", " (map shortText (NE.toList names))

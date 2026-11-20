@@ -1,9 +1,7 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Reporting-Endpoints@ response header — names one or more reporting endpoints to
-which the user agent may deliver reports (CSP violations, NEL reports,
-deprecation/intervention reports, etc.).
+which the user agent may deliver document reports, such as CSP violations
+and deprecation notices.
 
 The value is an RFC 8941 structured-field __dictionary__ whose keys are endpoint
 names and whose values are 'String's holding the endpoint URL:
@@ -12,11 +10,11 @@ names and whose values are 'String's holding the endpoint URL:
 Reporting-Endpoints: default=\"https://reports.example/default\", backup=\"https://reports.example/backup\"
 @
 
-Member order is preserved. Per the spec each value is a structured-field string;
-no parameters are defined.
+The codec combines field lines in order and retains members whose String values
+are URI references. It ignores member parameters. The client resolves relative
+references against the response URL and applies its origin trust policy.
 
-Spec: <https://www.w3.org/TR/reporting-1/#header> (Reporting API, §3.1) and
-RFC 8941 §3.2 (Dictionaries).
+Spec: <https://www.w3.org/TR/reporting-1/#header> (Reporting API, §3.2).
 
 See also: "Network.HTTP.Headers.NEL",
 "Network.HTTP.Headers.ContentSecurityPolicy",
@@ -30,15 +28,16 @@ module Network.HTTP.Headers.ReportingEndpoints (
   renderReportingEndpoints,
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
+import Data.Maybe (mapMaybe)
 import Data.Text.Short (ShortText)
+import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (uriReferenceBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hReportingEndpoints)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- | A single dictionary member: an endpoint name mapped to its URL.
@@ -60,47 +59,32 @@ instance KnownHeader ReportingEndpoints where
   type Direction ReportingEndpoints = 'Response
 
 
-  parseFromHeaders _ headers = case runParser reportingEndpointsParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Reporting-Endpoints header: " <> show rest
-    Fail -> Left "Failed to parse Reporting-Endpoints header"
-    Err e -> Left e
+  parseFromHeaders _ = parseStructuredFieldLines "Reporting-Endpoints" reportingEndpointsParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderReportingEndpoints
 
 
+  omitHeaderValue = null . reportingEndpoints
+  {-# INLINE omitHeaderValue #-}
+
+
   headerName _ = hReportingEndpoints
 
 
--- | RFC 8941 §3.1.2 dictionary @key@: @( lcalpha / \"*\" ) *( lcalpha / DIGIT / \"_\" / \"-\" / \".\" / \"*\" )@.
-sfKey :: ParserT st e ShortText
-sfKey =
-  shortASCIIFromParser_
-    ( skipSatisfyAscii (`CharSet.member` firstKeyChar)
-        *> skipMany (skipSatisfyAscii (`CharSet.member` keyChar))
-    )
-  where
-    firstKeyChar = CharSet.range 'a' 'z' <> CharSet.singleton '*'
-    keyChar = CharSet.range 'a' 'z' <> CharSet.range '0' '9' <> "_-.*"
-
-
 reportingEndpointsParser :: ParserT st String ReportingEndpoints
-reportingEndpointsParser = do
-  ows
-  members <- member `sepBy` (ows *> $(char ',') *> ows)
-  ows
-  pure (ReportingEndpoints members)
+reportingEndpointsParser = ReportingEndpoints . mapMaybe endpoint <$> structuredFieldDictionary
   where
-    member = do
-      name <- sfKey
-      $(char '=')
-      ReportingEndpoint name <$> rfc8941String
+    endpoint (StructuredFieldDictionaryEntry name (StructuredItem (StructuredFieldItem (String url) _))) =
+      case parseByteString (uriReferenceBytes <* eof) (ST.toByteString (unsafeToRFC8941String url)) of
+        Right () -> Just (ReportingEndpoint name url)
+        _ -> Nothing
+    endpoint _ = Nothing
 
 
 renderReportingEndpoints :: ReportingEndpoints -> M.Builder
 renderReportingEndpoints (ReportingEndpoints members) =
-  M.intersperse ", " (map renderMember members)
+  R.renderSeparated ", " renderMember (orderedFieldEntries reportingEndpointName members)
   where
     renderMember (ReportingEndpoint name url) =
       R.shortText name <> M.char7 '=' <> R.rfc8941String url

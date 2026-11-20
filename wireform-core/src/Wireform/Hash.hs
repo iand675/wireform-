@@ -32,6 +32,7 @@ module Wireform.Hash (
 
   -- * XXH64
   xxh64,
+  xxh64IO,
 
   -- * Roaring 32-bit container
   roaringDecodeArray,
@@ -51,8 +52,9 @@ import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.C.Types (CSize (..))
-import Foreign.ForeignPtr (withForeignPtr)
-import Foreign.Ptr (Ptr, castPtr)
+import Foreign.ForeignPtr (touchForeignPtr, withForeignPtr)
+import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
+import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 
 
@@ -71,7 +73,7 @@ foreign import ccall unsafe "hs_wf_bucket_long"
 
 
 foreign import ccall unsafe "hs_wf_xxh64"
-  c_xxh64 :: Ptr Word8 -> CSize -> Word64 -> Word64
+  c_xxh64 :: Ptr Word8 -> CSize -> Word64 -> IO Word64
 
 
 foreign import ccall unsafe "hs_wf_roaring_decode_array"
@@ -138,13 +140,28 @@ bucketBytes n bs
 {-# INLINE bucketBytes #-}
 
 
--- | XXH64 with caller-supplied seed. The byte length is a 'CSize'
--- (@size_t@), so a 'BS.ByteString' over 2 GiB is hashed in full.
+{- | XXH64 with caller-supplied seed. The byte length is a 'CSize'
+(@size_t@), so a 'BS.ByteString' over 2 GiB is hashed in full.
+-}
 xxh64 :: Word64 -> BS.ByteString -> Word64
-xxh64 seed bs = unsafePerformIO $
-  unsafeUseAsCStringLen bs $ \(p, len) ->
-    pure $! c_xxh64 (castPtr p) (fromIntegral len) seed
+xxh64 seed bs = unsafePerformIO (xxh64IO seed bs)
 {-# INLINE xxh64 #-}
+
+
+{- | The same XXH64 operation in IO. Streaming callers can thread its
+result directly through their loop without allocating a pure thunk
+and running a separate 'unsafePerformIO' boundary for each value.
+-}
+xxh64IO :: Word64 -> BS.ByteString -> IO Word64
+xxh64IO seed bs = do
+  let (fp, offset, len) = BSI.toForeignPtr bs
+  hash <- c_xxh64 (unsafeForeignPtrToPtr fp `plusPtr` offset) (fromIntegral len) seed
+  -- The stateful FFI call finishes before touchForeignPtr. Returning its
+  -- result after this lifetime barrier lets callers keep it unboxed;
+  -- withForeignPtr would return a boxed Word64 through keepAlive#.
+  touchForeignPtr fp
+  pure hash
+{-# INLINE xxh64IO #-}
 
 
 -- ============================================================

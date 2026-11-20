@@ -4,12 +4,15 @@ module Test.Hermes.WebSocket (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Data.Time (UTCTime (..), fromGregorian)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (HeaderMessage (..), defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupHeaderWith, setHeader, withHeaderDateReference, withHeaderMessage)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import qualified Network.HTTP.Headers.SecWebSocketAccept as Accept
@@ -53,6 +56,20 @@ unit_key_render =
       `shouldBe` "dGhlIHNhbXBsZSBub25jZQ=="
 
 
+unit_key_field :: Spec
+unit_key_field = it "requires exactly one field with 16 bytes and zero padding bits" $ do
+  let wire = "AQIDBAUGBwgJCgsMDQ4PEA=="
+      value = Key.SecWebSocketKey (BS.pack [1 .. 16])
+      readField raw = lookupHeader @Key.SecWebSocketKey (headerMapFromList [("Sec-WebSocket-Key", raw)])
+  readField (" \t" <> wire <> "\t") `shouldBe` Right (Just value)
+  headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("sec-websocket-key", wire)]
+  mapM_
+    (\raw -> readField raw `shouldSatisfy` isLeft)
+    ["", "AQID", "AQIDBAUGBwgJCgsMDQ4PEC==", "AQIDBAUGBwgJCgsMDQ4PEA", "AQIDBAUGBwgJCgsMDQ4PEAA=", "AQIDBAUGBwgJCgsMDQ4PEA==x"]
+  lookupHeader @Key.SecWebSocketKey (headerMapFromList [("Sec-WebSocket-Key", wire), ("Sec-WebSocket-Key", wire)])
+    `shouldSatisfy` isLeft
+
+
 -- ---------------------------------------------------------------------------
 -- Sec-WebSocket-Accept
 -- ---------------------------------------------------------------------------
@@ -68,9 +85,25 @@ unit_accept_parse = it "parses the RFC 6455 example accept" $
 
 unit_accept_render :: Spec
 unit_accept_render =
-  it "renders digest bytes as base64" $
-    M.toStrictByteString (Accept.renderSecWebSocketAccept (Accept.SecWebSocketAccept "the sample nonce"))
-      `shouldBe` "dGhlIHNhbXBsZSBub25jZQ=="
+  it "renders the 20 digest bytes as base64" $
+    M.toStrictByteString (Accept.renderSecWebSocketAccept sampleAccept)
+      `shouldBe` "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+
+
+sampleAccept :: Accept.SecWebSocketAccept
+sampleAccept = Accept.SecWebSocketAccept (BS.pack [179, 122, 79, 44, 192, 98, 79, 22, 144, 246, 70, 6, 207, 56, 89, 69, 178, 190, 196, 234])
+
+
+unit_accept_field :: Spec
+unit_accept_field = it "requires exactly one field with a canonical padded 20-byte digest" $ do
+  let wire = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+      readField raw = lookupHeader @Accept.SecWebSocketAccept (headerMapFromList [("Sec-WebSocket-Accept", raw)])
+  readField ("\t" <> wire <> " ") `shouldBe` Right (Just sampleAccept)
+  mapM_
+    (\raw -> readField raw `shouldSatisfy` isLeft)
+    ["dGhlIHNhbXBsZSBub25jZQ==", "s3pPLMBiTxaQ9kYGzzhZRbK+xOp=", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo", "s3pPLMBiTxaQ9kYGzzhZRbK+xO==", wire <> "X"]
+  lookupHeader @Accept.SecWebSocketAccept (headerMapFromList [("Sec-WebSocket-Accept", wire), ("Sec-WebSocket-Accept", wire)])
+    `shouldSatisfy` isLeft
 
 
 -- ---------------------------------------------------------------------------
@@ -91,6 +124,26 @@ unit_version_render =
       `shouldBe` "13"
 
 
+unit_version_field :: Spec
+unit_version_field = it "distinguishes a single request version from ordered response advertisements" $ do
+  let request = withHeaderDateReference (UTCTime (fromGregorian 2020 1 1) 0) (withHeaderMessage HeaderRequest defaultHeaderSettings)
+      response = withHeaderMessage HeaderResponse defaultHeaderSettings
+      first wire = headerMapFromList [("Sec-WebSocket-Version", wire)]
+      split = headerMapFromList [("Sec-WebSocket-Version", " 13, 8"), ("Sec-WebSocket-Version", ",7,0,255, ")]
+      value = Ver.SecWebSocketVersion (13 :| [8, 7, 0, 255])
+  lookupHeaderWith @Ver.SecWebSocketVersion request (first "\t13 ") `shouldBe` Right (Just (Ver.SecWebSocketVersion (13 :| [])))
+  lookupHeaderWith @Ver.SecWebSocketVersion request (first "255") `shouldBe` Right (Just (Ver.SecWebSocketVersion (255 :| [])))
+  lookupHeaderWith @Ver.SecWebSocketVersion request split `shouldSatisfy` isLeft
+  lookupHeaderWith @Ver.SecWebSocketVersion request (first "13, 8") `shouldSatisfy` isLeft
+  lookupHeaderWith @Ver.SecWebSocketVersion response (first ", \t13,, 8, 7,0,255 ,,") `shouldBe` Right (Just value)
+  lookupHeaderWith @Ver.SecWebSocketVersion response split `shouldBe` Right (Just value)
+  lookupHeader @Ver.SecWebSocketVersion split `shouldBe` Right (Just value)
+  headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("sec-websocket-version", "13, 8, 7, 0, 255")]
+  mapM_
+    (\raw -> lookupHeaderWith @Ver.SecWebSocketVersion response (first raw) `shouldSatisfy` isLeft)
+    ["", ", ,", "013", "00", "256", "299", "-1", "+13", "18446744073709551629", "13, 08"]
+
+
 -- ---------------------------------------------------------------------------
 -- Sec-WebSocket-Protocol
 -- ---------------------------------------------------------------------------
@@ -108,6 +161,32 @@ unit_protocol_render =
     M.toStrictByteString
       (Proto.renderSecWebSocketProtocol (Proto.SecWebSocketProtocol (tok "chat" :| [tok "superchat"])))
       `shouldBe` "chat, superchat"
+
+
+unit_protocol_field :: Spec
+unit_protocol_field = it "preserves distinct case-sensitive offers and reads one selected token" $ do
+  let request = withHeaderMessage HeaderRequest defaultHeaderSettings
+      response = withHeaderMessage HeaderResponse defaultHeaderSettings
+      first wire = headerMapFromList [("Sec-WebSocket-Protocol", wire)]
+      split = headerMapFromList [("Sec-WebSocket-Protocol", ",Chat, "), ("Sec-WebSocket-Protocol", "chat,superchat")]
+      duplicate = headerMapFromList [("Sec-WebSocket-Protocol", "Chat"), ("Sec-WebSocket-Protocol", "Chat")]
+      offers = "Chat, chat"
+      sliced = BS.take (BS.length offers) (BS.drop 1 ("!" <> offers <> "/"))
+  lookupHeaderWith @Proto.SecWebSocketProtocol request split
+    `shouldBe` Right (Just (Proto.SecWebSocketProtocol ("Chat" :| ["chat", "superchat"])))
+  lookupHeaderWith @Proto.SecWebSocketProtocol request duplicate `shouldSatisfy` isLeft
+  lookupHeaderWith @Proto.SecWebSocketProtocol request (first sliced)
+    `shouldBe` Right (Just (Proto.SecWebSocketProtocol ("Chat" :| ["chat"])))
+  lookupHeaderWith @Proto.SecWebSocketProtocol request (first ",Chat, , chat,, ")
+    `shouldBe` Right (Just (Proto.SecWebSocketProtocol ("Chat" :| ["chat"])))
+  lookupHeaderWith @Proto.SecWebSocketProtocol request (first ",chat,,chat,") `shouldSatisfy` isLeft
+  lookupHeaderWith @Proto.SecWebSocketProtocol request (first "a,b,a") `shouldSatisfy` isLeft
+  lookupHeaderWith @Proto.SecWebSocketProtocol response (first "chat")
+    `shouldBe` Right (Just (Proto.SecWebSocketProtocol ("chat" :| [])))
+  lookupHeaderWith @Proto.SecWebSocketProtocol response (first " chat\t")
+    `shouldBe` Right (Just (Proto.SecWebSocketProtocol ("chat" :| [])))
+  lookupHeaderWith @Proto.SecWebSocketProtocol response (first "chat,") `shouldSatisfy` isLeft
+  lookupHeaderWith @Proto.SecWebSocketProtocol response split `shouldSatisfy` isLeft
 
 
 -- ---------------------------------------------------------------------------
@@ -141,16 +220,26 @@ unit_ext_render =
                 :| [Ext.Extension (tok "x-custom") []]
             )
     in M.toStrictByteString (Ext.renderSecWebSocketExtensions v)
-        `shouldBe` "permessage-deflate;client_max_window_bits=15, x-custom"
+         `shouldBe` "permessage-deflate;client_max_window_bits=15, x-custom"
+
+
+unit_ext_field :: Spec
+unit_ext_field = it "preserves ordered extension lines and requires unescaped parameter tokens" $ do
+  let values = headerMapFromList [("Sec-WebSocket-Extensions", ",foo; mode \t= \"a\\b\""), ("Sec-WebSocket-Extensions", "bar;flag,")]
+      value = Ext.SecWebSocketExtensions (Ext.Extension "foo" [Ext.ExtensionParam "mode" (Just "ab")] :| [Ext.Extension "bar" [Ext.ExtensionParam "flag" Nothing]])
+      readField raw = lookupHeader @Ext.SecWebSocketExtensions (headerMapFromList [("Sec-WebSocket-Extensions", raw)])
+      readOn side = lookupHeaderWith @Ext.SecWebSocketExtensions (withHeaderMessage side defaultHeaderSettings) values
+  readOn HeaderRequest `shouldBe` Right (Just value)
+  readOn HeaderResponse `shouldBe` Right (Just value)
+  headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("sec-websocket-extensions", "foo;mode=ab, bar;flag")]
+  mapM_
+    (\raw -> readField raw `shouldSatisfy` isLeft)
+    ["foo;mode=\"\"", "foo;mode=\"a b\"", "foo;mode=\"a,b\"", "foo;mode=\"a\\\"b\"", "foo;mode=\"\xff\"", "foo;mode=", "foo;", ", ,"]
 
 
 -- ---------------------------------------------------------------------------
 -- Round-trip properties
 -- ---------------------------------------------------------------------------
-
-bytesGen :: Gen ByteString
-bytesGen = Gen.bytes (Range.linear 1 48)
-
 
 tokenGen :: Gen ST.ShortText
 tokenGen = ST.fromString <$> Gen.list (Range.linear 1 8) (Gen.element tokenChars)
@@ -160,7 +249,7 @@ tokenGen = ST.fromString <$> Gen.list (Range.linear 1 8) (Gen.element tokenChars
 
 prop_key_roundtrip :: Property
 prop_key_roundtrip = property $ do
-  b <- forAll bytesGen
+  b <- forAll (Gen.bytes (Range.singleton 16))
   let v = Key.SecWebSocketKey b
       bs = M.toStrictByteString (Key.renderSecWebSocketKey v)
   case runOk (runParser Key.secWebSocketKeyParser) bs of
@@ -170,7 +259,7 @@ prop_key_roundtrip = property $ do
 
 prop_accept_roundtrip :: Property
 prop_accept_roundtrip = property $ do
-  b <- forAll bytesGen
+  b <- forAll (Gen.bytes (Range.singleton 20))
   let v = Accept.SecWebSocketAccept b
       bs = M.toStrictByteString (Accept.renderSecWebSocketAccept v)
   case runOk (runParser Accept.secWebSocketAcceptParser) bs of
@@ -190,7 +279,7 @@ prop_version_roundtrip = property $ do
 
 prop_protocol_roundtrip :: Property
 prop_protocol_roundtrip = property $ do
-  ps <- forAll (Gen.nonEmpty (Range.linear 1 4) tokenGen)
+  ps <- forAll (NE.nub <$> Gen.nonEmpty (Range.linear 1 4) tokenGen)
   let v = Proto.SecWebSocketProtocol ps
       bs = M.toStrictByteString (Proto.renderSecWebSocketProtocol v)
   case runOk (runParser Proto.secWebSocketProtocolParser) bs of
@@ -222,14 +311,19 @@ tests =
     sequence_
       [ unit_key_parse
       , unit_key_render
+      , unit_key_field
       , unit_accept_parse
       , unit_accept_render
+      , unit_accept_field
       , unit_version_parse
       , unit_version_render
+      , unit_version_field
       , unit_protocol_parse
       , unit_protocol_render
+      , unit_protocol_field
       , unit_ext_parse
       , unit_ext_render
+      , unit_ext_field
       , it "key bytes round-trip" prop_key_roundtrip
       , it "accept bytes round-trip" prop_accept_roundtrip
       , it "version list round-trip" prop_version_roundtrip

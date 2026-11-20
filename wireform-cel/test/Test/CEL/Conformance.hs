@@ -245,6 +245,18 @@ stringsAndBytes =
       , true "\"hello world\".startsWith(\"hello\")"
       , true "\"foobar\".matches(\"foo.*\")"
       , true "matches(\"foobar\", \"foo.*\")"
+      , err "contains('banana', 'ana')"
+      , err "startsWith('banana', 'ban')"
+      , err "endsWith('banana', 'ana')"
+      , true "'prefix FOO suffix'.matches('(?i)foo')"
+      , true "'123'.matches(r'^(?:\\d+)$')"
+      , false "'abc'.matches(r'^(?:\\d+)$')"
+      , true "'Καλημέρα'.matches(r'^\\p{Greek}+$')"
+      , false "'foo\\nbar'.matches('^bar$')"
+      , true "'foo\\nbar'.matches('(?m)^bar$')"
+      , true "'a\\x00b'.matches('\\x00b$')"
+      , true "''.matches('')"
+      , err "'aa'.matches(r'^(a)\\1$')"
       , ok "\"hello\".size()" (VInt 5)
       , ok "size(\"world!\")" (VInt 6)
       , ok "\"fiance\\u0301\".size()" (VInt 7)
@@ -316,6 +328,11 @@ macros =
       , ok "[1, 2, 3].map(n, n * n)" (VList (V.fromList [VInt 1, VInt 4, VInt 9]))
       , ok "[1, 2, 3, 4].map(num, num % 2 == 0, num * 2)" (VList (V.fromList [VInt 4, VInt 8]))
       , ok "{'one': 1, 'two': 2}.map(k, k)" (VList (V.fromList [VString "one", VString "two"]))
+      , ok "[1, 2, 3].transformMap(i, v, i + v)" (VMap (celMapFromList [(VInt 0, VInt 1), (VInt 1, VInt 3), (VInt 2, VInt 5)]))
+      , ok "[1, 0, 3].transformMap(i, v, i % 2 == 0, 6 / v)" (VMap (celMapFromList [(VInt 0, VInt 6), (VInt 2, VInt 2)]))
+      , ok "[].transformMap(i, v, v)" (VMap (celMapFromList []))
+      , true "{'a': 1}.transformMap(k, v, v + 1) == {'a': 2}"
+      , err "[0].transformMap(i, v, true, 6 / v)"
       , -- error absorption consistent with && / ||
         true "[1, 0, 3].exists(x, 4 / x == 4)"
       , false "[2, 0, 3].all(x, 4 / x == 4)"
@@ -334,9 +351,18 @@ conversions =
       [ ok "bool(true)" (VBool True)
       , ok "bool(\"true\")" (VBool True)
       , ok "bool(\"FALSE\")" (VBool False)
+      , err "('1').int()"
+      , err "true.string()"
+      , err "getSeconds(duration('1s'))"
       , ok "bytes(\"hello\")" (VBytes "hello")
       , ok "double(10)" (VDouble 10.0)
       , ok "double(\"3.14\")" (VDouble 3.14)
+      , ok "double(string(double('Infinity')))" (VDouble (1 / 0))
+      , ok "double(string(double('-Infinity')))" (VDouble (-1 / 0))
+      , ok "double('inf')" (VDouble (1 / 0))
+      , ok "double('-iNF')" (VDouble (-1 / 0))
+      , ok "double('nAn')" (VDouble (0 / 0))
+      , err "double('+NaN')"
       , ok "int(123)" (VInt 123)
       , ok "int(3.14)" (VInt 3)
       , ok "int(\"123\")" (VInt 123)
@@ -391,6 +417,11 @@ datetime =
       , ok "duration('1m') - duration('1s')" (durSecs 59)
       , ok "duration('-1.5h')" (durSecs (-5400))
       , ok "duration('0')" (durSecs 0)
+      , ok "duration('.5s1.ms2µs3μs')" (VDuration (Duration 0 501005000))
+      , ok "duration('0.9ns0.9ns')" (durSecs 0)
+      , ok "duration('-1.9ns')" (VDuration (Duration 0 (-1)))
+      , err "duration(' 1s ')"
+      , err "duration('.s')"
       , ok "string(duration('1m1ms'))" (VString "60.001s")
       , ok "duration('3h').getHours()" (VInt 3)
       , ok "duration('1h30m').getMinutes()" (VInt 90)
@@ -404,6 +435,15 @@ datetime =
       , ok "timestamp('2023-12-25T12:00:00Z').getHours()" (VInt 12)
       , ok "timestamp('2023-12-25T12:30:30Z').getSeconds()" (VInt 30)
       , ok "timestamp('2023-12-25T12:00:00.500Z').getMilliseconds()" (VInt 500)
+      , ok "string(timestamp('1970-01-01T00:00:00.9999999999Z'))" (VString "1970-01-01T00:00:00.999999999Z")
+      , ok "string(timestamp('9999-12-31T23:59:59.9999999999Z'))" (VString "9999-12-31T23:59:59.999999999Z")
+      , err "timestamp('2024-06-30T23:59:60Z')"
+      , ok "timestamp('1900-01-01T00:00:00Z').getSeconds('Europe/Paris')" (VInt 21)
+      , ok "timestamp('1970-01-01T00:00:00Z').getSeconds('Africa/Monrovia')" (VInt 30)
+      , ok "timestamp('1970-01-01T00:44:45Z').getDate('Africa/Monrovia')" (VInt 1)
+      , ok "timestamp('1970-01-01T00:00:00.123Z').getMilliseconds('Africa/Monrovia')" (VInt 123)
+      , ok "timestamp('1970-01-01T00:00:00.123Z').getMilliseconds('+05:30')" (VInt 123)
+      , err "timestamp('1970-01-01T00:00:00.123Z').getMilliseconds('Not/AZone')"
       , ok "string(timestamp('2023-01-01T00:00:00Z') + duration('24h'))" (VString "2023-01-02T00:00:00Z")
       , ok "string(timestamp('2023-01-10T12:00:00Z') - timestamp('2023-01-10T00:00:00Z'))" (VString "43200s")
       , true "timestamp('2023-08-25T12:00:00Z') <= timestamp('2023-08-26T12:00:00Z')"

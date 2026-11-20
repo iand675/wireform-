@@ -6,16 +6,9 @@ top-level document shares a browsing-context group (and thus a @window@
 reference) with cross-origin documents it opens or is opened by. Together
 with COEP it gates cross-origin isolation.
 
-The value is an RFC 8941 structured-field item: a bare token naming the
-policy, optionally followed by a @report-to@ parameter naming a reporting
-endpoint.
-
-@
-Cross-Origin-Opener-Policy = sf-token *( \";\" parameter )
-sf-token                   = \"unsafe-none\" / \"same-origin\"
-                           / \"same-origin-allow-popups\" / \"noopener-allow-popups\"
-parameter                  = \"report-to\" \"=\" sf-string
-@
+The value is a Structured Fields Item whose bare value is a policy token.
+The string parameter @report-to@ names a reporting endpoint. Other
+parameters are validated and ignored.
 
 Spec: WHATWG HTML, <https://html.spec.whatwg.org/multipage/browsers.html#cross-origin-opener-policies>.
 
@@ -32,7 +25,7 @@ module Network.HTTP.Headers.CrossOriginOpenerPolicy (
   renderCrossOriginOpenerPolicy,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hCrossOriginOpenerPolicy)
 import qualified Network.HTTP.Headers.Mason as M
@@ -68,14 +61,11 @@ instance KnownHeader CrossOriginOpenerPolicy where
   type Direction CrossOriginOpenerPolicy = 'Response
 
 
-  parseFromHeaders _ headers = case runParser crossOriginOpenerPolicyParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Cross-Origin-Opener-Policy header: " <> show rest
-    Fail -> Left "Failed to parse Cross-Origin-Opener-Policy header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Cross-Origin-Opener-Policy" crossOriginOpenerPolicyParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderCrossOriginOpenerPolicy
+  renderToHeaders _ (CrossOriginOpenerPolicy directive Nothing) = coopDirectiveBytes directive
+  renderToHeaders _ value = M.toStrictByteString (renderCrossOriginOpenerPolicy value)
 
 
   headerName _ = hCrossOriginOpenerPolicy
@@ -84,35 +74,23 @@ instance KnownHeader CrossOriginOpenerPolicy where
 coopDirectiveParser :: ParserT st String CoopDirective
 coopDirectiveParser =
   $( switch
-      [|
-        case _ of
-          "unsafe-none" -> pure CoopUnsafeNone
-          "same-origin-allow-popups" -> pure CoopSameOriginAllowPopups
-          "same-origin" -> pure CoopSameOrigin
-          "noopener-allow-popups" -> pure CoopNoopenerAllowPopups
-        |]
+       [|
+         case _ of
+           "unsafe-none" -> pure CoopUnsafeNone
+           "same-origin-allow-popups" -> pure CoopSameOriginAllowPopups
+           "same-origin" -> pure CoopSameOrigin
+           "noopener-allow-popups" -> pure CoopNoopenerAllowPopups
+         |]
    )
 
 
--- | Parse the optional @;report-to="endpoint"@ structured-field parameter.
-reportToParam :: ParserT st String RFC8941String
-reportToParam = do
-  $(char ';')
-  ows
-  $(string "report-to")
-  $(char '=')
-  rfc8941String
-
-
 crossOriginOpenerPolicyParser :: ParserT st String CrossOriginOpenerPolicy
-crossOriginOpenerPolicyParser = do
-  d <- coopDirectiveParser
-  rt <- optional reportToParam
-  pure (CrossOriginOpenerPolicy d rt)
+crossOriginOpenerPolicyParser =
+  CrossOriginOpenerPolicy <$> coopDirectiveParser <*> structuredFieldStringParameter "report-to"
 
 
-renderCoopDirective :: CoopDirective -> M.Builder
-renderCoopDirective = \case
+coopDirectiveBytes :: CoopDirective -> ByteString
+coopDirectiveBytes = \case
   CoopUnsafeNone -> "unsafe-none"
   CoopSameOrigin -> "same-origin"
   CoopSameOriginAllowPopups -> "same-origin-allow-popups"
@@ -121,5 +99,5 @@ renderCoopDirective = \case
 
 renderCrossOriginOpenerPolicy :: CrossOriginOpenerPolicy -> M.Builder
 renderCrossOriginOpenerPolicy (CrossOriginOpenerPolicy d rt) =
-  renderCoopDirective d
-    <> R.rfc8941Parameter R.ExcludeIfEmpty R.rfc8941String "report-to" rt
+  M.byteString (coopDirectiveBytes d)
+    <> foldMap (\endpoint -> ";report-to=" <> R.rfc8941String endpoint) rt

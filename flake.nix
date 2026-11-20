@@ -28,7 +28,8 @@
         # tested. Keep in sync with `allGhcVersions` in nix/ci/packages.nix.
         ghcMatrix = {
           ghc910 = "ghc910";
-          ghc912 = "ghc912";
+          # The series alias currently selects 9.12.3; CI declares 9.12.4.
+          ghc912 = "ghc9124";
           ghc914 = "ghc914";
         };
 
@@ -202,15 +203,19 @@
             # hashing the UNPACKED tree (fetchzip) so the hash is stable
             # across mirror://hackage gzip variance. Used for deps that are
             # newer than what the pinned nixpkgs provides.
-            callHackageZip = name: ver: sha256:
-              hlib.doJailbreak (self.callCabal2nix name (pkgs.fetchzip {
+            callHackageSource = name: ver: sha256:
+              self.callCabal2nix name (pkgs.fetchzip {
                 url = "https://hackage.haskell.org/package/${name}-${ver}/${name}-${ver}.tar.gz";
                 inherit sha256;
-              }) {});
+              }) {};
+            callHackageZip = name: ver: sha256:
+              hlib.doJailbreak (callHackageSource name ver sha256);
             mkRaw = name: src:
               if name == "wireform-kafka-protocol"
               then self.callCabal2nixWithOptions name kafkaProtocolSrc
                      "--subpath wireform-kafka-protocol" {}
+              else if name == "wireform-cel"
+              then self.callCabal2nix name src { inherit (pkgs) re2; }
               else self.callCabal2nix name src {};
             mkPkg = name: src:
               applyFlags name
@@ -248,6 +253,15 @@
             perFormatAttrs // {
               wireform = wireformAttr;
               crc32c   = crc32cUnrestricted;
+              # Modular encryption uses crypton's cached GCM and system RNG.
+              # Keep its byte-array provider and official revised metadata
+              # consistent across the supported compiler package sets.
+              crypton = callHackageSource "crypton" "2.2.6" "sha256-Ll/UXRpvON64iincSgzFkcIA9CK9EeAygcjveYTlVoU=";
+              ram = callHackageSource "ram" "0.22.1" "sha256-viwoo1u5jRGO2pTzQLlJ/PgkLmxeafTg8DDGTylpcPo=";
+              base16 = hlib.overrideCabal (_: {
+                revision = "4";
+                editedCabalFile = "sha256-TdNBIoFo8s3gOVTdchde5yagcT4iAPbHtz9M2NIgc3c=";
+              }) (callHackageSource "base16" "1.0" "sha256-pLnipLnF7YuQvCwgw7Lp7sbwhab63sdEpubeSpaoEmY=");
               # wireform-http / wireform-kafka need hs-opentelemetry-api 1.0,
               # which nixpkgs hasn't packaged (it ships 0.3.1.0). The 1.0
               # release split the package, so pull the whole trio from
@@ -362,7 +376,7 @@
               hp.haskell-language-server
             ] ++ sharedTools ++ cdnTools;
 
-            buildInputs = systemDeps;
+            buildInputs = systemDeps ++ [ pkgs.re2 ];
 
             shellHook = ''
               echo "wireform dev shell — $(ghc --version)"

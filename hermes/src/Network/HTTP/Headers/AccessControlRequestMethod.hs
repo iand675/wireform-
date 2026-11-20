@@ -17,17 +17,20 @@ See also: "Network.HTTP.Headers.AccessControlRequestHeaders", "Network.HTTP.Head
 -}
 module Network.HTTP.Headers.AccessControlRequestMethod (
   AccessControlRequestMethod (..),
+  requestMethodAsMethod,
+  requestMethodFromMethod,
   accessControlRequestMethodParser,
   renderAccessControlRequestMethod,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAccessControlRequestMethod)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Methods (Method, MethodError, methodToBytes, mkMethod)
 
 
 -- | Value of the @Access-Control-Request-Method@ header: a single method token.
@@ -42,14 +45,10 @@ instance KnownHeader AccessControlRequestMethod where
   type Direction AccessControlRequestMethod = 'Request
 
 
-  parseFromHeaders _ headers = case runParser accessControlRequestMethodParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Access-Control-Request-Method header: " <> show rest
-    Fail -> Left "Failed to parse Access-Control-Request-Method header"
-    Err e -> Left e
+  parseFromHeaders _ = parseTokenFieldLine "Access-Control-Request-Method" AccessControlRequestMethod
 
 
-  renderToHeaders _ = M.toStrictByteString . renderAccessControlRequestMethod
+  renderToHeaders _ = ST.toByteString . requestMethod
 
 
   headerName _ = hAccessControlRequestMethod
@@ -57,6 +56,18 @@ instance KnownHeader AccessControlRequestMethod where
 
 accessControlRequestMethodParser :: ParserT st String AccessControlRequestMethod
 accessControlRequestMethodParser = AccessControlRequestMethod <$> rfc9110Token
+
+
+-- | Interpret the case-sensitive token as the shared HTTP method type.
+requestMethodAsMethod :: AccessControlRequestMethod -> Either MethodError Method
+requestMethodAsMethod = mkMethod . ST.toByteString . requestMethod
+
+
+-- | Validate the method's wire spelling before authoring the header.
+requestMethodFromMethod :: Method -> Either MethodError AccessControlRequestMethod
+requestMethodFromMethod method = AccessControlRequestMethod (STU.fromByteStringUnsafe wire) <$ mkMethod wire
+  where
+    wire = methodToBytes method
 
 
 renderAccessControlRequestMethod :: AccessControlRequestMethod -> M.Builder

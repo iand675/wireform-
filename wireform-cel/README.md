@@ -83,7 +83,10 @@ share one definition of the language semantics.
   and the entire escape-sequence set with surrogate/range validation.
 - **Values**: `int` (64-bit signed), `uint` (64-bit unsigned), `double`,
   `bool`, `string`, `bytes`, `null`, `list`, `map`, `type`, and the abstract
-  `google.protobuf.Timestamp` / `google.protobuf.Duration`.
+  `google.protobuf.Timestamp` / `google.protobuf.Duration`. Protobuf scalar
+  wrapper literals evaluate to CEL primitives. Timestamp and duration
+  literals follow the upstream conformance fixtures. Protobuf JSON literals
+  (`Value`, `Struct`, `ListValue`) unpack to CEL values, maps, and lists.
 - **Semantics**: the numeric number-line model (`1 == 1u == 1.0`,
   cross-type ordering), `NaN` that is never equal and always unordered,
   heterogeneous equality, overflow-checked arithmetic, and the commutative,
@@ -95,18 +98,21 @@ share one definition of the language semantics.
   string functions (`contains`, `startsWith`, `endsWith`, `matches`), and the
   timestamp/duration accessors (`getFullYear`, `getMonth`, `getDate`,
   `getHours`, `getMinutes`, `getSeconds`, `getMilliseconds`, `getDayOfWeek`,
-  `getDayOfYear`, …).
+  `getDayOfYear`, …). Timestamp accessors support UTC, fixed offsets, and
+  named IANA timezones.
 
 ## Not yet supported
 
-- Protocol-buffer **message** values (construction and field access). The
-  well-known abstract types `Timestamp` and `Duration` are supported.
-- Named IANA/Joda **timezones** in date/time accessors (`UTC` and fixed
-  `±HH:MM` offsets work).
+- General protocol-buffer **message** values (construction and field access).
 - The optional static **type-checking** phase. CEL is dynamically typed;
   evaluation does not depend on it.
 
 ## Building and testing
+
+`matches` uses [RE2](https://github.com/google/re2). The build needs the RE2
+headers and library, discoverable as `re2` through `pkg-config`. Install
+`libre2-dev` and `pkg-config` on Debian or Ubuntu, or use the repository's
+`nix develop` shell.
 
 ```
 cabal build wireform-cel
@@ -130,18 +136,18 @@ git clone https://github.com/google/cel-spec
 CEL_SPEC_DIR=$PWD/cel-spec cabal test wireform-cel:wireform-cel-conformance
 ```
 
-It parses the textproto suites, evaluates each case, and compares the result
-against the expected `cel.expr.Value` (or expected error). Tests that need
-features this library does not implement — protocol-buffer message values and
-the CEL extension libraries (`string_ext`, `math_ext`, optionals, …) — are
-reported as *skipped*, not failed.
+The runner parses the textproto fixtures and compares each evaluation to its
+expected value or error. An omitted result matcher expects boolean `true`.
+It loads the checkout's proto2 and proto3 schemas to construct and decode
+protobuf message fixtures, including declared proto2 extensions.
+The runner lists excluded files for unsupported features such as the
+`string_ext`, `math_ext`, `lists_ext`, and `sets_ext` libraries.
 
-Current result over the core language files (everything except the extension
-libraries, the protobuf-enum file, the type-deduction/unknown-tracking files):
+Result with cel-spec v0.26.0, including all 39 enum and 94 timestamp and duration cases:
 
 ```
-TOTAL  pass=1124  skip=128  fail=0
+TOTAL  pass=1890  skip=0  fail=0
 ```
 
-All 128 skips are protocol-buffer-message cases (construction, field access,
-wrapper/`Any`/`Struct` conversions) — the one documented gap below.
+These totals include binary `google.protobuf.Any` decoding and equality.
+The runner reports excluded files separately.

@@ -265,10 +265,15 @@ toJson = \case
   CV.VBytes bs -> String (TE.decodeUtf8 (B64.encode bs))
   CV.VList xs -> Array (fmap toJson xs)
   CV.VMap m -> Object (AKM.fromList (fmap kv (CV.celMapEntries m)))
+  CV.VMessage (CV.CelMessage _ fields) -> Object (AKM.fromList (Map.foldrWithKey presentField [] fields))
+  v@CV.VAny {} -> either (const Null) toJson (CV.unpackValue v)
   CV.VType t -> String (T.pack (show t))
   CV.VTimestamp ts -> String (T.pack (show ts))
   CV.VDuration d -> String (T.pack (show d))
   where
+    presentField name field rest
+      | CV.celFieldPresent field = (AKey.fromText name, toJson (CV.celFieldStoredValue field)) : rest
+      | otherwise = rest
     kv (k, v) = (AKey.fromText (keyText k), toJson v)
     keyText (CV.VString s) = s
     keyText (CV.VInt i) = T.pack (show i)

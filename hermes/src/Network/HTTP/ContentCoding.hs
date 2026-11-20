@@ -5,14 +5,26 @@
 {- |
 The "HTTP Content Coding Registry", maintained by IANA at <https://www.iana.org/assignments/http-parameters/>, registers content-coding names.
 
-These values are used in the "Content-Encoding" header field (see Section 8.4 of [RFC7231]) and the "Accept-Encoding" header field (see Section 5.3.4 of [RFC7231])
-to indicate what content codings are supported by the sender and what codings were applied to the payload body.
+These values are used in the @Content-Encoding@ and @Accept-Encoding@ fields
+(<https://www.rfc-editor.org/rfc/rfc9110#section-8.4.1>).
 
 Values to be added to this namespace require IETF Review (see Section 4.8 of [RFC8126]) and MUST conform to the purpose of content coding defined in Section 8.4.1.
 -}
-module Network.HTTP.ContentCoding where
+module Network.HTTP.ContentCoding (
+  ContentCoding (..),
+  sameContentCoding,
+  contentCodingParser,
+  renderContentCoding,
+) where
 
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.CaseInsensitive as CI
+import Data.Char (toLower)
+import qualified Data.CharSet as CharSet
 import Data.Text.Short (ShortText)
+import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util
@@ -42,25 +54,48 @@ data ContentCoding
   deriving stock (Eq, Show)
 
 
+-- | Compare coding names using HTTP's ASCII case-insensitive semantics.
+-- The parser normalizes registered names and their legacy aliases.
+sameContentCoding :: ContentCoding -> ContentCoding -> Bool
+sameContentCoding (Custom a) (Custom b) = CI.foldCase (ST.toByteString a) == CI.foldCase (ST.toByteString b)
+sameContentCoding a b = a == b
+{-# INLINE sameContentCoding #-}
+
+
 contentCodingParser :: ParserT st e ContentCoding
-contentCodingParser =
+contentCodingParser = registeredCodingParser <|> extensionCoding
+  where
+    extensionCoding = do
+      token <- rfc9110TokenBS
+      pure $
+        if BS.any (\w -> w >= 65 && w <= 90) token
+          then case runParser registeredCodingParser (BSC.map toLower token) of
+            OK coding "" -> coding
+            _ -> Custom (STU.fromByteStringUnsafe token)
+          else Custom (STU.fromByteStringUnsafe token)
+
+
+-- Match common lowercase names without allocating or folding a token.
+registeredCodingParser :: ParserT st e ContentCoding
+registeredCodingParser =
   $( switch
        [|
          case _ of
-           "aes128gcm" -> pure AES128GCM
-           "br" -> pure Brotli
-           "compress" -> pure Compress
-           "deflate" -> pure Deflate
-           "exi" -> pure EfficientXMLInterchange
-           "gzip" -> pure GZip
-           "identity" -> pure Identity
-           "pack200-gzip" -> pure Pack200GZip
-           "x-compress" -> pure Compress
-           "x-gzip" -> pure GZip
-           "zstd" -> pure ZStd
-           _ -> Custom <$> rfc9110Token
+           "aes128gcm" -> wholeToken AES128GCM
+           "br" -> wholeToken Brotli
+           "compress" -> wholeToken Compress
+           "deflate" -> wholeToken Deflate
+           "exi" -> wholeToken EfficientXMLInterchange
+           "gzip" -> wholeToken GZip
+           "identity" -> wholeToken Identity
+           "pack200-gzip" -> wholeToken Pack200GZip
+           "x-compress" -> wholeToken Compress
+           "x-gzip" -> wholeToken GZip
+           "zstd" -> wholeToken ZStd
          |]
    )
+  where
+    wholeToken coding = coding <$ notFollowedBy (skipSatisfyAscii (`CharSet.member` tokenCharSet))
 
 
 renderContentCoding :: ContentCoding -> M.Builder

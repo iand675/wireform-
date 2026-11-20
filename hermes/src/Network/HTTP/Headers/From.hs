@@ -18,12 +18,11 @@ module Network.HTTP.Headers.From (
   renderFrom,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hFrom)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.Mailbox (Mailbox, mailboxParser, parseMailbox, renderMailbox)
+import Network.Mailbox (Mailbox, mailboxParser, renderMailbox)
 
 
 -- | The parsed value of a @From@ header: a single mailbox.
@@ -37,7 +36,7 @@ instance KnownHeader From where
   type Direction From = 'Request
 
 
-  parseFromHeaders _ headers = From <$> parseMailbox (NE.head headers)
+  parseFromHeaders _ = parseSingleFieldLine "From" fromParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderFrom

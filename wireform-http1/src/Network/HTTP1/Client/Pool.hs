@@ -2,8 +2,8 @@
 
 The pool is keyed on @(host, port)@ and holds idle connections in a
 bounded STM queue. A client checks one out, runs a request, checks it
-back in if the keep-alive state survived. Failed connections (parse
-error or @Connection: close@ response) are dropped on the floor.
+back in if the keep-alive state survived. Failed connections and those
+carrying a close-delimited response are closed.
 
 This is intentionally simple — the surface matches the @http-client@
 manager's pool shape without adopting its TLS / SOCKS / cookie jar
@@ -19,12 +19,11 @@ module Network.HTTP1.Client.Pool (
 ) where
 
 import Control.Concurrent.STM
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, mask, onException, try)
 import Data.Map.Strict qualified as Map
 import Network.HTTP1.Client
-import Network.HTTP1.Headers
-import Network.HTTP1.Parser
-import Network.HTTP1.Types
+import Network.HTTP1.Parser (ParseError (ParseUnexpectedEof))
+import Network.HTTP1.Types (Request, Response)
 
 
 data PoolConfig = PoolConfig
@@ -74,23 +73,20 @@ withPooledRequest
   -> Request
   -> ((Either ParseError Response) -> IO a)
   -> IO a
-withPooledRequest pool cfg req action = do
+withPooledRequest pool cfg req action = mask $ \restore -> do
   conn <- checkOut pool cfg
-  result <- try @SomeException $ sendRequestOn conn req
+  result <- try @SomeException $ restore (sendRequestOn conn req)
   case result of
     Left _e -> do
       closeClientConnection conn
-      action (Left ParseUnexpectedEof)
+      restore (action (Left ParseUnexpectedEof))
     Right resp -> do
-      a <- action resp
-      case resp of
-        Right r | reusable r -> checkIn pool cfg conn
-        _ -> closeClientConnection conn
+      a <- restore (action resp) `onException` closeClientConnection conn
+      reusable <- case resp of
+        Right _ -> clientConnectionCanReuse conn
+        Left _ -> pure False
+      if reusable then checkIn pool cfg conn else closeClientConnection conn
       pure a
-  where
-    reusable r = case findConnection (responseHeaders r) of
-      Just v | any (== ConnClose) (parseConnection v) -> False
-      _ -> True
 
 
 checkOut :: Pool -> ClientConfig -> IO ClientConnection

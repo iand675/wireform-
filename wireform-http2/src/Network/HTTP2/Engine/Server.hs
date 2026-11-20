@@ -123,15 +123,15 @@ getRequestTrailers (Request req) = readIORef (inpObjTrailers req)
 
 responseNoBody :: StatusCode -> ResponseHeaders -> Response
 responseNoBody st hdr =
-  Response (OutObj (setStatus st hdr) OutBodyNone defaultTrailersMaker)
+  Response (outObjWithNoTrailers (setStatus st hdr) OutBodyNone)
 
 responseFile :: StatusCode -> ResponseHeaders -> FileSpec -> Response
 responseFile st hdr fs =
-  Response (OutObj (setStatus st hdr) (OutBodyFile fs) defaultTrailersMaker)
+  Response (outObjWithNoTrailers (setStatus st hdr) (OutBodyFile fs))
 
 responseBuilder :: StatusCode -> ResponseHeaders -> BSB.Builder -> Response
 responseBuilder st hdr b =
-  Response (OutObj (setStatus st hdr) (OutBodyBuilder b) defaultTrailersMaker)
+  Response (outObjWithNoTrailers (setStatus st hdr) (OutBodyBuilder b))
 
 responseStreaming
   :: StatusCode
@@ -139,7 +139,7 @@ responseStreaming
   -> ((BSB.Builder -> IO ()) -> IO () -> IO ())
   -> Response
 responseStreaming st hdr body =
-  Response (OutObj (setStatus st hdr) (OutBodyStreaming body) defaultTrailersMaker)
+  Response (outObjWithNoTrailers (setStatus st hdr) (OutBodyStreaming body))
 
 responseStreamingIface
   :: StatusCode
@@ -147,7 +147,7 @@ responseStreamingIface
   -> (OutBodyIface -> IO ())
   -> Response
 responseStreamingIface st hdr body =
-  Response (OutObj (setStatus st hdr) (OutBodyStreamingIface body) defaultTrailersMaker)
+  Response (outObjWithNoTrailers (setStatus st hdr) (OutBodyStreamingIface body))
 
 responseBodySize :: Response -> Maybe Int
 responseBodySize (Response (OutObj _ (OutBodyFile (FileSpec _ _ len)) _)) =

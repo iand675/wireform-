@@ -24,17 +24,12 @@ module Network.HTTP.Headers.SecWebSocketAccept (
   renderSecWebSocketAccept,
 ) where
 
-import Data.ByteArray.Encoding (Base (Base64), convertFromBase, convertToBase)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
-import Data.CharSet (CharSet)
-import qualified Data.CharSet as CharSet
-import Data.CharSet.Posix.Ascii (alpha, digit)
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSecWebSocketAccept)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Wireform.Base64 (encodeBase64)
 
 
 -- | The decoded SHA-1 digest carried by @Sec-WebSocket-Accept@.
@@ -48,34 +43,18 @@ instance KnownHeader SecWebSocketAccept where
   type Direction SecWebSocketAccept = 'Response
 
 
-  parseFromHeaders _ headers = case runParser secWebSocketAcceptParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise -> Left ("Unconsumed input after parsing Sec-WebSocket-Accept: " <> show leftover)
-    Fail -> Left "Failed to parse Sec-WebSocket-Accept header"
-    Err e -> Left e
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = parseSingleFieldLine "Sec-WebSocket-Accept" secWebSocketAcceptParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderSecWebSocketAccept
+  renderToHeaders _ = encodeBase64 . secWebSocketAcceptBytes
 
 
   headerName _ = hSecWebSocketAccept
 
 
-base64CharSet :: CharSet
-base64CharSet = alpha <> digit <> "+/="
-
-
 secWebSocketAcceptParser :: ParserT st String SecWebSocketAccept
-secWebSocketAcceptParser = do
-  ows
-  withByteString (skipSome (skipSatisfyAscii (`CharSet.member` base64CharSet))) $ \_ bs ->
-    case convertFromBase Base64 bs of
-      Left e -> err e
-      Right ok -> pure (SecWebSocketAccept ok)
+secWebSocketAcceptParser = ows *> (SecWebSocketAccept <$> fixedBase64Bytes 20)
 
 
 renderSecWebSocketAccept :: SecWebSocketAccept -> M.Builder
-renderSecWebSocketAccept (SecWebSocketAccept bs) = M.byteString (convertToBase Base64 bs)
+renderSecWebSocketAccept (SecWebSocketAccept bs) = M.byteString (encodeBase64 bs)

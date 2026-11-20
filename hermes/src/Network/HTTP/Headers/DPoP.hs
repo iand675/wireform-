@@ -4,10 +4,9 @@ authorization server or resource server to demonstrate proof of possession
 of a private key (Demonstrating Proof of Possession at the Application
 Layer).
 
-The value is a JWT in JWS compact serialization
-(@base64url \".\" base64url \".\" base64url@). Because the proof must be
-verified against its exact on-the-wire bytes, we keep it verbatim as a
-'ST.ShortText' rather than decoding the JWS structure.
+The field codec checks the HTTP @token68@ syntax and preserves the exact
+proof spelling. The application verifies the compact JWT and its claims
+using the checks in RFC 9449 §4.3.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9449.html#section-4.1 RFC 9449 §4.1>
 
@@ -19,9 +18,10 @@ module Network.HTTP.Headers.DPoP (
   renderDPoP,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
+import Network.HTTP.Headers.Authorization (token68Parser)
 import Network.HTTP.Headers.HeaderFieldName (hDPoP)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -39,21 +39,17 @@ instance KnownHeader DPoP where
   type Direction DPoP = 'Request
 
 
-  parseFromHeaders _ headers = case runParser dPoPParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing DPoP header: " <> show rest
-    Fail -> Left "Failed to parse DPoP header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "DPoP" dPoPParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderDPoP
+  renderToHeaders _ = ST.toByteString . dPoPProof
 
 
   headerName _ = hDPoP
 
 
 dPoPParser :: ParserT st String DPoP
-dPoPParser = DPoP <$> takeRestShortText
+dPoPParser = DPoP . STU.fromByteStringUnsafe <$> token68Parser
 
 
 renderDPoP :: DPoP -> M.Builder

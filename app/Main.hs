@@ -24,8 +24,10 @@ import Proto.CodeGen (
   GenerateOpts (..),
   buildTypeRegistry,
   defaultGenerateOpts,
-  generateModuleText,
+  generateModuleTextWithImports,
+  moduleNameConflict,
   moduleNameForProto,
+  restrictOptionImportTypes,
  )
 import Proto.IDL.AST (ProtoFile, protoPackage)
 import Network.Connect.OpenAPI (
@@ -422,11 +424,17 @@ runProtoGenerate po = do
       exitFailure
     Right resolved -> do
       let protoRelPath = stripIncludeDirs (poIncludes po) (poInput po)
-          allResolved =
-            (protoRelPath, resolved)
-              : collectTransitiveImports (poIncludes po) resolved
-          registry = buildTypeRegistry codegenOpts allResolved
-          code = generateModuleText codegenOpts registry protoRelPath (rpFile resolved)
+          typeDependencies = map (\proto -> (stripIncludeDirs (poIncludes po) (rpPath proto), proto)) (resolvedTypeDependencies resolved)
+      case moduleNameConflict codegenOpts (map (\(path, proto) -> (path, rpFile proto)) typeDependencies) of
+        Just message -> TIO.hPutStrLn stderr message >> exitFailure
+        Nothing -> pure ()
+      let importFiles = resolvedImportFiles resolved
+      registry <- case restrictOptionImportTypes importFiles (rpFile resolved) (buildTypeRegistry codegenOpts typeDependencies) of
+        Left message -> TIO.hPutStrLn stderr message >> exitFailure
+        Right visible -> pure visible
+      code <- case generateModuleTextWithImports codegenOpts registry protoRelPath importFiles (rpFile resolved) of
+        Left message -> TIO.hPutStrLn stderr message >> exitFailure
+        Right generated -> pure generated
       case poOutput po of
         Nothing -> TIO.putStr code
         Just dir -> do

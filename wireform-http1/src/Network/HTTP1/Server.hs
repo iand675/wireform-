@@ -59,10 +59,8 @@ import System.Posix.IO (closeFd, defaultFileFlags, openFd, OpenMode (..))
 import Wireform.Network.TLS.OpenSSL (SslConn)
 import Wireform.Ring.Pool (RingPool)
 
-import Network.HTTP1.Chunked
-  (encodeChunk, encodeLastChunk, encodeLastChunkWithTrailers)
 import Network.HTTP1.Connection
-import Network.HTTP1.Encode (responseBuilder)
+import Network.HTTP1.Encode (headersBuilder, responseBuilder)
 import Network.HTTP1.Headers
 import Network.HTTP1.Parser
 import qualified Network.HTTP1.StreamingReader as SR
@@ -227,11 +225,13 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
             -- handlers don't have to worry about the dance.  We
             -- only honour the directive for HTTP/1.1 (RFC 9112
             -- §9.1); 1.0 has no 100-continue concept.
-            case findExpect (requestHeaders req0) of
-              Just v
-                | requestVersion req0 == HTTP_1_1
-                , isContinueExpect v -> sendInterim conn
-              _ -> pure ()
+            when
+              ( requestVersion req0 == HTTP_1_1
+                  && framing /= NoBody
+                  && framing /= ContentLength 0
+                  && expectsContinue (requestHeaders req0)
+              )
+              (sendInterim conn)
             (body, trailersIO) <- readBodyAndTrailers conn framing
             let req = req0
                   { requestBody = body
@@ -239,15 +239,15 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
                   }
             r <- try @SomeException $ do
               resp0 <- serverHandler cfg req
-              let willClose = decideClose cfg req resp0
-                  resp = adjustConnectionHeader willClose req resp0
-              sendResponse conn (requestMethod req) resp
-              drainBody (requestBody req)
+              let responseOptions = connectionOptions (responseHeaders resp0)
+                  willClose = decideClose cfg req responseOptions
+                  extraOption = responseConnectionOption willClose (requestVersion req) responseOptions
+              sendResponse conn (requestMethod req) extraOption resp0
               pure willClose
             case r of
               Left e
                 | Just (ProtocolException pe) <- fromException e ->
-                    -- The handler or body-drain hit a protocol error
+                    -- The handler hit a protocol error
                     -- while reading the request body (e.g. malformed
                     -- chunk-size line). Reply with the matching 4xx and
                     -- close the connection; we cannot keep keep-alive
@@ -259,9 +259,13 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
                     -- just close.
                     sendErrorResponse conn InternalServerError
                       `catch` (\(_ :: SomeException) -> pure ())
-              Right willClose
-                | willClose -> pure ()
-                | otherwise -> loop conn
+              Right willClose -> do
+                -- A final response has already gone out. If the unread
+                -- body is incomplete, close the connection.
+                drained <- try @ProtocolException (drainBody (requestBody req))
+                case drained of
+                  Right () | not willClose -> loop conn
+                  _ -> pure ()
 
 ------------------------------------------------------------------------
 -- Response writing
@@ -274,6 +278,7 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
 --   1. 'BodyPreEncoded' — emit the precomputed wire bytes with a
 --      single send. For HEAD we slice to 'peHeadLen' so the body is
 --      dropped while the metadata survives (RFC 9110 § 9.3.2).
+--      A per-connection response option is inserted into the head.
 --   2. 'BodyBytes' — combine head + body in one vectored send (raw
 --      socket) or two sequential sends (TLS / other non-socket
 --      transports).
@@ -283,16 +288,27 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
 -- The @sendfile(2)@ fast path requires a raw socket fd, so it only
 -- fires on socket-backed transports. Over TLS we fall back to a
 -- userspace read \/ write loop.
-sendResponse :: Connection -> Method -> Response -> IO ()
-sendResponse conn reqMethod resp = do
+sendResponse :: Connection -> Method -> Maybe BS.ByteString -> Response -> IO ()
+sendResponse conn reqMethod extraOption original = do
   let mustOmitBody =
         reqMethod == HEAD
-          || let sc = case responseStatus resp of Status w -> w
+          || let sc = case responseStatus original of Status w -> w
              in (sc >= 100 && sc < 200) || sc == 204 || sc == 304
-  case responseBody resp of
+  case responseBody original of
     BodyPreEncoded pe ->
       let bs = if mustOmitBody then preEncodedHead pe else peBytes pe
-      in connectionSendBytes conn bs
+          end = peHeadLen pe
+      in case extraOption of
+           Just option
+             | end >= 4 && end <= BS.length (peBytes pe)
+             , "\r\n\r\n" `BS.isSuffixOf` preEncodedHead pe ->
+                 -- Insert a field before the blank line, keeping the encoded body intact.
+                 let fieldStart = end - 2
+                 in withConnectionCork conn $ \corked -> do
+                      sendByteString corked (BS.take fieldStart bs)
+                      sendBuilderDirect corked (headersBuilder [("Connection", option)])
+                      sendByteString corked (BS.drop fieldStart bs)
+           _ -> connectionSendBytes conn bs
     body -> do
       if mustOmitBody
         then connectionSendBuilderDirect conn (responseBuilder resp)
@@ -312,15 +328,15 @@ sendResponse conn reqMethod resp = do
                 -- sees the status before the first body chunk.
             connectionSendBuilderDirect conn (responseBuilder resp)
             case responseVersion resp of
-              HTTP_1_1 -> do
-                trs <- responseTrailers resp
-                if null trs
-                  then streamChunked conn producer
-                  else streamChunkedWithTrailers conn producer trs
+              HTTP_1_1 -> writeChunkedBody conn producer (responseTrailers resp)
               HTTP_1_0 -> streamRaw conn producer
           BodyFile fb -> do
             let headBs = B.toStrictByteStringWith 1024 (responseBuilder resp)
             sendFileBody conn headBs fb
+  where
+    resp = case extraOption of
+      Nothing -> original
+      Just option -> original {responseHeaders = responseHeaders original <> [("Connection", option)]}
 
 -- | Push a file-backed response body.  On plain TCP connections we
 -- use the @sendfile(2)@ fast path with @MSG_MORE@ on the head; on
@@ -397,52 +413,6 @@ userspaceCopyHandle conn h off0 len0 = do
           connectionSendBytes conn bs
           loop (rem' - fromIntegral got)
 
-streamChunked :: Connection -> IO (Maybe BS.ByteString) -> IO ()
-streamChunked conn producer = loop
-  where
-    loop = do
-      mc <- producer
-      case mc of
-        Nothing -> connectionSendBuilder conn encodeLastChunk
-        Just bs ->
-          if BS.null bs
-            then loop  -- skip empty chunk (would be a premature terminator)
-            else do
-              connectionSendBuilder conn (encodeChunk bs)
-              loop
-
--- | Like 'streamChunked' but emits @trailers@ in the chunked-body
--- terminator's field block (RFC 9112 \u00a77.1.2). Pass @[]@ when
--- there are no trailers and you'll get the same wire bytes as
--- 'streamChunked'.
-streamChunkedWithTrailers
-  :: Connection
-  -> IO (Maybe BS.ByteString)
-  -> Headers
-  -> IO ()
-streamChunkedWithTrailers conn producer trailers = loop
-  where
-    -- The empty-trailers branch reuses 'streamChunked' rather than
-    -- calling 'encodeLastChunkWithTrailers []' so the wire bytes go
-    -- out as a single 'B.byteString' append (= one 'tSendAll' call
-    -- on a small buffer). That difference shouldn't matter on a
-    -- well-behaved peer, but it does interact with the
-    -- recv-buffered single-shot client used by 'sendRequest', which
-    -- closes its bracketed connection as soon as the high-level
-    -- send-and-parse-head sequence returns.
-    loop = do
-      mc <- producer
-      case mc of
-        Nothing
-          | null trailers -> connectionSendBuilder conn encodeLastChunk
-          | otherwise     -> connectionSendBuilder conn (encodeLastChunkWithTrailers trailers)
-        Just bs ->
-          if BS.null bs
-            then loop
-            else do
-              connectionSendBuilder conn (encodeChunk bs)
-              loop
-
 streamRaw :: Connection -> IO (Maybe BS.ByteString) -> IO ()
 streamRaw conn producer = loop
   where
@@ -455,20 +425,6 @@ streamRaw conn producer = loop
 ------------------------------------------------------------------------
 -- Errors / framing decisions
 ------------------------------------------------------------------------
-
--- | Case-insensitive @"100-continue"@ check for an @Expect:@ value.
--- Trims a single trailing OWS character; the parser already strips
--- enclosing whitespace so we only need to be tolerant about the
--- common @"100-continue "@ variant.
-isContinueExpect :: BS.ByteString -> Bool
-isContinueExpect bs = BS.map asciiLower (trim bs) == "100-continue"
-  where
-    trim s = case BS.unsnoc s of
-      Just (rest, w) | w == 0x20 || w == 0x09 -> trim rest
-      _ -> s
-    asciiLower w
-      | w >= 0x41 && w <= 0x5A = w + 0x20
-      | otherwise              = w
 
 -- | Emit a bare @HTTP/1.1 100 Continue\\r\\n\\r\\n@.  We bypass the
 -- full response encoder because the interim response carries no
@@ -547,39 +503,24 @@ errorToStatus = \case
 -- Keep-alive decision
 ------------------------------------------------------------------------
 
-decideClose :: ServerConfig -> Request -> Response -> Bool
-decideClose cfg req resp
-  | not (serverKeepAlive cfg) = True
-  | requestVersion req == HTTP_1_0 = not (clientWantsKeepAlive (requestHeaders req))
-  | otherwise = clientWantsClose (requestHeaders req) || serverWantsClose (responseHeaders resp)
-
-clientWantsKeepAlive :: Headers -> Bool
-clientWantsKeepAlive hs = case findConnection hs of
-  Nothing -> False
-  Just v  -> any (== ConnKeepAlive) (parseConnection v)
-
-clientWantsClose :: Headers -> Bool
-clientWantsClose hs = case findConnection hs of
-  Nothing -> False
-  Just v  -> any (== ConnClose) (parseConnection v)
-
-serverWantsClose :: Headers -> Bool
-serverWantsClose hs = case findConnection hs of
-  Nothing -> False
-  Just v  -> any (== ConnClose) (parseConnection v)
+decideClose :: ServerConfig -> Request -> [ConnectionOption] -> Bool
+decideClose cfg req responseOptions =
+  not (serverKeepAlive cfg)
+    || ConnClose `elem` requestOptions
+    || ConnClose `elem` responseOptions
+    || (requestVersion req == HTTP_1_0 && ConnKeepAlive `notElem` requestOptions)
+  where
+    requestOptions = connectionOptions (requestHeaders req)
 
 -- | Set the appropriate Connection header based on the keep-alive
 -- decision and the client's protocol version.
 --
--- - Closing: add @Connection: close@ (unless the handler already set one)
+-- - Closing: add @Connection: close@ unless that option is already present.
 -- - Keeping alive on HTTP/1.0: echo @Connection: keep-alive@ so the
 --   1.0 client knows the connection persists (RFC 9112 §9.3)
 -- - Keeping alive on HTTP/1.1: no header needed (persistence is default)
-adjustConnectionHeader :: Bool -> Request -> Response -> Response
-adjustConnectionHeader willClose req r
-  | hHas "connection" (responseHeaders r) = r
-  | willClose =
-      r { responseHeaders = responseHeaders r <> [("Connection", "close")] }
-  | requestVersion req == HTTP_1_0 =
-      r { responseHeaders = responseHeaders r <> [("Connection", "keep-alive")] }
-  | otherwise = r
+responseConnectionOption :: Bool -> Version -> [ConnectionOption] -> Maybe BS.ByteString
+responseConnectionOption willClose version options
+  | willClose = if ConnClose `elem` options then Nothing else Just "close"
+  | version == HTTP_1_0 && ConnKeepAlive `notElem` options = Just "keep-alive"
+  | otherwise = Nothing

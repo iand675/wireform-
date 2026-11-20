@@ -26,6 +26,7 @@ module Network.HTTP.Headers.SecWebSocketVersion (
   renderSecWebSocketVersion,
 ) where
 
+import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSecWebSocketVersion)
@@ -44,11 +45,15 @@ instance KnownHeader SecWebSocketVersion where
   type Direction SecWebSocketVersion = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser secWebSocketVersionParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left ("Unconsumed input after parsing Sec-WebSocket-Version: " <> show rest)
-    Fail -> Left "Failed to parse Sec-WebSocket-Version header"
-    Err e -> Left e
+  parseFromHeaders settings headers
+    | value NE.:| [] <- headers
+    , let size = BS.length value
+    , size > 0 && size <= 3 && (size == 1 || BS.head value /= 48) =
+        withShortDecimal
+          value
+          (\n -> if n <= 255 then Right (singleVersion (fromIntegral n)) else Left "WebSocket version exceeds 255")
+          (parseVersions settings headers)
+    | otherwise = parseVersions settings headers
 
 
   renderToHeaders _ = M.toStrictByteString . renderSecWebSocketVersion
@@ -57,13 +62,38 @@ instance KnownHeader SecWebSocketVersion where
   headerName _ = hSecWebSocketVersion
 
 
+parseVersions :: HeaderSettings -> NE.NonEmpty BS.ByteString -> Either String SecWebSocketVersion
+parseVersions settings headers
+  | Just HeaderRequest <- headerMessage settings =
+      parseSingleFieldLine "Sec-WebSocket-Version" (singleVersion <$> versionNumber) headers
+  | value NE.:| [] <- headers =
+      parseFieldLine "Sec-WebSocket-Version" secWebSocketVersionParser value
+  | otherwise =
+      parseListFieldLines "Sec-WebSocket-Version" versionList headers >>= versionsFromList
+
+
+singleVersion :: Word -> SecWebSocketVersion
+singleVersion = SecWebSocketVersion . NE.singleton
+
+
 secWebSocketVersionParser :: ParserT st String SecWebSocketVersion
-secWebSocketVersionParser = do
-  ows
-  v0 <- anyAsciiDecimalWord
-  rest <- many (ows *> $(char ',') *> ows *> anyAsciiDecimalWord)
-  ows
-  pure (SecWebSocketVersion (v0 NE.:| rest))
+secWebSocketVersionParser = SecWebSocketVersion <$> httpList1 "Sec-WebSocket-Version" versionNumber
+
+
+versionList :: ParserT st String [Word]
+versionList = httpList versionNumber
+
+
+versionsFromList :: [Word] -> Either String SecWebSocketVersion
+versionsFromList = fmap SecWebSocketVersion . requireNonEmptyList "Sec-WebSocket-Version"
+
+
+versionNumber :: ParserT st String Word
+versionNumber =
+  branch
+    $(char '0')
+    (0 <$ notFollowedBy (skipSatisfyAscii isDigit))
+    (boundedDecimalWord 255 (err "WebSocket version exceeds 255"))
 
 
 renderSecWebSocketVersion :: SecWebSocketVersion -> M.Builder

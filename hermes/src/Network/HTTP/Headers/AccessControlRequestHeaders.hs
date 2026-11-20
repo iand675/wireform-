@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 {- |
 @Access-Control-Request-Headers@ (WHATWG Fetch / W3C CORS) request header sent in
@@ -9,7 +9,7 @@ actual cross-origin request will carry, so the server can approve them via
 == Grammar
 
 @
-Access-Control-Request-Headers = "*" / 1#field-name
+Access-Control-Request-Headers = 1#field-name
 @
 
 Spec: <https://fetch.spec.whatwg.org/#http-access-control-request-headers>
@@ -17,7 +17,7 @@ Spec: <https://fetch.spec.whatwg.org/#http-access-control-request-headers>
 See also: "Network.HTTP.Headers.AccessControlRequestMethod", "Network.HTTP.Headers.AccessControlAllowHeaders", "Network.HTTP.Headers.AccessControlMaxAge", "Network.HTTP.Headers.Origin".
 -}
 module Network.HTTP.Headers.AccessControlRequestHeaders (
-  AccessControlRequestHeaders (..),
+  AccessControlRequestHeaders (RequestHeaders, RequestHeadersWildcard),
   accessControlRequestHeadersParser,
   renderAccessControlRequestHeaders,
 ) where
@@ -31,13 +31,14 @@ import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
--- | Value of the @Access-Control-Request-Headers@ header.
-data AccessControlRequestHeaders
-  = -- | @*@ — a wildcard request for all headers.
-    RequestHeadersWildcard
-  | -- | An explicit, comma-separated list of field-names.
-    RequestHeaders !(NE.NonEmpty ST.ShortText)
+-- | The non-empty list of requested field names.
+newtype AccessControlRequestHeaders = RequestHeaders (NE.NonEmpty ST.ShortText)
   deriving stock (Eq, Show)
+
+
+-- | Compatibility spelling for a request listing the literal field name @*@.
+pattern RequestHeadersWildcard :: AccessControlRequestHeaders
+pattern RequestHeadersWildcard = RequestHeaders ("*" NE.:| [])
 
 
 instance KnownHeader AccessControlRequestHeaders where
@@ -46,11 +47,11 @@ instance KnownHeader AccessControlRequestHeaders where
   type Direction AccessControlRequestHeaders = 'Request
 
 
-  parseFromHeaders _ headers = case runParser accessControlRequestHeadersParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Access-Control-Request-Headers header: " <> show rest
-    Fail -> Left "Failed to parse Access-Control-Request-Headers header"
-    Err e -> Left e
+  parseFromHeaders _ headers = do
+    entries <- parseListFieldLines "Access-Control-Request-Headers" (httpList fieldName) headers
+    case NE.nonEmpty entries of
+      Nothing -> Left "Access-Control-Request-Headers requires a field name"
+      Just names -> Right (RequestHeaders names)
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccessControlRequestHeaders
@@ -60,16 +61,13 @@ instance KnownHeader AccessControlRequestHeaders where
 
 
 accessControlRequestHeadersParser :: ParserT st String AccessControlRequestHeaders
-accessControlRequestHeadersParser = wildcard <|> list
-  where
-    wildcard = RequestHeadersWildcard <$ $(char '*')
-    list = do
-      first <- fieldName
-      rest <- many (ows *> $(char ',') *> ows *> fieldName)
-      pure $ RequestHeaders (first NE.:| rest)
+accessControlRequestHeadersParser = do
+  entries <- httpList fieldName
+  case NE.nonEmpty entries of
+    Nothing -> err "Access-Control-Request-Headers requires a field name"
+    Just names -> pure (RequestHeaders names)
 
 
 renderAccessControlRequestHeaders :: AccessControlRequestHeaders -> M.Builder
-renderAccessControlRequestHeaders = \case
-  RequestHeadersWildcard -> "*"
-  RequestHeaders names -> M.intersperse ", " (map shortText (NE.toList names))
+renderAccessControlRequestHeaders (RequestHeaders names) =
+  M.intersperse ", " (map shortText (NE.toList names))

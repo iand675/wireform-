@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9530 §4 @Want-Repr-Digest@ — communicates the sender's desire to
 receive (and relative preference among) integrity digests of the
@@ -25,16 +23,14 @@ See also: "Network.HTTP.Headers.ReprDigest", "Network.HTTP.Headers.WantContentDi
 module Network.HTTP.Headers.WantReprDigest (
   WantReprDigest (..),
   WantReprDigestEntry (..),
+  wantReprDigestEntryList,
   wantReprDigestParser,
   renderWantReprDigest,
+  renderWantReprDigestChecked,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
 import Data.List.NonEmpty (NonEmpty)
-import Data.Semigroup (sconcat)
+import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hWantReprDigest)
@@ -54,10 +50,25 @@ data WantReprDigestEntry = WantReprDigestEntry
   deriving stock (Eq, Show)
 
 
--- | A non-empty dictionary of wanted representation-digest algorithms.
-newtype WantReprDigest = WantReprDigest {wantReprDigestEntries :: NonEmpty WantReprDigestEntry}
+{- | A dictionary with zero or more members. Use 'wantReprDigestEntryList' to
+read both forms.
+-}
+data WantReprDigest
+  = WantReprDigest {wantReprDigestEntries :: !(NonEmpty WantReprDigestEntry)}
+  | WantReprDigestEmpty
   deriving stock (Eq, Show)
-  deriving newtype (Semigroup)
+
+
+instance Semigroup WantReprDigest where
+  WantReprDigestEmpty <> other = other
+  other <> WantReprDigestEmpty = other
+  WantReprDigest first <> WantReprDigest second =
+    fromEntries (orderedFieldEntries wantReprDigestAlgorithm (NE.toList (first <> second)))
+
+
+wantReprDigestEntryList :: WantReprDigest -> [WantReprDigestEntry]
+wantReprDigestEntryList WantReprDigestEmpty = []
+wantReprDigestEntryList (WantReprDigest entries) = NE.toList entries
 
 
 instance KnownHeader WantReprDigest where
@@ -66,62 +77,49 @@ instance KnownHeader WantReprDigest where
   type Direction WantReprDigest = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = sconcat <$> traverse runWantReprDigest headers
-  renderToHeaders _ = pure . M.toStrictByteString . renderWantReprDigest
+  parseFromHeaders _ fields = parseStructuredFieldDictionary "Want-Repr-Digest" fields >>= fromDictionary
+  renderToHeaders _ WantReprDigestEmpty = []
+  renderToHeaders _ value = either (const []) (pure . M.toStrictByteString) (renderWantReprDigestChecked value)
+
+
+  omitHeaderValue WantReprDigestEmpty = True
+  omitHeaderValue _ = False
+  {-# INLINE omitHeaderValue #-}
+
+
   headerName _ = hWantReprDigest
 
 
-runWantReprDigest :: ByteString -> Either String WantReprDigest
-runWantReprDigest bs = case runParser wantReprDigestParser bs of
-  OK v rest
-    | B.null (dropOws rest) -> Right v
-    | otherwise -> Left ("Unconsumed input after parsing Want-Repr-Digest: " <> show rest)
-  Fail -> Left "Failed to parse Want-Repr-Digest header"
-  Err e -> Left e
-  where
-    dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
-
-
--- ---------------------------------------------------------------------------
--- Parser
--- ---------------------------------------------------------------------------
-
 wantReprDigestParser :: ParserT st String WantReprDigest
-wantReprDigestParser = do
-  ows
-  WantReprDigest <$> (member `sepBy1` (ows *> $(char ',') *> ows))
+wantReprDigestParser = structuredFieldDictionary >>= either err pure . fromDictionary
+
+
+fromDictionary :: [StructuredFieldDictionaryEntry] -> Either String WantReprDigest
+fromDictionary = fmap fromEntries . projectStructuredFieldItems "Want-Repr-Digest" accept WantReprDigestEntry
   where
-    member = do
-      k <- sfDictKey
-      $(char '=')
-      pref <- rfc8941Integer
-      ps <- rfc8941Parameters
-      pure WantReprDigestEntry {wantReprDigestAlgorithm = k, wantReprDigestPreference = pref, wantReprDigestParameters = ps}
+    accept (Integer value) | value >= 0 && value <= 10 = Just value
+    accept _ = Nothing
 
 
--- ---------------------------------------------------------------------------
--- Renderer
--- ---------------------------------------------------------------------------
+fromEntries :: [WantReprDigestEntry] -> WantReprDigest
+fromEntries = maybe WantReprDigestEmpty WantReprDigest . NE.nonEmpty
+
 
 renderWantReprDigest :: WantReprDigest -> M.Builder
-renderWantReprDigest = M.intersperse ", " . fmap renderEntry . wantReprDigestEntries
+renderWantReprDigest = either (const mempty) id . renderWantReprDigestChecked
+
+
+-- | Check the preference range before emitting a dictionary.
+renderWantReprDigestChecked :: WantReprDigest -> Either String M.Builder
+renderWantReprDigestChecked value
+  | all inRange entries = Right (M.intersperse ", " (map renderEntry entries))
+  | otherwise = Left "Want-Repr-Digest preference must be between 0 and 10"
   where
-    renderEntry (WantReprDigestEntry k p ps) =
-      R.shortText k <> M.char7 '=' <> R.rfc8941Integer p <> foldMap renderParam ps
-    renderParam (k, mv) = R.rfc8941Parameter R.IncludeIfEmpty R.rfc8941ItemValue k mv
-
-
--- ---------------------------------------------------------------------------
--- Structured-field helpers
--- ---------------------------------------------------------------------------
-
-{- | RFC 8941 §3.1.2 dictionary @key@:
-@( lcalpha \/ \"*\" ) *( lcalpha \/ DIGIT \/ \"_\" \/ \"-\" \/ \".\" \/ \"*\" )@.
--}
-sfDictKey :: ParserT st e ShortText
-sfDictKey =
-  shortASCIIFromParser_ $
-    skipSatisfyAscii (`CharSet.member` firstChar) *> skipMany (skipSatisfyAscii (`CharSet.member` restChar))
-  where
-    firstChar = CharSet.range 'a' 'z' <> CharSet.singleton '*'
-    restChar = CharSet.range 'a' 'z' <> CharSet.range '0' '9' <> "_-.*"
+    entries = orderedFieldEntries wantReprDigestAlgorithm (wantReprDigestEntryList value)
+    inRange entry = let preference = wantReprDigestPreference entry in preference >= 0 && preference <= 10
+    renderEntry entry =
+      R.shortText (wantReprDigestAlgorithm entry)
+        <> M.char7 '='
+        <> R.rfc8941Integer (wantReprDigestPreference entry)
+        <> foldMap renderParam (orderedFieldEntries fst (wantReprDigestParameters entry))
+    renderParam (key, parameter) = R.renderStructuredFieldParameter key (maybe (Boolean True) id parameter)

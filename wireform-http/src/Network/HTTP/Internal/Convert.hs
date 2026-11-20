@@ -1,5 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
 {- | Conversions between the unified wireform HTTP types and the
 version-specific @wireform-http1@ \/ @wireform-http2@ types.
@@ -10,6 +11,11 @@ caller needs to drop into an underlying API (e.g. to use HTTP\/1's
 sendfile path).
 -}
 module Network.HTTP.Internal.Convert (
+  prepareRequestBody,
+  prepareRequestTrailers,
+  bufferedRequestBody,
+  streamedRequestBody,
+
   -- * HTTP\/1.x conversions
   toHttp1Request,
   fromHttp1Request,
@@ -35,12 +41,22 @@ module Network.HTTP.Internal.Convert (
   fromHttp2Headers,
 ) where
 
+import Control.Exception (throwIO)
 import Data.Bifunctor qualified
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.CaseInsensitive qualified as CI
 import Data.CaseInsensitive.Unsafe (unsafeMk)
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Maybe qualified
+import Network.HTTP.Client.BodyStream (BodyStream, bodyStreamBytes, knownSize, pull)
+import Network.HTTP.Client.Expect (hasExpectContinueHeader)
+import Network.HTTP.Client.Protocol (ProtocolHints, protocolRequestTrailers)
+import Network.HTTP.Client.Request qualified as WReq
+import Network.HTTP.Headers qualified as Typed
+import Network.HTTP.Headers.ETag (EntityTag (StrongETagBytes))
+import Network.HTTP.Headers.IfRange qualified as IfRange
+import Network.HTTP.Headers.Range qualified as Range
 import Network.HTTP.Message
 import Network.HTTP.Types.Body qualified as U
 import Network.HTTP.Types.Header qualified as U
@@ -49,6 +65,79 @@ import Network.HTTP.Types.Status qualified as U
 import Network.HTTP.Types.Version qualified as U
 import Network.HTTP1.Types qualified as H1
 import Network.HTTP2.Server qualified as H2S
+import Wireform.Builder qualified as B
+
+
+-- | Keep the popper deferred for Expect while preserving its framing.
+prepareRequestBody :: (BodyStream -> IO U.Body) -> WReq.Request BodyStream -> IO (WReq.Request U.Body)
+prepareRequestBody ordinary req
+  | Just _ <- protocolRequestTrailers (WReq.protocolHints req) =
+      pure req {WReq.headers = sizedFields, WReq.body = streamedRequestBody stream}
+  | hasExpectContinueHeader fields =
+      pure req
+        { WReq.headers = sizedFields
+        , WReq.body = if knownSize stream == Just 0 then U.BodyEmpty else streamedRequestBody stream
+        }
+  | otherwise = do
+      lowBody <- ordinary stream
+      pure req {WReq.headers = fields, WReq.body = lowBody}
+  where
+    fields = prepareConditionalRange (WReq.headers req)
+    stream = WReq.body req
+    sizedFields
+      | Just size <- knownSize stream
+      , size > 0
+      , not (U.hasHeader U.hContentLength fields || U.hasHeader U.hTransferEncoding fields) =
+          U.addHeader U.hContentLength (B.toStrictByteString (B.int64Dec size)) fields
+      | otherwise = fields
+
+
+-- | Attach the producer and choose the framing after protocol negotiation.
+prepareRequestTrailers :: U.Version -> ProtocolHints -> Request -> IO Request
+prepareRequestTrailers version hints req = case protocolRequestTrailers hints of
+  Nothing -> pure req
+  Just produce -> case version of
+    U.HTTP1_1 -> pure req
+      { requestHeaders = U.deleteHeader U.hContentLength chunkedFields
+      , requestTrailers = produce
+      }
+    U.HTTP2 -> pure req {requestTrailers = produce}
+    _ -> throwIO (WReq.RequestTrailersUnsupportedVersion version)
+  where
+    fields = requestHeaders req
+    chunkedFields
+      | U.hasHeader U.hTransferEncoding fields = fields
+      | otherwise = U.addHeader U.hTransferEncoding "chunked" fields
+
+
+-- Run after request modifiers and middleware, so Range and If-Range can
+-- be attached in either order. Drop both when the pair cannot be sent.
+prepareConditionalRange :: U.Headers -> U.Headers
+prepareConditionalRange fields = case U.lookupSingletonHeader U.hIfRange fields of
+  Right Nothing -> fields
+  Right (Just validator)
+    | validValidator validator
+    , Right (Just range) <- U.lookupSingletonHeader U.hRange fields
+    , Right _ <- Typed.parseFromHeaders @Range.Range Typed.defaultHeaderSettings (range :| []) -> fields
+  _ -> filter (\(name, _) -> name /= U.hRange && name /= U.hIfRange) fields
+  where
+    validValidator wire =
+      case Typed.parseFromHeaders @IfRange.IfRange Typed.defaultHeaderSettings (wire :| []) of
+        Right (IfRange.IfRangeETag (StrongETagBytes _)) -> True
+        Right (IfRange.IfRangeDate _) -> True
+        _ -> False
+
+
+bufferedRequestBody :: BodyStream -> IO U.Body
+bufferedRequestBody stream = do
+  bytes <- bodyStreamBytes stream
+  pure (if BS.null bytes then U.BodyEmpty else U.BodyBytes bytes)
+
+
+streamedRequestBody :: BodyStream -> U.Body
+streamedRequestBody stream = U.BodyStream $ do
+  chunk <- pull stream
+  pure (if BS.null chunk then Nothing else Just chunk)
 
 
 ------------------------------------------------------------------------
@@ -93,6 +182,11 @@ fromHttp1Headers :: H1.Headers -> U.Headers
 fromHttp1Headers = map $ Data.Bifunctor.first unsafeMk
 
 
+-- Trailer field names retain their received spelling in the HTTP/1 reader.
+fromHttp1Trailers :: H1.Headers -> U.Headers
+fromHttp1Trailers = map (Data.Bifunctor.first CI.mk)
+
+
 toHttp1Body :: U.Body -> H1.Body
 toHttp1Body = \case
   U.BodyEmpty -> H1.BodyEmpty
@@ -122,11 +216,16 @@ toHttp1Request r =
     { H1.requestMethod = toHttp1Method (requestMethod r)
     , H1.requestTarget = requestTarget r
     , H1.requestVersion = toHttp1Version (requestVersion r)
-    , H1.requestHeaders = withHost (requestAuthority r) (toHttp1Headers (requestHeaders r))
+    , H1.requestHeaders = requestFields
     , H1.requestBody = toHttp1Body (requestBody r)
     , H1.requestTrailers = toHttp1Headers <$> requestTrailers r
     }
   where
+    requestFields
+      | U.HTTP2 <- requestVersion r
+      , Just authority <- requestAuthority r =
+          toHttp1Headers (U.insertHeader U.hHost authority (requestHeaders r))
+      | otherwise = withHost (requestAuthority r) (toHttp1Headers (requestHeaders r))
     withHost Nothing hs = hs
     withHost (Just a) hs
       | any (\(n, _) -> BS.map toLower8 n == "host") hs = hs
@@ -146,7 +245,7 @@ fromHttp1Request scheme r =
     , requestHeaders = fromHttp1Headers (H1.requestHeaders r)
     , requestBody = fromHttp1Body (H1.requestBody r)
     , requestVersion = fromHttp1Version (H1.requestVersion r)
-    , requestTrailers = fromHttp1Headers <$> H1.requestTrailers r
+    , requestTrailers = fromHttp1Trailers <$> H1.requestTrailers r
     }
 
 
@@ -177,7 +276,7 @@ fromHttp1Response r =
     , responseVersion = fromHttp1Version (H1.responseVersion r)
     , responseHeaders = fromHttp1Headers (H1.responseHeaders r)
     , responseBody = fromHttp1Body (H1.responseBody r)
-    , responseTrailers = fromHttp1Headers <$> H1.responseTrailers r
+    , responseTrailers = fromHttp1Trailers <$> H1.responseTrailers r
     , responseH2StreamId = 0
     , responseCancel = pure ()
     , responsePushPromises = pure []
@@ -213,7 +312,7 @@ toHttp2Request r =
     , H2S.requestHeaders = toHttp2Headers (requestHeaders r)
     , H2S.requestBody = pure ""
     , H2S.requestStreamId = 0
-    , H2S.requestTrailers = pure []
+    , H2S.requestTrailers = toHttp2Headers <$> requestTrailers r
     }
 
 
@@ -224,7 +323,10 @@ fromHttp2Request :: H2S.Request -> Request
 fromHttp2Request r =
   Request
     { requestMethod = U.methodFromBytes (H2S.requestMethod r)
-    , requestTarget = H2S.requestPath r
+    , requestTarget =
+        if H2S.requestMethod r == "CONNECT"
+          then H2S.requestAuthority r
+          else H2S.requestPath r
     , requestAuthority = case H2S.requestAuthority r of
         "" -> Nothing
         a -> Just a
@@ -240,24 +342,23 @@ fromHttp2Request r =
     }
 
 
-{- | Materialise the unified 'Response' into the @http2@ shape.  Runs
-the trailer-producing IO action because @H2S.Response.responseTrailers@
-is a strict list.  Server handlers that don't emit trailers can
-still build them via @pure []@ with no extra cost.
--}
+-- | Adapt the unified response, retaining the trailer action for
+-- evaluation at the end of a streaming body.
 toHttp2Response :: Response -> IO H2S.Response
-toHttp2Response r = do
-  trs <- responseTrailers r
-  pure
-    H2S.Response
-      { H2S.responseStatus = fromIntegral (U.statusCode (responseStatus r))
-      , H2S.responseHeaders = toHttp2Headers (responseHeaders r)
-      , H2S.responseBody = case responseBody r of
-          U.BodyEmpty -> H2S.ResponseBodyEmpty
-          U.BodyBytes bs -> H2S.ResponseBodyBS bs
-          U.BodyStream p -> H2S.ResponseBodyStream p
-      , H2S.responseTrailers = toHttp2Headers trs
-      }
+toHttp2Response r = case responseBody r of
+  U.BodyEmpty -> makeResponse H2S.ResponseBodyEmpty <$> produceTrailers
+  U.BodyBytes bs -> makeResponse (H2S.ResponseBodyBS bs) <$> produceTrailers
+  U.BodyStream produce ->
+    pure (makeResponse (H2S.ResponseBodyStreamWithTrailers produce produceTrailers) [])
+  where
+    produceTrailers = toHttp2Headers <$> responseTrailers r
+    makeResponse body trailers =
+      H2S.Response
+        { H2S.responseStatus = fromIntegral (U.statusCode (responseStatus r))
+        , H2S.responseHeaders = toHttp2Headers (responseHeaders r)
+        , H2S.responseBody = body
+        , H2S.responseTrailers = trailers
+        }
 
 
 fromHttp2Response :: H2S.Response -> Response
@@ -270,7 +371,10 @@ fromHttp2Response r =
         H2S.ResponseBodyEmpty -> U.BodyEmpty
         H2S.ResponseBodyBS bs -> U.BodyBytes bs
         H2S.ResponseBodyStream p -> U.BodyStream p
-    , responseTrailers = pure (fromHttp2Headers (H2S.responseTrailers r))
+        H2S.ResponseBodyStreamWithTrailers p _ -> U.BodyStream p
+    , responseTrailers = fromHttp2Headers <$> case H2S.responseBody r of
+        H2S.ResponseBodyStreamWithTrailers _ produce -> (H2S.responseTrailers r <>) <$> produce
+        _ -> pure (H2S.responseTrailers r)
     , responseH2StreamId = 0
     , responseCancel = pure ()
     , responsePushPromises = pure []

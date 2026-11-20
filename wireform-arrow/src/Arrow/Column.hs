@@ -61,6 +61,8 @@ module Arrow.Column (
   pattern ColIntervalYearMonth,
   pattern ColIntervalDayTime,
   pattern ColIntervalMonthDayNano,
+  pattern ColDecimal32,
+  pattern ColDecimal64,
   pattern ColDecimal128,
   pattern ColDecimal256,
   pattern ColBool,
@@ -239,7 +241,7 @@ import Arrow.Types (ArrowType (..), DictionaryEncoding (..), Field (..), UnionMo
 import Columnar.SIMD qualified as K
 import Control.DeepSeq (NFData (..))
 import Control.Monad (forM_, when)
-import Control.Monad.ST (stToIO)
+import Control.Monad.ST (runST, stToIO)
 import Data.Bits (unsafeShiftR, (.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -362,6 +364,14 @@ pattern ColIntervalMonthDayNano v xs <- I.ColPrim PIntervalMonthDayNano v xs
 
 
 -- | Precision, scale, validity, values.
+pattern ColDecimal32 :: Int -> Int -> Maybe Validity -> VS.Vector Int32 -> ColumnArray
+pattern ColDecimal32 p s v xs <- I.ColPrim (PDecimal32 p s) v xs
+
+
+pattern ColDecimal64 :: Int -> Int -> Maybe Validity -> VS.Vector Int64 -> ColumnArray
+pattern ColDecimal64 p s v xs <- I.ColPrim (PDecimal64 p s) v xs
+
+
 pattern ColDecimal128 :: Int -> Int -> Maybe Validity -> VS.Vector Decimal128 -> ColumnArray
 pattern ColDecimal128 p s v xs <- I.ColPrim (PDecimal128 p s) v xs
 
@@ -504,6 +514,8 @@ pattern ColRunEndEncoded off len re vals <- I.ColRunEndEncoded off len re vals
   , ColIntervalYearMonth
   , ColIntervalDayTime
   , ColIntervalMonthDayNano
+  , ColDecimal32
+  , ColDecimal64
   , ColDecimal128
   , ColDecimal256
   , ColBool
@@ -821,6 +833,7 @@ anyBytesAt c i
       I.ColFixedSizeBinary w _ _ d -> Just $! BSU.unsafeTake w (BSU.unsafeDrop (i * w) d)
       _ -> Nothing
 
+{-# INLINE anyBytesAt #-}
 
 -- | Row @i@ of a utf8, large utf8 or utf8 view column, copied into a 'Text'.
 anyTextAt :: ColumnArray -> Int -> Maybe Text
@@ -834,6 +847,7 @@ anyTextAt c i = case c of
       Just bs -> Just $! utf8ToText bs
       Nothing -> Nothing
 
+{-# INLINE anyTextAt #-}
 
 -- | Shared closures for boxed bool rows, so materializing bools allocates nothing per row.
 justTrue, justFalse :: Maybe Bool
@@ -903,6 +917,7 @@ dictKeyAt c i = case c of
   I.ColDictionary _ ix _ | i >= 0 && i < columnLength ix && unsafeIsValidAt (validity ix) i -> Just (keyAt ix i)
   _ -> Nothing
 
+{-# INLINE dictKeyAt #-}
 
 -- | Key @i@ of an integer column (validity ignored); 0 for a non-integer column.
 keyAt :: ColumnArray -> Int -> Int
@@ -1247,8 +1262,29 @@ fromMaybeLargeTexts :: V.Vector (Maybe Text) -> ColumnArray
 fromMaybeLargeTexts = varFromMaybes I.ColLargeUtf8 TF.lengthWord8 TF.unsafeCopyToPtr
 
 
+-- | Construct a binary column from non-null rows, copying their bytes.
 fromByteStrings :: V.Vector ByteString -> ColumnArray
-fromByteStrings = fromMaybeByteStrings . V.map Just
+fromByteStrings vals = unsafeDupablePerformIO $ do
+  -- Check the sum before narrowing to Arrow's signed 32-bit offsets.
+  let !n = V.length vals
+      !total = V.foldl' addLength 0 vals
+      addLength !acc bytes
+        | BS.length bytes > fromIntegral (maxBound :: Int32) - acc =
+            errorWithoutStackTrace "Arrow.Column: var-length data exceeds the 32-bit offset range (use the large variant)"
+        | otherwise = acc + BS.length bytes
+  offsets <- VSM.unsafeNew (n + 1)
+  fp <- mallocAligned total
+  unsafeWithForeignPtr fp $ \dst -> do
+    let fill !i !pos
+          | i == n = VSM.unsafeWrite offsets n (fromIntegral pos)
+          | otherwise = do
+              VSM.unsafeWrite offsets i (fromIntegral pos)
+              let bytes = V.unsafeIndex vals i
+              copyBS bytes (dst `plusPtr` pos)
+              fill (i + 1) (pos + BS.length bytes)
+    fill 0 0
+  offs <- VS.unsafeFreeze offsets
+  pure (I.ColBinary Nothing offs (BSI.BS fp total))
 
 
 fromMaybeByteStrings :: V.Vector (Maybe ByteString) -> ColumnArray
@@ -1271,20 +1307,31 @@ varFromMaybes
   -> (x -> Ptr Word8 -> IO ())
   -> V.Vector (Maybe x)
   -> ColumnArray
-varFromMaybes mk len copy vals
-  | toInteger total > toInteger (maxBound :: o) =
-      errorWithoutStackTrace "Arrow.Column: var-length data exceeds the 32-bit offset range (use the large variant)"
-  | otherwise = mk (validityGenerate n (isJustAt vals)) offs dat
-  where
-    !n = V.length vals
-    rowLen i = maybe 0 len (V.unsafeIndex vals i)
-    offs :: VS.Vector o
-    offs = VS.scanl' (\acc i -> acc + fromIntegral (rowLen i)) 0 (VS.enumFromN 0 n :: VS.Vector Int)
-    !total = fromIntegral (VS.last offs) :: Int
-    dat = createAligned total $ \p ->
-      forM_ [0 .. n - 1] $ \i -> case V.unsafeIndex vals i of
-        Just x -> copy x (p `plusPtr` fromIntegral (VS.unsafeIndex offs i))
-        Nothing -> pure ()
+varFromMaybes mk len copy vals = unsafeDupablePerformIO $ do
+  let !n = V.length vals
+      !limit = fromInteger (min (toInteger (maxBound :: o)) (toInteger (maxBound :: Int))) :: Int
+      addLength !acc Nothing = acc
+      addLength !acc (Just value)
+        | len value > limit - acc =
+            errorWithoutStackTrace "Arrow.Column: var-length data exceeds the offset range (use the large variant for 32-bit columns)"
+        | otherwise = acc + len value
+      !total = V.foldl' addLength 0 vals
+  offsets <- VSM.unsafeNew (n + 1)
+  fp <- mallocAligned total
+  unsafeWithForeignPtr fp $ \dst -> do
+    let fill !i !pos
+          | i == n = VSM.unsafeWrite offsets n (fromIntegral pos)
+          | otherwise = do
+              VSM.unsafeWrite offsets i (fromIntegral pos)
+              case V.unsafeIndex vals i of
+                Nothing -> fill (i + 1) pos
+                Just value -> do
+                  copy value (dst `plusPtr` pos)
+                  fill (i + 1) (pos + len value)
+    fill 0 0
+  offs <- VS.unsafeFreeze offsets
+  pure (mk (validityGenerate n (isJustAt vals)) offs (BSI.BS fp total))
+{-# INLINE varFromMaybes #-}
 
 
 -- | Fixed-size binary rows; every present row must have the given width.
@@ -2014,16 +2061,26 @@ concatRuns re0 parts = case re0 of
 {- | Rows by index (repeats allowed); any index outside the column is
 a 'Left'. Fixed-width buffers and bitmaps go through C gather
 kernels; var-length columns take two passes (offsets, then bytes);
-lists gather their child ranges; dictionaries, dense unions and list
-views gather only their own buffers and share the rest.
+lists gather their child ranges. Dictionaries and list views share
+their children, as do dense unions when the selection is strictly
+increasing.
 -}
 takeColumnArray :: VS.Vector Int -> ColumnArray -> Either String ColumnArray
 takeColumnArray ix col
-  | VS.any (\i -> i < 0 || i >= n) ix =
-      Left ("Arrow.Column.takeColumnArray: index out of range for a column of " ++ show n ++ " rows")
+  | I.ColDenseUnion types offsets children <- col = takeDenseUnion (Just n) ix types offsets children
+  | takeIndicesOutOfRange n ix = takeIndexError n
   | otherwise = takeRows ix col
   where
     !n = columnLength col
+
+
+takeIndicesOutOfRange :: Int -> VS.Vector Int -> Bool
+takeIndicesOutOfRange n = VS.any (\i -> i < 0 || i >= n)
+
+
+takeIndexError :: Int -> Either String ColumnArray
+takeIndexError n =
+  Left ("Arrow.Column.takeColumnArray: index out of range for a column of " ++ show n ++ " rows")
 
 
 -- | 'takeColumnArray' after the range check.
@@ -2049,7 +2106,7 @@ takeRows ix col = case col of
   I.ColMap v o keys vals -> do
     (o', childIx) <- takeOffsetRanges ix o
     I.ColMap (tv v) o' <$> takeRows childIx keys <*> takeRows childIx vals
-  I.ColDenseUnion t o cs -> Right (I.ColDenseUnion (gatherStorable ix t) (gatherStorable ix o) cs)
+  I.ColDenseUnion t o cs -> takeDenseUnion Nothing ix t o cs
   I.ColSparseUnion t cs -> I.ColSparseUnion (gatherStorable ix t) <$> V.mapM (takeRows ix) cs
   I.ColDictionary did keys vals -> (\keys' -> I.ColDictionary did keys' vals) <$> takeRows ix keys
   I.ColRunEndEncoded off _ re vals -> takeRuns ix off re vals
@@ -2060,6 +2117,52 @@ takeRows ix col = case col of
     takeList mk v o c = do
       (o', childIx) <- takeOffsetRanges ix o
       mk (tv v) o' <$> takeRows childIx c
+
+
+-- | Arrow requires offsets to be ordered within each child. A
+-- strictly increasing selection preserves that ordering and shares the
+-- children. Other selections rebuild the offsets and gather each child
+-- in output order. At the public entry point, ordered indices only
+-- need their endpoints checked against the row count.
+takeDenseUnion :: Maybe Int -> VS.Vector Int -> VS.Vector Int8 -> VS.Vector Int32 -> V.Vector ColumnArray -> Either String ColumnArray
+takeDenseUnion rowLimit ix types offsets children
+  | n < 2 || ordered 1 (VS.unsafeHead ix) = case rowLimit of
+      Just limit | n /= 0 && (VS.unsafeHead ix < 0 || VS.unsafeLast ix >= limit) -> takeIndexError limit
+      _ -> Right (I.ColDenseUnion selectedTypes (gatherStorable ix offsets) children)
+  | Just limit <- rowLimit, takeIndicesOutOfRange limit ix = takeIndexError limit
+  | otherwise = runST $ do
+      counts <- VSM.replicate (V.length children) (0 :: Int)
+      newOffsets <- VSM.unsafeNew n
+      VS.iforM_ selectedTypes $ \row typeId -> do
+        let child = fromIntegral typeId
+        count <- VSM.unsafeRead counts child
+        VSM.unsafeWrite newOffsets row (fromIntegral count)
+        VSM.unsafeWrite counts child (count + 1)
+      lengths <- VS.unsafeFreeze counts
+      if VS.any (> maxChildLength) lengths
+        then pure (Left "Arrow.Column.takeColumnArray: dense union child exceeds the offset width")
+        else do
+          rebased <- VS.unsafeFreeze newOffsets
+          let !starts = VS.prescanl' (+) 0 lengths
+          indices <- VSM.unsafeNew n
+          VS.iforM_ selectedTypes $ \row typeId -> do
+            let start = VS.unsafeIndex starts (fromIntegral typeId)
+                offset = fromIntegral (VS.unsafeIndex rebased row)
+                source = VS.unsafeIndex offsets (VS.unsafeIndex ix row)
+            VSM.unsafeWrite indices (start + offset) (fromIntegral source)
+          grouped <- VS.unsafeFreeze indices
+          pure $ I.ColDenseUnion selectedTypes rebased <$> V.imapM (takeChild grouped starts lengths) children
+  where
+    !n = VS.length ix
+    selectedTypes = gatherStorable ix types
+    maxChildLength = fromIntegral (maxBound :: Int32) + 1
+    ordered !row !previous
+      | row == n = True
+      | otherwise =
+          let current = VS.unsafeIndex ix row
+          in previous < current && ordered (row + 1) current
+    takeChild grouped starts lengths child =
+      takeRows (VS.unsafeSlice (VS.unsafeIndex starts child) (VS.unsafeIndex lengths child) grouped)
 
 
 gatherStorable :: forall a. Storable a => VS.Vector Int -> VS.Vector a -> VS.Vector a
@@ -2312,6 +2415,8 @@ keyOrder col = case col of
     PTime64 -> ordered v xs
     PTimestamp -> ordered v xs
     PDuration -> ordered v xs
+    PDecimal32 _ _ -> ordered v xs
+    PDecimal64 _ _ -> ordered v xs
     PDecimal128 _ _ -> ordered v xs
     PDecimal256 _ _ -> ordered v xs
     PFloat16 -> by v (\i j -> compareFloating (float16ToDouble (VS.unsafeIndex xs i)) (float16ToDouble (VS.unsafeIndex xs j)))
@@ -2544,6 +2649,8 @@ instance Show ColumnArray where
       showString (columnTag c) . params . showChar ' ' . showRows c
     where
       params = case c of
+        I.ColPrim (PDecimal32 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
+        I.ColPrim (PDecimal64 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
         I.ColPrim (PDecimal128 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
         I.ColPrim (PDecimal256 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
         I.ColFixedSizeBinary w _ _ _ -> showChar ' ' . shows w

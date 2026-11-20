@@ -4,8 +4,9 @@
 {- | Urgency request header (RFC 8030 §5.3): tells the push service how
 important a message is to the user agent, letting it conserve resources on
 constrained devices by delaying or dropping low-priority messages. Defined
-values are @very-low@, @low@, @normal@, and @high@; the default when the header
-is absent is 'Normal'.
+values are @very-low@, @low@, @normal@, and @high@. A push message without this
+field has 'Normal' urgency. A monitoring request can use it as a minimum
+urgency, or omit it to receive messages of every urgency.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc8030#section-5.3>
 
@@ -18,7 +19,8 @@ module Network.HTTP.Headers.Urgency (
   renderUrgency,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hUrgency)
 import qualified Network.HTTP.Headers.Mason as M
@@ -40,16 +42,16 @@ instance KnownHeader Urgency where
   type Direction Urgency = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser urgencyParser header of
-      OK urgency "" -> Right urgency
-      OK _ rest -> Left $ "Unconsumed input after parsing Urgency header: " <> show rest
-      Fail -> Left "Failed to parse Urgency header"
-      Err e -> Left e
+  parseFromHeaders _ ("very-low" :| []) = Right VeryLow
+  parseFromHeaders _ ("low" :| []) = Right Low
+  parseFromHeaders _ ("normal" :| []) = Right Normal
+  parseFromHeaders _ ("high" :| []) = Right High
+  parseFromHeaders _ fields = parseSingleFieldLine "Urgency" urgencyParser fields
+  {-# INLINE parseFromHeaders #-}
 
 
-  renderToHeaders _ = M.toStrictByteString . renderUrgency
+  renderToHeaders _ = urgencyBytes
+  {-# INLINE renderToHeaders #-}
 
 
   headerName _ = hUrgency
@@ -57,20 +59,25 @@ instance KnownHeader Urgency where
 
 urgencyParser :: ParserT st String Urgency
 urgencyParser =
-  $( switch
-      [|
-        case _ of
-          "very-low" -> pure VeryLow
-          "low" -> pure Low
-          "normal" -> pure Normal
-          "high" -> pure High
-        |]
+  $( switchAsciiCI
+       [|
+         case _ of
+           "very-low" -> pure VeryLow
+           "low" -> pure Low
+           "normal" -> pure Normal
+           "high" -> pure High
+         |]
    )
 
 
 renderUrgency :: Urgency -> M.Builder
-renderUrgency = \case
+renderUrgency = M.byteString . urgencyBytes
+
+
+urgencyBytes :: Urgency -> ByteString
+urgencyBytes = \case
   VeryLow -> "very-low"
   Low -> "low"
   Normal -> "normal"
   High -> "high"
+{-# INLINE urgencyBytes #-}

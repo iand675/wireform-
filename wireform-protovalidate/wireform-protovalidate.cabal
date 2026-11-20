@@ -93,6 +93,7 @@ test-suite wireform-protovalidate-test
     aeson,
     bytestring,
     vector,
+    template-haskell,
     sydtest,
     sydtest-hedgehog,
     hedgehog

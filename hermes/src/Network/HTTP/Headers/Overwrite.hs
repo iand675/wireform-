@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 4918 §10.6 @Overwrite@ request header — specifies whether a
 @COPY@ or @MOVE@ may clobber an existing resource at the destination.
@@ -22,7 +20,6 @@ module Network.HTTP.Headers.Overwrite (
   renderOverwrite,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hOverwrite)
 import qualified Network.HTTP.Headers.Mason as M
@@ -40,11 +37,7 @@ instance KnownHeader Overwrite where
   type Direction Overwrite = 'Request
 
 
-  parseFromHeaders _ headers = case runParser overwriteParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Overwrite header: " <> show rest
-    Fail -> Left "Failed to parse Overwrite header"
-    Err e -> Left e
+  parseFromHeaders _ = parseTFFieldLine "Overwrite" Overwrite
 
 
   renderToHeaders _ = M.toStrictByteString . renderOverwrite
@@ -54,14 +47,7 @@ instance KnownHeader Overwrite where
 
 
 overwriteParser :: ParserT st String Overwrite
-overwriteParser =
-  $( switch
-      [|
-        case _ of
-          "T" -> pure (Overwrite True)
-          "F" -> pure (Overwrite False)
-        |]
-   )
+overwriteParser = Overwrite <$> tfFlag
 
 
 renderOverwrite :: Overwrite -> M.Builder

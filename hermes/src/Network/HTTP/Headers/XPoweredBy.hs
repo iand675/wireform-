@@ -1,12 +1,13 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 {- |
 @X-Powered-By@ — de-facto response header advertising the technology stack
 (framework, language, or server software) powering the origin server, e.g.
 @PHP/8.2.0@ or @Express@.
 
-This header is __not__ IANA-registered and its value is entirely
-opaque / host-specific with no agreed grammar, so (per the depth guidance) it
-is preserved verbatim as a raw 'ST.ShortText' rather than given a fabricated
-structure.
+Deployments define the payload. The codec checks HTTP field octets and
+preserves the original bytes.
 
 Spec: no formal specification (de-facto); see the OWASP Secure Headers project,
 <https://owasp.org/www-project-secure-headers/>.
@@ -14,23 +15,50 @@ Spec: no formal specification (de-facto); see the OWASP Secure Headers project,
 See also: "Network.HTTP.Headers.Server", "Network.HTTP.Headers.UserAgent", "Network.HTTP.Headers.Via".
 -}
 module Network.HTTP.Headers.XPoweredBy (
-  XPoweredBy (..),
+  XPoweredBy (XPoweredBy, poweredBy),
+  xPoweredByBytes,
+  xPoweredByFromBytes,
   xPoweredByParser,
   renderXPoweredBy,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXPoweredBy)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.OpaqueField
 
 
--- | An @X-Powered-By@ value: an opaque product / technology string.
-newtype XPoweredBy = XPoweredBy {poweredBy :: ST.ShortText}
-  deriving stock (Eq, Show)
+-- | An opaque technology or product description.
+newtype XPoweredBy = XPoweredByBytes ByteString
+  deriving stock (Eq)
+
+
+-- | Legacy text view. Use 'xPoweredByBytes' for the original bytes.
+pattern XPoweredBy :: ST.ShortText -> XPoweredBy
+pattern XPoweredBy {poweredBy} <- (opaqueFieldText . xPoweredByBytes -> poweredBy)
+  where
+    XPoweredBy text = XPoweredByBytes (ST.toByteString text)
+
+
+{-# COMPLETE XPoweredBy #-}
+
+
+instance Show XPoweredBy where
+  showsPrec precedence (XPoweredBy text) =
+    showParen (precedence > 10) $ showString "XPoweredBy {poweredBy = " . shows text . showChar '}'
+
+
+-- | The original field bytes, including any received optional whitespace.
+xPoweredByBytes :: XPoweredBy -> ByteString
+xPoweredByBytes (XPoweredByBytes wire) = wire
+
+
+-- | Check field-value octets and keep the payload unchanged.
+xPoweredByFromBytes :: ByteString -> Either String XPoweredBy
+xPoweredByFromBytes = checkOpaqueField "X-Powered-By" XPoweredByBytes
 
 
 instance KnownHeader XPoweredBy where
@@ -39,22 +67,18 @@ instance KnownHeader XPoweredBy where
   type Direction XPoweredBy = 'Response
 
 
-  parseFromHeaders _ headers = case runParser xPoweredByParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing X-Powered-By header: " <> show rest
-    Fail -> Left "Failed to parse X-Powered-By header"
-    Err e -> Left e
+  parseFromHeaders _ = parseOpaqueFieldLine "X-Powered-By" XPoweredByBytes
 
 
-  renderToHeaders _ = M.toStrictByteString . renderXPoweredBy
+  renderToHeaders _ = xPoweredByBytes
 
 
   headerName _ = hXPoweredBy
 
 
 xPoweredByParser :: ParserT st String XPoweredBy
-xPoweredByParser = XPoweredBy <$> takeRestShortText
+xPoweredByParser = opaqueFieldParser "X-Powered-By" XPoweredByBytes
 
 
 renderXPoweredBy :: XPoweredBy -> M.Builder
-renderXPoweredBy (XPoweredBy v) = shortText v
+renderXPoweredBy = M.byteString . xPoweredByBytes

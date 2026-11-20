@@ -2,13 +2,19 @@
 
 module Test.Hermes.Prefer (tests) where
 
-import Data.ByteString (ByteString)
-import qualified Data.ByteString.Char8 as BC
+import Control.Monad (forM_)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import Data.Char (toUpper)
+import Data.Either (isLeft, isRight)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers.HeaderFieldName (hRepeatabilityFirstSent, hRepeatabilityResult)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import qualified Network.HTTP.Headers.Prefer as P
@@ -60,7 +66,7 @@ appliedPreferenceGen =
   PA.AppliedPreference
     <$> tokenGen
     <*> Gen.maybe tokenGen
-    <*> Gen.list (Range.linear 0 2) paramGen
+    <*> pure []
 
 
 preferenceAppliedGen :: Gen PA.PreferenceApplied
@@ -68,35 +74,13 @@ preferenceAppliedGen =
   PA.PreferenceApplied <$> Gen.nonEmpty (Range.linear 1 3) appliedPreferenceGen
 
 
--- A canonical-ish IMF-fixdate string. The weekday name is arbitrary (the
--- parser ignores it), so we only require it to be a valid 3-letter token.
-imfDateGen :: Gen ByteString
-imfDateGen = do
-  dow <- Gen.element ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-  dd <- Gen.int (Range.linear 1 28)
-  mon <- Gen.element ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-  yyyy <- Gen.int (Range.linear 1970 2099)
-  hh <- Gen.int (Range.linear 0 23)
-  mm <- Gen.int (Range.linear 0 59)
-  ss <- Gen.int (Range.linear 0 59)
-  pure $
-    BC.pack $
-      dow
-        <> ", "
-        <> pad2 dd
-        <> " "
-        <> mon
-        <> " "
-        <> show yyyy
-        <> " "
-        <> pad2 hh
-        <> ":"
-        <> pad2 mm
-        <> ":"
-        <> pad2 ss
-        <> " GMT"
-  where
-    pad2 n = let s = show n in if length s < 2 then '0' : s else s
+firstSentGen :: Gen RF.RepeatabilityFirstSent
+firstSentGen = do
+  year <- Gen.integral (Range.linear 1970 2099)
+  month <- Gen.int (Range.linear 1 12)
+  day <- Gen.int (Range.linear 1 28)
+  seconds <- Gen.integral (Range.linear 0 86399)
+  pure (RF.RepeatabilityFirstSent (UTCTime (fromGregorian year month day) (secondsToDiffTime seconds)))
 
 
 -- ---------------------------------------------------------------------------
@@ -125,6 +109,47 @@ unit_prefer_render =
                 :| [P.Preference (ST.fromString "return") (Just (ST.fromString "minimal")) []]
             )
     in M.toStrictByteString (P.renderPrefer v) `shouldBe` "respond-async;wait=100, return=minimal"
+
+
+unit_prefer_field_lines :: Spec
+unit_prefer_field_lines = it "handles BWS, empty list positions, and the first case-insensitive preference" $ do
+  let headers =
+        headerMapFromList
+          [ ("Prefer", " ,\tReturn \t= \"minimal\" ;; reason \t= \"user, \\\"requested\\\"\";")
+          , ("Prefer", "\t, ,")
+          , ("Prefer", "return=representation, flag=\"\",")
+          ]
+      first = P.Preference "Return" (Just "\"minimal\"") [("reason", Just "\"user, \\\"requested\\\"\"")]
+      canonical = "Return=\"minimal\";reason=\"user, \\\"requested\\\"\", return=representation, flag=\"\""
+  case lookupHeader @P.Prefer headers of
+    Right (Just value) -> do
+      P.lookupPreference "RETURN" value `shouldBe` Just first
+      P.decodePreferenceValue (P.preferenceValue first) `shouldBe` Right (Just "minimal")
+      P.decodePreferenceValue (Just "\"user, \\\"requested\\\"\"") `shouldBe` Right (Just "user, \"requested\"")
+      P.decodePreferenceValue (P.preferenceValue =<< P.lookupPreference "flag" value) `shouldBe` Right Nothing
+      headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("prefer", canonical)]
+    other -> expectationFailure (show other)
+  mapM_
+    (\wire -> lookupHeader @P.Prefer (headerMapFromList [("Prefer", wire)]) `shouldSatisfy` isLeft)
+    [" , , ", "wait = ", "wait=10;reason = ", "return=\"unterminated"]
+
+
+unit_prefer_opaque_words :: Spec
+unit_prefer_opaque_words = it "preserves each allowed quoted-pair octet in preferences and parameters" $ do
+  let check byte = do
+        let octet = BS.singleton byte
+            rawValue = "\"\\" <> octet <> "\""
+            wire = "extension=" <> rawValue <> ";argument=" <> rawValue
+            allowed = byte == 9 || (byte >= 32 && byte <= 126) || byte >= 128
+        case lookupHeader @P.Prefer (headerMapFromList [("Prefer", wire)]) of
+          Right (Just value@(P.Prefer (entry :| []))) -> do
+            allowed `shouldBe` True
+            P.decodePreferenceValue (P.preferenceValue entry) `shouldBe` Right (Just octet)
+            map (P.decodePreferenceValue . snd) (P.preferenceParameters entry) `shouldBe` [Right (Just octet)]
+            headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("prefer", wire)]
+          Left _ -> allowed `shouldBe` False
+          other -> expectationFailure (show other)
+  mapM_ check [minBound .. maxBound]
 
 
 prop_prefer_roundtrip :: Property
@@ -159,6 +184,23 @@ unit_applied_render =
                 :| [PA.AppliedPreference (ST.fromString "return") (Just (ST.fromString "minimal")) []]
             )
     in M.toStrictByteString (PA.renderPreferenceApplied v) `shouldBe` "respond-async, return=minimal"
+
+
+unit_applied_field_lines :: Spec
+unit_applied_field_lines = it "reads repeated applied preferences and rejects request parameter syntax" $ do
+  let quoted = "\"ABC" <> BS.pack [0xc3, 0xa9, 0xe9] <> "\""
+      headers = headerMapFromList [("Preference-Applied", "  extension \t = " <> quoted <> ","), ("Preference-Applied", " , \t"), ("Preference-Applied", "return=minimal")]
+  case lookupHeader @PA.PreferenceApplied headers of
+    Right (Just value@(PA.PreferenceApplied (extension :| [_]))) -> do
+      P.decodePreferenceValue (PA.appliedPreferenceValue extension) `shouldBe` Right (Just ("ABC" <> BS.pack [0xc3, 0xa9, 0xe9]))
+      headerMapToList (setHeader value (headerMapFromList []))
+        `shouldBe` [("preference-applied", "extension=" <> quoted <> ", return=minimal")]
+    other -> expectationFailure (show other)
+  mapM_
+    (\wire -> lookupHeader @PA.PreferenceApplied (headerMapFromList [("Preference-Applied", wire)]) `shouldSatisfy` isLeft)
+    ["return=minimal;reason=cache", "return=minimal;", "return= ", " , , "]
+  let legacy = PA.PreferenceApplied (PA.AppliedPreference "return" (Just "minimal") [("reason", Just "cache")] :| [])
+  headerMapToList (setHeader legacy (headerMapFromList [])) `shouldBe` [("preference-applied", "return=minimal")]
 
 
 prop_applied_roundtrip :: Property
@@ -232,14 +274,9 @@ unit_first_sent_render = it "renders the canonical IMF-fixdate" $
 
 prop_first_sent_roundtrip :: Property
 prop_first_sent_roundtrip = property $ do
-  s <- forAll imfDateGen
-  case ok (runParser RF.repeatabilityFirstSentParser s) of
-    Right v ->
-      let bs = M.toStrictByteString (RF.renderRepeatabilityFirstSent v)
-      in case ok (runParser RF.repeatabilityFirstSentParser bs) of
-          Right v' -> v === v'
-          Left err -> error (err <> " on " <> show bs)
-    Left err -> error (err <> " on " <> show s)
+  value <- forAll firstSentGen
+  let bytes = M.toStrictByteString (RF.renderRepeatabilityFirstSent value)
+  ok (runParser RF.repeatabilityFirstSentParser bytes) === Right value
 
 
 -- ---------------------------------------------------------------------------
@@ -267,15 +304,75 @@ prop_result_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+repeatabilityHeaders :: Spec
+repeatabilityHeaders = describe "repeatability fields" $ do
+  it "preserves the spelling of UUIDs and opaque identifier tokens" $ do
+    let client = "0E8a7E9f-A3c4-4b2e-9f1a-1234567890AB"
+        request = "retry_01+attempt"
+        headers =
+          headerMapFromList
+            [ ("Repeatability-Client-ID", "\t " <> client <> " \t")
+            , ("Repeatability-Request-ID", "\t " <> request <> " \t")
+            ]
+        typedClient = RC.RepeatabilityClientID "0E8a7E9f-A3c4-4b2e-9f1a-1234567890AB"
+        typedRequest = RR.RepeatabilityRequestID "retry_01+attempt"
+        rendered = setHeader typedClient $ setHeader typedRequest $ headerMapFromList []
+    lookupHeader @RC.RepeatabilityClientID headers `shouldBe` Right (Just typedClient)
+    lookupHeader @RR.RepeatabilityRequestID headers `shouldBe` Right (Just typedRequest)
+    lookupRawHeader "Repeatability-Client-ID" rendered `shouldBe` Just (client :| [])
+    lookupRawHeader "Repeatability-Request-ID" rendered `shouldBe` Just (request :| [])
+  it "rejects invalid identifier token bytes and combined identifiers" $
+    forM_ ["", " ", "client id", "\"uuid\"", "first, second", "client\xff"] $ \input -> do
+      lookupHeader @RC.RepeatabilityClientID (headerMapFromList [("Repeatability-Client-ID", input)]) `shouldSatisfy` isLeft
+      lookupHeader @RR.RepeatabilityRequestID (headerMapFromList [("Repeatability-Request-ID", input)]) `shouldSatisfy` isLeft
+  it "checks every octet in a bare or OWS-padded identifier" $ do
+    let tchars = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    forM_ [0 .. 255] $ \byte -> do
+      let token = BS.pack [120, byte, 121]
+          expected = byte `BS.elem` tchars
+      forM_ [token, "\t" <> token <> " "] $ \wire -> do
+        let headers = headerMapFromList [("Repeatability-Client-ID", wire), ("Repeatability-Request-ID", wire)]
+        isRight (lookupHeader @RC.RepeatabilityClientID headers) `shouldBe` expected
+        isRight (lookupHeader @RR.RepeatabilityRequestID headers) `shouldBe` expected
+  it "accepts every ASCII case spelling of either result and renders lowercase" $ do
+    forM_ [("accepted", RS.Accepted), ("rejected", RS.Rejected)] $ \(wire, result) -> do
+      let spellings = traverse (\letter -> [letter, toUpper letter]) wire
+      forM_ spellings $ \spelling ->
+        lookupHeader @RS.RepeatabilityResult (headerMapFromList [("Repeatability-Result", "\t " <> BSC.pack spelling <> " \t")])
+          `shouldBe` Right (Just result)
+      lookupRawHeader hRepeatabilityResult (setHeader result (headerMapFromList []))
+        `shouldBe` Just (BSC.pack wire :| [])
+  it "rejects unknown results, keyword prefixes and combined results" $
+    forM_ ["", "accept", "accepteD-more", "accepted, rejected", "\"accepted\"", "pending", "accepte\xff"] $ \input ->
+      lookupHeader @RS.RepeatabilityResult (headerMapFromList [("Repeatability-Result", input)]) `shouldSatisfy` isLeft
+  it "accepts all HTTP-date forms on receipt and emits IMF-fixdate" $ do
+    let canonical = "Tue, 28 Feb 2012 12:34:56 GMT"
+        firstSent = RF.RepeatabilityFirstSent (UTCTime (fromGregorian 2012 2 28) (secondsToDiffTime 45296))
+    forM_ [canonical, "Tuesday, 28-Feb-12 12:34:56 GMT", "Tue Feb 28 12:34:56 2012"] $ \input ->
+      lookupHeader @RF.RepeatabilityFirstSent (headerMapFromList [("Repeatability-First-Sent", "\t " <> input <> " \t")])
+        `shouldBe` Right (Just firstSent)
+    lookupRawHeader hRepeatabilityFirstSent (setHeader firstSent (headerMapFromList []))
+      `shouldBe` Just (canonical :| [])
+  it "rejects repeated singleton lines even when their values match" $ do
+    let repeated name value = headerMapFromList [(name, value), (name, value)]
+    lookupHeader @RC.RepeatabilityClientID (repeated "Repeatability-Client-ID" "client") `shouldSatisfy` isLeft
+    lookupHeader @RR.RepeatabilityRequestID (repeated "Repeatability-Request-ID" "request") `shouldSatisfy` isLeft
+    lookupHeader @RF.RepeatabilityFirstSent (repeated "Repeatability-First-Sent" "Tue, 28 Feb 2012 12:34:56 GMT") `shouldSatisfy` isLeft
+    lookupHeader @RS.RepeatabilityResult (repeated "Repeatability-Result" "accepted") `shouldSatisfy` isLeft
+
+
 tests :: Spec
 tests =
   describe "Prefer" $
     sequence_
       [ unit_prefer_parse
       , unit_prefer_render
+      , unit_prefer_field_lines
+      , unit_prefer_opaque_words
       , it "Prefer round-trip" prop_prefer_roundtrip
       , unit_applied_parse
       , unit_applied_render
+      , unit_applied_field_lines
       , it "Preference-Applied round-trip" prop_applied_roundtrip
       , unit_client_id_parse
       , unit_client_id_render
@@ -288,4 +385,5 @@ tests =
       , unit_result_parse
       , unit_result_render
       , it "Repeatability-Result round-trip" prop_result_roundtrip
+      , repeatabilityHeaders
       ]

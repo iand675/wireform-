@@ -5,14 +5,11 @@ intermediary, firewall, or client library cannot emit that method directly.
 The receiving server replaces the request method with the header value before
 dispatching.
 
-This header is __not IANA-registered__. The value is a single HTTP method
-token, surfaced as 'Network.HTTP.Methods.Method' (which normalises the token to
-upper case, the universal method-name convention).
+The value is a single, case-sensitive HTTP method token, represented by
+'Network.HTTP.Methods.Method'.
 
-Spec (de-facto, not IANA-registered; no single specification — the closest
-formal definition of the verb-tunneling convention is OData @X-HTTP-Method@,
-[MS-ODATA]):
-<https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-odata/bdbabfa6-8c4a-4741-85a9-8d93ffd66c41>.
+The Google Cloud API system parameters document this convention:
+<https://docs.cloud.google.com/apis/docs/system-parameters#definitions>.
 
 See also: "Network.HTTP.Headers.Allow",
 "Network.HTTP.Headers.AccessControlAllowMethods",
@@ -25,14 +22,16 @@ module Network.HTTP.Headers.XHttpMethodOverride (
   renderXHttpMethodOverride,
 ) where
 
-import qualified Data.List.NonEmpty as NE
-import Data.String (fromString)
-import qualified Data.Text.Short as ST
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Unsafe as BSU
+import Data.List.NonEmpty (NonEmpty (..))
+import GHC.ForeignPtr (plusForeignPtr)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXHttpMethodOverride)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Methods (Method, methodToBytes)
+import Network.HTTP.Methods (Method, MethodError (..), methodToBytes, methodTokenParser, mkMethod)
 
 
 -- | The overridden HTTP request method.
@@ -46,22 +45,47 @@ instance KnownHeader XHttpMethodOverride where
   type Direction XHttpMethodOverride = 'Request
 
 
-  parseFromHeaders _ headers = case runParser xHttpMethodOverrideParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing X-Http-Method-Override header: " <> show rest
-    Fail -> Left "Failed to parse X-Http-Method-Override header"
-    Err e -> Left e
+  parseFromHeaders _ (wire :| []) =
+    case mkMethod wire of
+      Right method -> Right (XHttpMethodOverride method)
+      Left (MethodInvalidByte byte)
+        | byte == 32 || byte == 9 ->
+            case mkMethod (trimOverrideOWS wire) of
+              Right method -> Right (XHttpMethodOverride method)
+              Left _ -> badOverride
+      Left _ -> badOverride
+  parseFromHeaders _ _ = Left "Multiple X-Http-Method-Override field lines"
+  {-# INLINE parseFromHeaders #-}
 
 
-  renderToHeaders _ = M.toStrictByteString . renderXHttpMethodOverride
+  renderToHeaders _ = methodToBytes . xHttpMethodOverrideMethod
 
 
   headerName _ = hXHttpMethodOverride
 
 
+badOverride :: Either String a
+badOverride = Left "Failed to parse X-Http-Method-Override header"
+
+
+trimOverrideOWS :: ByteString -> ByteString
+trimOverrideOWS bytes@(BSI.BS ptr size) =
+  let start = skipLeading 0
+      end = skipTrailing start size
+  in BSI.BS (plusForeignPtr ptr start) (end - start)
+  where
+    skipLeading i
+      | i < size && atOWS i = skipLeading (i + 1)
+      | otherwise = i
+    skipTrailing start end
+      | end > start && atOWS (end - 1) = skipTrailing start (end - 1)
+      | otherwise = end
+    atOWS i = isOWS (BSI.w2c (BSU.unsafeIndex bytes i))
+
+
 xHttpMethodOverrideParser :: ParserT st String XHttpMethodOverride
 xHttpMethodOverrideParser =
-  XHttpMethodOverride . fromString . ST.toString <$> rfc9110Token
+  ows *> (XHttpMethodOverride <$> methodTokenParser) <* ows
 
 
 renderXHttpMethodOverride :: XHttpMethodOverride -> M.Builder

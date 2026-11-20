@@ -1,0 +1,3433 @@
+
+==================== Tidy Core ====================
+
+Result size of Tidy Core
+  = {terms: 5,832, types: 3,928, coercions: 313, joins: 3/82}
+
+intHost
+  = (\ eta_irHc eta1_irHd eta2_irHe ->
+       case eta2_irHe of wild1_ssd2 { (# cur_ssd3, end_ssd4, s_ssd5 #) ->
+       case <# (minusAddr# end_ssd4 cur_ssd3) 8# of {
+         __DEFAULT ->
+           case eta_irHc of { I# i_arHA ->
+           case writeWord8OffAddrAsWord64#
+                  cur_ssd3 0# (wordToWord64# (int2Word# i_arHA)) s_ssd5
+           of wild2_X1
+           { __DEFAULT ->
+           (# plusAddr# cur_ssd3 8#, end_ssd4, wild2_X1 #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_irHd wild1_ssd2 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_irHc of { I# i_arHA ->
+           case writeWord8OffAddrAsWord64#
+                  ipv_isbi 0# (wordToWord64# (int2Word# i_arHA)) ipv2_isbk
+           of wild2_X1
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_X1 #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int8
+  = (\ eta_X2 eta1_X3 eta2_X4 ->
+       case eta2_X4 of wild1_ssd7 { (# cur_ssd8, end_ssd9, s_ssda #) ->
+       case <# (minusAddr# end_ssd9 cur_ssd8) 1# of {
+         __DEFAULT ->
+           case eta_X2 of { I8# x#_arHX ->
+           case writeWord8OffAddr# cur_ssd8 0# (int8ToWord8# x#_arHX) s_ssda
+           of s2_arHZ
+           { __DEFAULT ->
+           (# plusAddr# cur_ssd8 1#, end_ssd9, s2_arHZ #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 1# eta1_X3 wild1_ssd7 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X2 of { I8# x#_arHX ->
+           case writeWord8OffAddr#
+                  ipv_isbi 0# (int8ToWord8# x#_arHX) ipv2_isbk
+           of s2_arHZ
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 1#, ipv1_isbj, s2_arHZ #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int16LE
+  = (\ eta_X6 eta1_X7 eta2_X8 ->
+       case eta2_X8 of wild1_ssdc { (# cur_ssdd, end_ssde, s_ssdf #) ->
+       case <# (minusAddr# end_ssde cur_ssdd) 2# of {
+         __DEFAULT ->
+           case eta_X6 of { I16# x#_arI9 ->
+           case writeWord8OffAddrAsWord16#
+                  cur_ssdd 0# (int16ToWord16# x#_arI9) s_ssdf
+           of wild2_X9
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdd 2#, end_ssde, wild2_X9 #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta1_X7 wild1_ssdc of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X6 of { I16# x#_arI9 ->
+           case writeWord8OffAddrAsWord16#
+                  ipv_isbi 0# (int16ToWord16# x#_arI9) ipv2_isbk
+           of wild2_X9
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 2#, ipv1_isbj, wild2_X9 #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int16BE
+  = (\ eta_Xa eta1_Xb eta2_Xc ->
+       case eta2_Xc of wild1_ssdh { (# cur_ssdi, end_ssdj, s_ssdk #) ->
+       case <# (minusAddr# end_ssdj cur_ssdi) 2# of {
+         __DEFAULT ->
+           case eta_Xa of { I16# x#_arIm ->
+           case writeWord8OffAddrAsWord16#
+                  cur_ssdi
+                  0#
+                  (wordToWord16#
+                     (byteSwap16# (word16ToWord# (int16ToWord16# x#_arIm))))
+                  s_ssdk
+           of wild2_Xd
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdi 2#, end_ssdj, wild2_Xd #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta1_Xb wild1_ssdh of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_Xa of { I16# x#_arIm ->
+           case writeWord8OffAddrAsWord16#
+                  ipv_isbi
+                  0#
+                  (wordToWord16#
+                     (byteSwap16# (word16ToWord# (int16ToWord16# x#_arIm))))
+                  ipv2_isbk
+           of wild2_Xd
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 2#, ipv1_isbj, wild2_Xd #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int16Host
+  = (\ eta_Xe eta1_Xf eta2_Xg ->
+       case eta2_Xg of wild1_ssdm { (# cur_ssdn, end_ssdo, s_ssdp #) ->
+       case <# (minusAddr# end_ssdo cur_ssdn) 2# of {
+         __DEFAULT ->
+           case eta_Xe of { I16# x#_arIG ->
+           case writeWord8OffAddrAsWord16#
+                  cur_ssdn 0# (int16ToWord16# x#_arIG) s_ssdp
+           of wild2_Xh
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdn 2#, end_ssdo, wild2_Xh #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta1_Xf wild1_ssdm of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_Xe of { I16# x#_arIG ->
+           case writeWord8OffAddrAsWord16#
+                  ipv_isbi 0# (int16ToWord16# x#_arIG) ipv2_isbk
+           of wild2_Xh
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 2#, ipv1_isbj, wild2_Xh #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int32LE
+  = (\ eta_Xi eta1_Xj eta2_Xk ->
+       case eta2_Xk of wild1_ssdr { (# cur_ssds, end_ssdt, s_ssdu #) ->
+       case <# (minusAddr# end_ssdt cur_ssds) 4# of {
+         __DEFAULT ->
+           case eta_Xi of { I32# x#_arIT ->
+           case writeWord8OffAddrAsWord32#
+                  cur_ssds 0# (int32ToWord32# x#_arIT) s_ssdu
+           of wild2_Xl
+           { __DEFAULT ->
+           (# plusAddr# cur_ssds 4#, end_ssdt, wild2_Xl #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_Xj wild1_ssdr of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_Xi of { I32# x#_arIT ->
+           case writeWord8OffAddrAsWord32#
+                  ipv_isbi 0# (int32ToWord32# x#_arIT) ipv2_isbk
+           of wild2_Xl
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_Xl #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int32BE
+  = (\ eta_Xm eta1_Xn eta2_Xo ->
+       case eta2_Xo of wild1_ssdw { (# cur_ssdx, end_ssdy, s_ssdz #) ->
+       case <# (minusAddr# end_ssdy cur_ssdx) 4# of {
+         __DEFAULT ->
+           case eta_Xm of { I32# x#_arJ6 ->
+           case writeWord8OffAddrAsWord32#
+                  cur_ssdx
+                  0#
+                  (wordToWord32#
+                     (byteSwap32# (word32ToWord# (int32ToWord32# x#_arJ6))))
+                  s_ssdz
+           of wild2_Xp
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdx 4#, end_ssdy, wild2_Xp #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_Xn wild1_ssdw of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_Xm of { I32# x#_arJ6 ->
+           case writeWord8OffAddrAsWord32#
+                  ipv_isbi
+                  0#
+                  (wordToWord32#
+                     (byteSwap32# (word32ToWord# (int32ToWord32# x#_arJ6))))
+                  ipv2_isbk
+           of wild2_Xp
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_Xp #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int32Host
+  = (\ eta_Xq eta1_Xr eta2_Xs ->
+       case eta2_Xs of wild1_ssdB { (# cur_ssdC, end_ssdD, s_ssdE #) ->
+       case <# (minusAddr# end_ssdD cur_ssdC) 4# of {
+         __DEFAULT ->
+           case eta_Xq of { I32# x#_arJq ->
+           case writeWord8OffAddrAsWord32#
+                  cur_ssdC 0# (int32ToWord32# x#_arJq) s_ssdE
+           of wild2_Xt
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdC 4#, end_ssdD, wild2_Xt #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_Xr wild1_ssdB of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_Xq of { I32# x#_arJq ->
+           case writeWord8OffAddrAsWord32#
+                  ipv_isbi 0# (int32ToWord32# x#_arJq) ipv2_isbk
+           of wild2_Xt
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_Xt #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int64LE
+  = (\ eta_Xu eta1_Xv eta2_Xw ->
+       case eta2_Xw of wild1_ssdG { (# cur_ssdH, end_ssdI, s_ssdJ #) ->
+       case <# (minusAddr# end_ssdI cur_ssdH) 8# of {
+         __DEFAULT ->
+           case eta_Xu of { I64# x1_arJD ->
+           case writeWord8OffAddrAsWord64#
+                  cur_ssdH 0# (int64ToWord64# x1_arJD) s_ssdJ
+           of wild2_Xx
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdH 8#, end_ssdI, wild2_Xx #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_Xv wild1_ssdG of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_Xu of { I64# x1_arJD ->
+           case writeWord8OffAddrAsWord64#
+                  ipv_isbi 0# (int64ToWord64# x1_arJD) ipv2_isbk
+           of wild2_Xx
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_Xx #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int64BE
+  = (\ eta_Xy eta1_Xz eta2_XA ->
+       case eta2_XA of wild1_ssdL { (# cur_ssdM, end_ssdN, s_ssdO #) ->
+       case <# (minusAddr# end_ssdN cur_ssdM) 8# of {
+         __DEFAULT ->
+           case eta_Xy of { I64# x1_arJP ->
+           case writeWord8OffAddrAsWord64#
+                  cur_ssdM 0# (byteSwap64# (int64ToWord64# x1_arJP)) s_ssdO
+           of wild2_XB
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdM 8#, end_ssdN, wild2_XB #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_Xz wild1_ssdL of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_Xy of { I64# x1_arJP ->
+           case writeWord8OffAddrAsWord64#
+                  ipv_isbi 0# (byteSwap64# (int64ToWord64# x1_arJP)) ipv2_isbk
+           of wild2_XB
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_XB #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int64Host
+  = (\ eta_XC eta1_XD eta2_XE ->
+       case eta2_XE of wild1_ssdQ { (# cur_ssdR, end_ssdS, s_ssdT #) ->
+       case <# (minusAddr# end_ssdS cur_ssdR) 8# of {
+         __DEFAULT ->
+           case eta_XC of { I64# x1_arK7 ->
+           case writeWord8OffAddrAsWord64#
+                  cur_ssdR 0# (int64ToWord64# x1_arK7) s_ssdT
+           of wild2_XF
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdR 8#, end_ssdS, wild2_XF #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_XD wild1_ssdQ of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_XC of { I64# x1_arK7 ->
+           case writeWord8OffAddrAsWord64#
+                  ipv_isbi 0# (int64ToWord64# x1_arK7) ipv2_isbk
+           of wild2_XF
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_XF #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+wordHost
+  = (\ eta_XG eta1_XH eta2_XI ->
+       case eta2_XI of wild1_ssdV { (# cur_ssdW, end_ssdX, s_ssdY #) ->
+       case <# (minusAddr# end_ssdX cur_ssdW) 8# of {
+         __DEFAULT ->
+           case eta_XG of { W# x#_arKj ->
+           case writeWord8OffAddrAsWord64#
+                  cur_ssdW 0# (wordToWord64# x#_arKj) s_ssdY
+           of wild2_XJ
+           { __DEFAULT ->
+           (# plusAddr# cur_ssdW 8#, end_ssdX, wild2_XJ #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_XH wild1_ssdV of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_XG of { W# x#_arKj ->
+           case writeWord8OffAddrAsWord64#
+                  ipv_isbi 0# (wordToWord64# x#_arKj) ipv2_isbk
+           of wild2_XJ
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_XJ #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word8
+  = (\ eta_XK eta1_XL eta2_XM ->
+       case eta2_XM of wild1_sse0 { (# cur_sse1, end_sse2, s_sse3 #) ->
+       case <# (minusAddr# end_sse2 cur_sse1) 1# of {
+         __DEFAULT ->
+           case eta_XK of { W8# x1_arKE ->
+           case writeWord8OffAddr# cur_sse1 0# x1_arKE s_sse3 of s2_arKG
+           { __DEFAULT ->
+           (# plusAddr# cur_sse1 1#, end_sse2, s2_arKG #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 1# eta1_XL wild1_sse0 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_XK of { W8# x1_arKE ->
+           case writeWord8OffAddr# ipv_isbi 0# x1_arKE ipv2_isbk of s2_arKG
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 1#, ipv1_isbj, s2_arKG #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word16LE
+  = (\ eta_XO eta1_XP eta2_XQ ->
+       case eta2_XQ of wild1_sse5 { (# cur_sse6, end_sse7, s_sse8 #) ->
+       case <# (minusAddr# end_sse7 cur_sse6) 2# of {
+         __DEFAULT ->
+           case eta_XO of { W16# x#_arKP ->
+           case writeWord8OffAddrAsWord16# cur_sse6 0# x#_arKP s_sse8
+           of wild2_XR
+           { __DEFAULT ->
+           (# plusAddr# cur_sse6 2#, end_sse7, wild2_XR #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta1_XP wild1_sse5 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_XO of { W16# x#_arKP ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# x#_arKP ipv2_isbk
+           of wild2_XR
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 2#, ipv1_isbj, wild2_XR #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word16BE
+  = (\ eta_XS eta1_XT eta2_XU ->
+       case eta2_XU of wild1_ssea { (# cur_sseb, end_ssec, s_ssed #) ->
+       case <# (minusAddr# end_ssec cur_sseb) 2# of {
+         __DEFAULT ->
+           case eta_XS of { W16# w#_arL1 ->
+           case writeWord8OffAddrAsWord16#
+                  cur_sseb
+                  0#
+                  (wordToWord16# (byteSwap16# (word16ToWord# w#_arL1)))
+                  s_ssed
+           of wild2_XV
+           { __DEFAULT ->
+           (# plusAddr# cur_sseb 2#, end_ssec, wild2_XV #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta1_XT wild1_ssea of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_XS of { W16# w#_arL1 ->
+           case writeWord8OffAddrAsWord16#
+                  ipv_isbi
+                  0#
+                  (wordToWord16# (byteSwap16# (word16ToWord# w#_arL1)))
+                  ipv2_isbk
+           of wild2_XV
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 2#, ipv1_isbj, wild2_XV #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word16Host
+  = (\ eta_XW eta1_XX eta2_XY ->
+       case eta2_XY of wild1_ssef { (# cur_sseg, end_sseh, s_ssei #) ->
+       case <# (minusAddr# end_sseh cur_sseg) 2# of {
+         __DEFAULT ->
+           case eta_XW of { W16# x#_arLw ->
+           case writeWord8OffAddrAsWord16# cur_sseg 0# x#_arLw s_ssei
+           of wild2_XZ
+           { __DEFAULT ->
+           (# plusAddr# cur_sseg 2#, end_sseh, wild2_XZ #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta1_XX wild1_ssef of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_XW of { W16# x#_arLw ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# x#_arLw ipv2_isbk
+           of wild2_XZ
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 2#, ipv1_isbj, wild2_XZ #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word32LE
+  = (\ eta_X10 eta1_X11 eta2_X12 ->
+       case eta2_X12 of wild1_ssek { (# cur_ssel, end_ssem, s_ssen #) ->
+       case <# (minusAddr# end_ssem cur_ssel) 4# of {
+         __DEFAULT ->
+           case eta_X10 of { W32# x#_arLG ->
+           case writeWord8OffAddrAsWord32# cur_ssel 0# x#_arLG s_ssen
+           of wild2_X13
+           { __DEFAULT ->
+           (# plusAddr# cur_ssel 4#, end_ssem, wild2_X13 #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_X11 wild1_ssek of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X10 of { W32# x#_arLG ->
+           case writeWord8OffAddrAsWord32# ipv_isbi 0# x#_arLG ipv2_isbk
+           of wild2_X13
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_X13 #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word32BE
+  = (\ eta_X14 eta1_X15 eta2_X16 ->
+       case eta2_X16 of wild1_ssep { (# cur_sseq, end_sser, s_sses #) ->
+       case <# (minusAddr# end_sser cur_sseq) 4# of {
+         __DEFAULT ->
+           case eta_X14 of { W32# w#_arLS ->
+           case writeWord8OffAddrAsWord32#
+                  cur_sseq
+                  0#
+                  (wordToWord32# (byteSwap32# (word32ToWord# w#_arLS)))
+                  s_sses
+           of wild2_X17
+           { __DEFAULT ->
+           (# plusAddr# cur_sseq 4#, end_sser, wild2_X17 #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_X15 wild1_ssep of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X14 of { W32# w#_arLS ->
+           case writeWord8OffAddrAsWord32#
+                  ipv_isbi
+                  0#
+                  (wordToWord32# (byteSwap32# (word32ToWord# w#_arLS)))
+                  ipv2_isbk
+           of wild2_X17
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_X17 #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word32Host
+  = (\ eta_X18 eta1_X19 eta2_X1a ->
+       case eta2_X1a of wild1_sseu { (# cur_ssev, end_ssew, s_ssex #) ->
+       case <# (minusAddr# end_ssew cur_ssev) 4# of {
+         __DEFAULT ->
+           case eta_X18 of { W32# x#_arMb ->
+           case writeWord8OffAddrAsWord32# cur_ssev 0# x#_arMb s_ssex
+           of wild2_X1b
+           { __DEFAULT ->
+           (# plusAddr# cur_ssev 4#, end_ssew, wild2_X1b #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_X19 wild1_sseu of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X18 of { W32# x#_arMb ->
+           case writeWord8OffAddrAsWord32# ipv_isbi 0# x#_arMb ipv2_isbk
+           of wild2_X1b
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_X1b #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word64LE
+  = (\ eta_X1c eta1_X1d eta2_X1e ->
+       case eta2_X1e of wild1_ssez { (# cur_sseA, end_sseB, s_sseC #) ->
+       case <# (minusAddr# end_sseB cur_sseA) 8# of {
+         __DEFAULT ->
+           case eta_X1c of { W64# x#_arMl ->
+           case writeWord8OffAddrAsWord64# cur_sseA 0# x#_arMl s_sseC
+           of wild2_X1f
+           { __DEFAULT ->
+           (# plusAddr# cur_sseA 8#, end_sseB, wild2_X1f #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X1d wild1_ssez of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1c of { W64# x#_arMl ->
+           case writeWord8OffAddrAsWord64# ipv_isbi 0# x#_arMl ipv2_isbk
+           of wild2_X1f
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_X1f #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word64BE
+  = (\ eta_X1g eta1_X1h eta2_X1i ->
+       case eta2_X1i of wild1_sseE { (# cur_sseF, end_sseG, s_sseH #) ->
+       case <# (minusAddr# end_sseG cur_sseF) 8# of {
+         __DEFAULT ->
+           case eta_X1g of { W64# w#_arMx ->
+           case writeWord8OffAddrAsWord64#
+                  cur_sseF 0# (byteSwap64# w#_arMx) s_sseH
+           of wild2_X1j
+           { __DEFAULT ->
+           (# plusAddr# cur_sseF 8#, end_sseG, wild2_X1j #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X1h wild1_sseE of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1g of { W64# w#_arMx ->
+           case writeWord8OffAddrAsWord64#
+                  ipv_isbi 0# (byteSwap64# w#_arMx) ipv2_isbk
+           of wild2_X1j
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_X1j #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word64Host
+  = (\ eta_X1k eta1_X1l eta2_X1m ->
+       case eta2_X1m of wild1_sseJ { (# cur_sseK, end_sseL, s_sseM #) ->
+       case <# (minusAddr# end_sseL cur_sseK) 8# of {
+         __DEFAULT ->
+           case eta_X1k of { W64# x#_arMQ ->
+           case writeWord8OffAddrAsWord64# cur_sseK 0# x#_arMQ s_sseM
+           of wild2_X1n
+           { __DEFAULT ->
+           (# plusAddr# cur_sseK 8#, end_sseL, wild2_X1n #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X1l wild1_sseJ of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1k of { W64# x#_arMQ ->
+           case writeWord8OffAddrAsWord64# ipv_isbi 0# x#_arMQ ipv2_isbk
+           of wild2_X1n
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_X1n #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+floatLE
+  = (\ eta_X1o eta1_X1p eta2_X1q ->
+       case eta2_X1q of wild1_sseO { (# cur_sseP, end_sseQ, s_sseR #) ->
+       case <# (minusAddr# end_sseQ cur_sseP) 4# of {
+         __DEFAULT ->
+           case eta_X1o of { F# f#_arMZ ->
+           case writeWord8OffAddrAsWord32#
+                  cur_sseP 0# (castFloatToWord32# f#_arMZ) s_sseR
+           of wild2_X1r
+           { __DEFAULT ->
+           (# plusAddr# cur_sseP 4#, end_sseQ, wild2_X1r #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_X1p wild1_sseO of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1o of { F# f#_arMZ ->
+           case writeWord8OffAddrAsWord32#
+                  ipv_isbi 0# (castFloatToWord32# f#_arMZ) ipv2_isbk
+           of wild2_X1r
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_X1r #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+floatBE
+  = (\ eta_X1s eta1_X1t eta2_X1u ->
+       case eta2_X1u of wild1_sseT { (# cur_sseU, end_sseV, s_sseW #) ->
+       case <# (minusAddr# end_sseV cur_sseU) 4# of {
+         __DEFAULT ->
+           case eta_X1s of { F# f#_arNg ->
+           case writeWord8OffAddrAsWord32#
+                  cur_sseU
+                  0#
+                  (wordToWord32#
+                     (byteSwap32# (word32ToWord# (castFloatToWord32# f#_arNg))))
+                  s_sseW
+           of wild2_X1v
+           { __DEFAULT ->
+           (# plusAddr# cur_sseU 4#, end_sseV, wild2_X1v #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_X1t wild1_sseT of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1s of { F# f#_arNg ->
+           case writeWord8OffAddrAsWord32#
+                  ipv_isbi
+                  0#
+                  (wordToWord32#
+                     (byteSwap32# (word32ToWord# (castFloatToWord32# f#_arNg))))
+                  ipv2_isbk
+           of wild2_X1v
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_X1v #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+floatHost
+  = (\ eta_X1w eta1_X1x eta2_X1y ->
+       case eta2_X1y of wild1_sseY { (# cur_sseZ, end_ssf0, s_ssf1 #) ->
+       case <# (minusAddr# end_ssf0 cur_sseZ) 4# of {
+         __DEFAULT ->
+           case eta_X1w of { F# x#_arPr ->
+           case writeWord8OffAddrAsFloat# cur_sseZ 0# x#_arPr s_ssf1
+           of wild2_X1z
+           { __DEFAULT ->
+           (# plusAddr# cur_sseZ 4#, end_ssf0, wild2_X1z #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_X1x wild1_sseY of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1w of { F# x#_arPr ->
+           case writeWord8OffAddrAsFloat# ipv_isbi 0# x#_arPr ipv2_isbk
+           of wild2_X1z
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild2_X1z #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+doubleLE
+  = (\ eta_X1A eta1_X1B eta2_X1C ->
+       case eta2_X1C of wild1_ssf3 { (# cur_ssf4, end_ssf5, s_ssf6 #) ->
+       case <# (minusAddr# end_ssf5 cur_ssf4) 8# of {
+         __DEFAULT ->
+           case eta_X1A of { D# d#_arPz ->
+           case writeWord8OffAddrAsWord64#
+                  cur_ssf4 0# (castDoubleToWord64# d#_arPz) s_ssf6
+           of wild2_X1D
+           { __DEFAULT ->
+           (# plusAddr# cur_ssf4 8#, end_ssf5, wild2_X1D #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X1B wild1_ssf3 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1A of { D# d#_arPz ->
+           case writeWord8OffAddrAsWord64#
+                  ipv_isbi 0# (castDoubleToWord64# d#_arPz) ipv2_isbk
+           of wild2_X1D
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_X1D #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+doubleBE
+  = (\ eta_X1E eta1_X1F eta2_X1G ->
+       case eta2_X1G of wild1_ssf8 { (# cur_ssf9, end_ssfa, s_ssfb #) ->
+       case <# (minusAddr# end_ssfa cur_ssf9) 8# of {
+         __DEFAULT ->
+           case eta_X1E of { D# d#_arPQ ->
+           case writeWord8OffAddrAsWord64#
+                  cur_ssf9 0# (byteSwap64# (castDoubleToWord64# d#_arPQ)) s_ssfb
+           of wild2_X1H
+           { __DEFAULT ->
+           (# plusAddr# cur_ssf9 8#, end_ssfa, wild2_X1H #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X1F wild1_ssf8 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1E of { D# d#_arPQ ->
+           case writeWord8OffAddrAsWord64#
+                  ipv_isbi 0# (byteSwap64# (castDoubleToWord64# d#_arPQ)) ipv2_isbk
+           of wild2_X1H
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_X1H #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+doubleHost
+  = (\ eta_X1I eta1_X1J eta2_X1K ->
+       case eta2_X1K of wild1_ssfd { (# cur_ssfe, end_ssff, s_ssfg #) ->
+       case <# (minusAddr# end_ssff cur_ssfe) 8# of {
+         __DEFAULT ->
+           case eta_X1I of { D# x#_arQ8 ->
+           case writeWord8OffAddrAsDouble# cur_ssfe 0# x#_arQ8 s_ssfg
+           of wild2_X1L
+           { __DEFAULT ->
+           (# plusAddr# cur_ssfe 8#, end_ssff, wild2_X1L #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X1J wild1_ssfd of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X1I of { D# x#_arQ8 ->
+           case writeWord8OffAddrAsDouble# ipv_isbi 0# x#_arQ8 ipv2_isbk
+           of wild2_X1L
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild2_X1L #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+intDec
+  = (\ x_irQf eta_irQg eta1_irQh ->
+       case eta1_irQh of wild1_ssfi { (# cur_ssfj, end_ssfk, s_ssfl #) ->
+       case <# (minusAddr# end_ssfk cur_ssfj) 20# of {
+         __DEFAULT ->
+           case x_irQf of { I# i_arQn ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_int_dec :: Int64#
+                                                                                        -> Addr#
+                                                                                        -> State#
+                                                                                             RealWorld
+                                                                                        -> (# State#
+                                                                                                RealWorld,
+                                                                                              Addr# #)}_arQS
+                  (intToInt64# i_arQn) cur_ssfj s_ssfl
+           of
+           { (# ds6_arQW, ds7_arQX #) ->
+           (# ds7_arQX, end_ssfk, ds6_arQW #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 20# eta_irQg wild1_ssfi of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_irQf of { I# i_arQn ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_int_dec :: Int64#
+                                                                                        -> Addr#
+                                                                                        -> State#
+                                                                                             RealWorld
+                                                                                        -> (# State#
+                                                                                                RealWorld,
+                                                                                              Addr# #)}_arQS
+                  (intToInt64# i_arQn) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arQW, ds7_arQX #) ->
+           (# ds7_arQX, ipv1_isbj, ds6_arQW #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int8Dec
+  = (\ x_X1M eta_X1N eta1_X1O ->
+       case eta1_X1O of wild1_ssfn { (# cur_ssfo, end_ssfp, s_ssfq #) ->
+       case <# (minusAddr# end_ssfp cur_ssfo) 4# of {
+         __DEFAULT ->
+           case x_X1M of { I8# x#_arR4 ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_int_dec :: Int32#
+                                                                              -> Addr#
+                                                                              -> State# RealWorld
+                                                                              -> (# State#
+                                                                                      RealWorld,
+                                                                                    Addr# #)}_arRh
+                  (intToInt32# (int8ToInt# x#_arR4)) cur_ssfo s_ssfq
+           of
+           { (# ds6_arRl, ds7_arRm #) ->
+           (# ds7_arRm, end_ssfp, ds6_arRl #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta_X1N wild1_ssfn of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X1M of { I8# x#_arR4 ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_int_dec :: Int32#
+                                                                              -> Addr#
+                                                                              -> State# RealWorld
+                                                                              -> (# State#
+                                                                                      RealWorld,
+                                                                                    Addr# #)}_arRh
+                  (intToInt32# (int8ToInt# x#_arR4)) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arRl, ds7_arRm #) ->
+           (# ds7_arRm, ipv1_isbj, ds6_arRl #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int16Dec
+  = (\ x_X1Q eta_X1R eta1_X1S ->
+       case eta1_X1S of wild1_ssfs { (# cur_ssft, end_ssfu, s_ssfv #) ->
+       case <# (minusAddr# end_ssfu cur_ssft) 6# of {
+         __DEFAULT ->
+           case x_X1Q of { I16# x#_arRs ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_int_dec :: Int32#
+                                                                              -> Addr#
+                                                                              -> State# RealWorld
+                                                                              -> (# State#
+                                                                                      RealWorld,
+                                                                                    Addr# #)}_arRh
+                  (intToInt32# (int16ToInt# x#_arRs)) cur_ssft s_ssfv
+           of
+           { (# ds6_arRl, ds7_arRm #) ->
+           (# ds7_arRm, end_ssfu, ds6_arRl #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 6# eta_X1R wild1_ssfs of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X1Q of { I16# x#_arRs ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_int_dec :: Int32#
+                                                                              -> Addr#
+                                                                              -> State# RealWorld
+                                                                              -> (# State#
+                                                                                      RealWorld,
+                                                                                    Addr# #)}_arRh
+                  (intToInt32# (int16ToInt# x#_arRs)) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arRl, ds7_arRm #) ->
+           (# ds7_arRm, ipv1_isbj, ds6_arRl #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int32Dec
+  = (\ x_X1U eta_X1V eta1_X1W ->
+       case eta1_X1W of wild1_ssfx { (# cur_ssfy, end_ssfz, s_ssfA #) ->
+       case <# (minusAddr# end_ssfz cur_ssfy) 11# of {
+         __DEFAULT ->
+           case x_X1U of { I32# ds3_arRe ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_int_dec :: Int32#
+                                                                              -> Addr#
+                                                                              -> State# RealWorld
+                                                                              -> (# State#
+                                                                                      RealWorld,
+                                                                                    Addr# #)}_arRh
+                  ds3_arRe cur_ssfy s_ssfA
+           of
+           { (# ds6_arRl, ds7_arRm #) ->
+           (# ds7_arRm, end_ssfz, ds6_arRl #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 11# eta_X1V wild1_ssfx of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X1U of { I32# ds3_arRe ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_int_dec :: Int32#
+                                                                              -> Addr#
+                                                                              -> State# RealWorld
+                                                                              -> (# State#
+                                                                                      RealWorld,
+                                                                                    Addr# #)}_arRh
+                  ds3_arRe ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arRl, ds7_arRm #) ->
+           (# ds7_arRm, ipv1_isbj, ds6_arRl #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int64Dec
+  = (\ x_X1Y eta_X1Z eta1_X20 ->
+       case eta1_X20 of wild1_ssfC { (# cur_ssfD, end_ssfE, s_ssfF #) ->
+       case <# (minusAddr# end_ssfE cur_ssfD) 20# of {
+         __DEFAULT ->
+           case x_X1Y of { I64# ds3_arQP ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_int_dec :: Int64#
+                                                                                        -> Addr#
+                                                                                        -> State#
+                                                                                             RealWorld
+                                                                                        -> (# State#
+                                                                                                RealWorld,
+                                                                                              Addr# #)}_arQS
+                  ds3_arQP cur_ssfD s_ssfF
+           of
+           { (# ds6_arQW, ds7_arQX #) ->
+           (# ds7_arQX, end_ssfE, ds6_arQW #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 20# eta_X1Z wild1_ssfC of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X1Y of { I64# ds3_arQP ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_int_dec :: Int64#
+                                                                                        -> Addr#
+                                                                                        -> State#
+                                                                                             RealWorld
+                                                                                        -> (# State#
+                                                                                                RealWorld,
+                                                                                              Addr# #)}_arQS
+                  ds3_arQP ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arQW, ds7_arQX #) ->
+           (# ds7_arQX, ipv1_isbj, ds6_arQW #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+wordDec
+  = (\ x_X22 eta_X23 eta1_X24 ->
+       case eta1_X24 of wild1_ssfH { (# cur_ssfI, end_ssfJ, s_ssfK #) ->
+       case <# (minusAddr# end_ssfJ cur_ssfI) 20# of {
+         __DEFAULT ->
+           case x_X22 of { W# x#_arRF ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_uint_dec :: Word64#
+                                                                                         -> Addr#
+                                                                                         -> State#
+                                                                                              RealWorld
+                                                                                         -> (# State#
+                                                                                                 RealWorld,
+                                                                                               Addr# #)}_arRQ
+                  (wordToWord64# x#_arRF) cur_ssfI s_ssfK
+           of
+           { (# ds6_arRU, ds7_arRV #) ->
+           (# ds7_arRV, end_ssfJ, ds6_arRU #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 20# eta_X23 wild1_ssfH of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X22 of { W# x#_arRF ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_uint_dec :: Word64#
+                                                                                         -> Addr#
+                                                                                         -> State#
+                                                                                              RealWorld
+                                                                                         -> (# State#
+                                                                                                 RealWorld,
+                                                                                               Addr# #)}_arRQ
+                  (wordToWord64# x#_arRF) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arRU, ds7_arRV #) ->
+           (# ds7_arRV, ipv1_isbj, ds6_arRU #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word8Dec
+  = (\ x_X26 eta_X27 eta1_X28 ->
+       case eta1_X28 of wild1_ssfM { (# cur_ssfN, end_ssfO, s_ssfP #) ->
+       case <# (minusAddr# end_ssfO cur_ssfN) 3# of {
+         __DEFAULT ->
+           case x_X26 of { W8# x#_arS2 ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_dec :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arSd
+                  (wordToWord32# (word8ToWord# x#_arS2)) cur_ssfN s_ssfP
+           of
+           { (# ds6_arSh, ds7_arSi #) ->
+           (# ds7_arSi, end_ssfO, ds6_arSh #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 3# eta_X27 wild1_ssfM of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X26 of { W8# x#_arS2 ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_dec :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arSd
+                  (wordToWord32# (word8ToWord# x#_arS2)) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arSh, ds7_arSi #) ->
+           (# ds7_arSi, ipv1_isbj, ds6_arSh #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word16Dec
+  = (\ x_X2a eta_X2b eta1_X2c ->
+       case eta1_X2c of wild1_ssfR { (# cur_ssfS, end_ssfT, s_ssfU #) ->
+       case <# (minusAddr# end_ssfT cur_ssfS) 5# of {
+         __DEFAULT ->
+           case x_X2a of { W16# x#_arSo ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_dec :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arSd
+                  (wordToWord32# (word16ToWord# x#_arSo)) cur_ssfS s_ssfU
+           of
+           { (# ds6_arSh, ds7_arSi #) ->
+           (# ds7_arSi, end_ssfT, ds6_arSh #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 5# eta_X2b wild1_ssfR of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X2a of { W16# x#_arSo ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_dec :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arSd
+                  (wordToWord32# (word16ToWord# x#_arSo)) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arSh, ds7_arSi #) ->
+           (# ds7_arSi, ipv1_isbj, ds6_arSh #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word32Dec
+  = (\ x_X2e eta_X2f eta1_X2g ->
+       case eta1_X2g of wild1_ssfW { (# cur_ssfX, end_ssfY, s_ssfZ #) ->
+       case <# (minusAddr# end_ssfY cur_ssfX) 10# of {
+         __DEFAULT ->
+           case x_X2e of { W32# ds3_arSa ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_dec :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arSd
+                  ds3_arSa cur_ssfX s_ssfZ
+           of
+           { (# ds6_arSh, ds7_arSi #) ->
+           (# ds7_arSi, end_ssfY, ds6_arSh #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 10# eta_X2f wild1_ssfW of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X2e of { W32# ds3_arSa ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_dec :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arSd
+                  ds3_arSa ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arSh, ds7_arSi #) ->
+           (# ds7_arSi, ipv1_isbj, ds6_arSh #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word64Dec
+  = (\ x_X2i eta_X2j eta1_X2k ->
+       case eta1_X2k of wild1_ssg1 { (# cur_ssg2, end_ssg3, s_ssg4 #) ->
+       case <# (minusAddr# end_ssg3 cur_ssg2) 20# of {
+         __DEFAULT ->
+           case x_X2i of { W64# ds3_arRN ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_uint_dec :: Word64#
+                                                                                         -> Addr#
+                                                                                         -> State#
+                                                                                              RealWorld
+                                                                                         -> (# State#
+                                                                                                 RealWorld,
+                                                                                               Addr# #)}_arRQ
+                  ds3_arRN cur_ssg2 s_ssg4
+           of
+           { (# ds6_arRU, ds7_arRV #) ->
+           (# ds7_arRV, end_ssg3, ds6_arRU #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 20# eta_X2j wild1_ssg1 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X2i of { W64# ds3_arRN ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_uint_dec :: Word64#
+                                                                                         -> Addr#
+                                                                                         -> State#
+                                                                                              RealWorld
+                                                                                         -> (# State#
+                                                                                                 RealWorld,
+                                                                                               Addr# #)}_arRQ
+                  ds3_arRN ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arRU, ds7_arRV #) ->
+           (# ds7_arRV, ipv1_isbj, ds6_arRU #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+wordHex
+  = (\ x_X2m eta_X2n eta1_X2o ->
+       case eta1_X2o of wild1_ssg6 { (# cur_ssg7, end_ssg8, s_ssg9 #) ->
+       case <# (minusAddr# end_ssg8 cur_ssg7) 16# of {
+         __DEFAULT ->
+           case x_X2m of { W# x#_arSA ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_uint_hex :: Word64#
+                                                                                         -> Addr#
+                                                                                         -> State#
+                                                                                              RealWorld
+                                                                                         -> (# State#
+                                                                                                 RealWorld,
+                                                                                               Addr# #)}_arSL
+                  (wordToWord64# x#_arSA) cur_ssg7 s_ssg9
+           of
+           { (# ds6_arSP, ds7_arSQ #) ->
+           (# ds7_arSQ, end_ssg8, ds6_arSP #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 16# eta_X2n wild1_ssg6 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X2m of { W# x#_arSA ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_uint_hex :: Word64#
+                                                                                         -> Addr#
+                                                                                         -> State#
+                                                                                              RealWorld
+                                                                                         -> (# State#
+                                                                                                 RealWorld,
+                                                                                               Addr# #)}_arSL
+                  (wordToWord64# x#_arSA) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arSP, ds7_arSQ #) ->
+           (# ds7_arSQ, ipv1_isbj, ds6_arSP #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word8Hex
+  = (\ x_X2q eta_X2r eta1_X2s ->
+       case eta1_X2s of wild1_ssgb { (# cur_ssgc, end_ssgd, s_ssge #) ->
+       case <# (minusAddr# end_ssgd cur_ssgc) 2# of {
+         __DEFAULT ->
+           case x_X2q of { W8# x#_arSW ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_hex :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arT7
+                  (wordToWord32# (word8ToWord# x#_arSW)) cur_ssgc s_ssge
+           of
+           { (# ds6_arTb, ds7_arTc #) ->
+           (# ds7_arTc, end_ssgd, ds6_arTb #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta_X2r wild1_ssgb of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X2q of { W8# x#_arSW ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_hex :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arT7
+                  (wordToWord32# (word8ToWord# x#_arSW)) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arTb, ds7_arTc #) ->
+           (# ds7_arTc, ipv1_isbj, ds6_arTb #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word16Hex
+  = (\ x_X2u eta_X2v eta1_X2w ->
+       case eta1_X2w of wild1_ssgg { (# cur_ssgh, end_ssgi, s_ssgj #) ->
+       case <# (minusAddr# end_ssgi cur_ssgh) 4# of {
+         __DEFAULT ->
+           case x_X2u of { W16# x#_arTi ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_hex :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arT7
+                  (wordToWord32# (word16ToWord# x#_arTi)) cur_ssgh s_ssgj
+           of
+           { (# ds6_arTb, ds7_arTc #) ->
+           (# ds7_arTc, end_ssgi, ds6_arTb #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta_X2v wild1_ssgg of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X2u of { W16# x#_arTi ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_hex :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arT7
+                  (wordToWord32# (word16ToWord# x#_arTi)) ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arTb, ds7_arTc #) ->
+           (# ds7_arTc, ipv1_isbj, ds6_arTb #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word32Hex
+  = (\ x_X2y eta_X2z eta1_X2A ->
+       case eta1_X2A of wild1_ssgl { (# cur_ssgm, end_ssgn, s_ssgo #) ->
+       case <# (minusAddr# end_ssgn cur_ssgm) 8# of {
+         __DEFAULT ->
+           case x_X2y of { W32# ds3_arT4 ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_hex :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arT7
+                  ds3_arT4 cur_ssgm s_ssgo
+           of
+           { (# ds6_arTb, ds7_arTc #) ->
+           (# ds7_arTc, end_ssgn, ds6_arTb #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta_X2z wild1_ssgl of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X2y of { W32# ds3_arT4 ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_uint_hex :: Word32#
+                                                                               -> Addr#
+                                                                               -> State# RealWorld
+                                                                               -> (# State#
+                                                                                       RealWorld,
+                                                                                     Addr# #)}_arT7
+                  ds3_arT4 ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arTb, ds7_arTc #) ->
+           (# ds7_arTc, ipv1_isbj, ds6_arTb #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word64Hex
+  = (\ x_X2C eta_X2D eta1_X2E ->
+       case eta1_X2E of wild1_ssgq { (# cur_ssgr, end_ssgs, s_ssgt #) ->
+       case <# (minusAddr# end_ssgs cur_ssgr) 16# of {
+         __DEFAULT ->
+           case x_X2C of { W64# ds3_arSI ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_uint_hex :: Word64#
+                                                                                         -> Addr#
+                                                                                         -> State#
+                                                                                              RealWorld
+                                                                                         -> (# State#
+                                                                                                 RealWorld,
+                                                                                               Addr# #)}_arSL
+                  ds3_arSI cur_ssgr s_ssgt
+           of
+           { (# ds6_arSP, ds7_arSQ #) ->
+           (# ds7_arSQ, end_ssgs, ds6_arSP #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 16# eta_X2D wild1_ssgq of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case x_X2C of { W64# ds3_arSI ->
+           case {__ffi_static_ccall_unsafe bytestring-0.12.2.0-cbf9:_hs_bytestring_long_long_uint_hex :: Word64#
+                                                                                         -> Addr#
+                                                                                         -> State#
+                                                                                              RealWorld
+                                                                                         -> (# State#
+                                                                                                 RealWorld,
+                                                                                               Addr# #)}_arSL
+                  ds3_arSI ipv_isbi ipv2_isbk
+           of
+           { (# ds6_arSP, ds7_arSQ #) ->
+           (# ds7_arSQ, ipv1_isbj, ds6_arSP #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int8HexFixed
+  = (\ eta_X2G eta1_X2H eta2_X2I ->
+       case eta2_X2I of wild1_ssgv { (# cur_ssgw, end_ssgx, s_ssgy #) ->
+       case <# (minusAddr# end_ssgx cur_ssgw) 2# of {
+         __DEFAULT ->
+           case eta_X2G of { I8# x#_arTw ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (word8ToWord# (int8ToWord8# x#_arTw)))
+                  s_ssgy
+           of
+           { (# ipv_arTz, ipv1_arTA #) ->
+           case writeWord8OffAddrAsWord16# cur_ssgw 0# ipv1_arTA ipv_arTz
+           of wild2_X2J
+           { __DEFAULT ->
+           (# plusAddr# cur_ssgw 2#, end_ssgx, wild2_X2J #)
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta1_X2H wild1_ssgv of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X2G of { I8# x#_arTw ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (word8ToWord# (int8ToWord8# x#_arTw)))
+                  ipv2_isbk
+           of
+           { (# ipv4_arTz, ipv5_arTA #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arTA ipv4_arTz
+           of wild2_X2J
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 2#, ipv1_isbj, wild2_X2J #)
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int16HexFixed
+  = (\ eta_X2K eta1_X2L eta2_X2M ->
+       case eta2_X2M of wild1_ssgA { (# cur_ssgB, end_ssgC, s_ssgD #) ->
+       case <# (minusAddr# end_ssgC cur_ssgB) 4# of {
+         __DEFAULT ->
+           case eta_X2K of { I16# x#_arTM ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and#
+                        (uncheckedShiftRL# (word16ToWord# (int16ToWord16# x#_arTM)) 8#)
+                        255##))
+                  s_ssgD
+           of
+           { (# ipv_arTY, ipv1_arTZ #) ->
+           case writeWord8OffAddrAsWord16# cur_ssgB 0# ipv1_arTZ ipv_arTY
+           of wild2_arU4
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# (int16ToWord16# x#_arTM)) 255##))
+                  wild2_arU4
+           of
+           { (# ipv2_arU9, ipv3_arUa #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# cur_ssgB 2#) 0# ipv3_arUa ipv2_arU9
+           of wild3_X2N
+           { __DEFAULT ->
+           (# plusAddr# cur_ssgB 4#, end_ssgC, wild3_X2N #)
+           }
+           }
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_X2L wild1_ssgA of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X2K of { I16# x#_arTM ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and#
+                        (uncheckedShiftRL# (word16ToWord# (int16ToWord16# x#_arTM)) 8#)
+                        255##))
+                  ipv2_isbk
+           of
+           { (# ipv4_arTY, ipv5_arTZ #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arTZ ipv4_arTY
+           of wild2_arU4
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# (int16ToWord16# x#_arTM)) 255##))
+                  wild2_arU4
+           of
+           { (# ipv6_arU9, ipv3_arUa #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# ipv_isbi 2#) 0# ipv3_arUa ipv6_arU9
+           of wild3_X2N
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild3_X2N #)
+           }
+           }
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int32HexFixed
+  = (\ eta_X2O eta1_X2P eta2_X2Q ->
+       case eta2_X2Q of wild1_ssgF { (# cur_ssgG, end_ssgH, s_ssgI #) ->
+       case <# (minusAddr# end_ssgH cur_ssgG) 8# of {
+         __DEFAULT ->
+           case eta_X2O of { I32# x#_arUj ->
+           let {
+             x#1_ss3D
+               = wordToWord16#
+                   (uncheckedShiftRL#
+                      (word32ToWord# (int32ToWord32# x#_arUj)) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#1_ss3D) 8#) 255##))
+                  s_ssgI
+           of
+           { (# ipv_arUv, ipv1_arUw #) ->
+           case writeWord8OffAddrAsWord16# cur_ssgG 0# ipv1_arUw ipv_arUv
+           of wild2_arUB
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#1_ss3D) 255##))
+                  wild2_arUB
+           of
+           { (# ipv2_arUD, ipv3_arUE #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# cur_ssgG 2#) 0# ipv3_arUE ipv2_arUD
+           of wild3_arUG
+           { __DEFAULT ->
+           let {
+             x#2_ss3F
+               = wordToWord16# (word32ToWord# (int32ToWord32# x#_arUj)) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss3F) 8#) 255##))
+                  wild3_arUG
+           of
+           { (# ipv4_arUM, ipv5_arUN #) ->
+           let { p#1_ss3H = plusAddr# cur_ssgG 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss3H 0# ipv5_arUN ipv4_arUM
+           of wild5_arUP
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss3F) 255##))
+                  wild5_arUP
+           of
+           { (# ipv6_arUR, ipv7_arUS #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss3H 2#) 0# ipv7_arUS ipv6_arUR
+           of wild4_X2R
+           { __DEFAULT ->
+           (# plusAddr# cur_ssgG 8#, end_ssgH, wild4_X2R #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X2P wild1_ssgF of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X2O of { I32# x#_arUj ->
+           let {
+             x#1_ss3D
+               = wordToWord16#
+                   (uncheckedShiftRL#
+                      (word32ToWord# (int32ToWord32# x#_arUj)) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#1_ss3D) 8#) 255##))
+                  ipv2_isbk
+           of
+           { (# ipv4_arUv, ipv5_arUw #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arUw ipv4_arUv
+           of wild2_arUB
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#1_ss3D) 255##))
+                  wild2_arUB
+           of
+           { (# ipv6_arUD, ipv3_arUE #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# ipv_isbi 2#) 0# ipv3_arUE ipv6_arUD
+           of wild3_arUG
+           { __DEFAULT ->
+           let {
+             x#2_ss3F
+               = wordToWord16# (word32ToWord# (int32ToWord32# x#_arUj)) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss3F) 8#) 255##))
+                  wild3_arUG
+           of
+           { (# ipv7_arUM, ipv8_arUN #) ->
+           let { p#1_ss3H = plusAddr# ipv_isbi 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss3H 0# ipv8_arUN ipv7_arUM
+           of wild5_arUP
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss3F) 255##))
+                  wild5_arUP
+           of
+           { (# ipv9_arUR, ipv10_arUS #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss3H 2#) 0# ipv10_arUS ipv9_arUR
+           of wild4_X2R
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild4_X2R #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+int64HexFixed
+  = (\ eta_X2S eta1_X2T eta2_X2U ->
+       case eta2_X2U of wild1_ssgK { (# cur_ssgL, end_ssgM, s_ssgN #) ->
+       case <# (minusAddr# end_ssgM cur_ssgL) 16# of {
+         __DEFAULT ->
+           case eta_X2S of { I64# x1_arV1 ->
+           let {
+             x#_ss3J
+               = wordToWord32#
+                   (word64ToWord#
+                      (uncheckedShiftRL64# (int64ToWord64# x1_arV1) 32#)) } in
+           let {
+             x#1_ss3L
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#_ss3J) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#1_ss3L) 8#) 255##))
+                  s_ssgN
+           of
+           { (# ipv_arVe, ipv1_arVf #) ->
+           case writeWord8OffAddrAsWord16# cur_ssgL 0# ipv1_arVf ipv_arVe
+           of wild2_arVk
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#1_ss3L) 255##))
+                  wild2_arVk
+           of
+           { (# ipv2_arVm, ipv3_arVn #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# cur_ssgL 2#) 0# ipv3_arVn ipv2_arVm
+           of wild3_arVp
+           { __DEFAULT ->
+           let { x#2_ss3N = wordToWord16# (word32ToWord# x#_ss3J) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss3N) 8#) 255##))
+                  wild3_arVp
+           of
+           { (# ipv4_arVt, ipv5_arVu #) ->
+           let { p#1_ss3P = plusAddr# cur_ssgL 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss3P 0# ipv5_arVu ipv4_arVt
+           of wild4_arVw
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss3N) 255##))
+                  wild4_arVw
+           of
+           { (# ipv6_arVy, ipv7_arVz #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss3P 2#) 0# ipv7_arVz ipv6_arVy
+           of wild5_arVB
+           { __DEFAULT ->
+           let {
+             x#3_ss3R
+               = wordToWord32# (word64ToWord# (int64ToWord64# x1_arV1)) } in
+           let {
+             x#4_ss3T
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#3_ss3R) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#4_ss3T) 8#) 255##))
+                  wild5_arVB
+           of
+           { (# ipv8_arVI, ipv9_arVJ #) ->
+           let { p#2_ss3V = plusAddr# cur_ssgL 8# } in
+           case writeWord8OffAddrAsWord16# p#2_ss3V 0# ipv9_arVJ ipv8_arVI
+           of wild7_arVL
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#4_ss3T) 255##))
+                  wild7_arVL
+           of
+           { (# ipv10_arVN, ipv11_arVO #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#2_ss3V 2#) 0# ipv11_arVO ipv10_arVN
+           of wild8_arVQ
+           { __DEFAULT ->
+           let { x#5_ss3X = wordToWord16# (word32ToWord# x#3_ss3R) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#5_ss3X) 8#) 255##))
+                  wild8_arVQ
+           of
+           { (# ipv12_arVU, ipv13_arVV #) ->
+           let { p#3_ss3Z = plusAddr# p#2_ss3V 4# } in
+           case writeWord8OffAddrAsWord16# p#3_ss3Z 0# ipv13_arVV ipv12_arVU
+           of wild9_arVX
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#5_ss3X) 255##))
+                  wild9_arVX
+           of
+           { (# ipv14_arVZ, ipv15_arW0 #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#3_ss3Z 2#) 0# ipv15_arW0 ipv14_arVZ
+           of wild11_X2V
+           { __DEFAULT ->
+           (# plusAddr# cur_ssgL 16#, end_ssgM, wild11_X2V #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 16# eta1_X2T wild1_ssgK of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X2S of { I64# x1_arV1 ->
+           let {
+             x#_ss3J
+               = wordToWord32#
+                   (word64ToWord#
+                      (uncheckedShiftRL64# (int64ToWord64# x1_arV1) 32#)) } in
+           let {
+             x#1_ss3L
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#_ss3J) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#1_ss3L) 8#) 255##))
+                  ipv2_isbk
+           of
+           { (# ipv4_arVe, ipv5_arVf #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arVf ipv4_arVe
+           of wild2_arVk
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#1_ss3L) 255##))
+                  wild2_arVk
+           of
+           { (# ipv6_arVm, ipv3_arVn #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# ipv_isbi 2#) 0# ipv3_arVn ipv6_arVm
+           of wild3_arVp
+           { __DEFAULT ->
+           let { x#2_ss3N = wordToWord16# (word32ToWord# x#_ss3J) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss3N) 8#) 255##))
+                  wild3_arVp
+           of
+           { (# ipv7_arVt, ipv8_arVu #) ->
+           let { p#1_ss3P = plusAddr# ipv_isbi 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss3P 0# ipv8_arVu ipv7_arVt
+           of wild4_arVw
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss3N) 255##))
+                  wild4_arVw
+           of
+           { (# ipv9_arVy, ipv10_arVz #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss3P 2#) 0# ipv10_arVz ipv9_arVy
+           of wild5_arVB
+           { __DEFAULT ->
+           let {
+             x#3_ss3R
+               = wordToWord32# (word64ToWord# (int64ToWord64# x1_arV1)) } in
+           let {
+             x#4_ss3T
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#3_ss3R) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#4_ss3T) 8#) 255##))
+                  wild5_arVB
+           of
+           { (# ipv11_arVI, ipv12_arVJ #) ->
+           let { p#2_ss3V = plusAddr# ipv_isbi 8# } in
+           case writeWord8OffAddrAsWord16# p#2_ss3V 0# ipv12_arVJ ipv11_arVI
+           of wild7_arVL
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#4_ss3T) 255##))
+                  wild7_arVL
+           of
+           { (# ipv13_arVN, ipv14_arVO #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#2_ss3V 2#) 0# ipv14_arVO ipv13_arVN
+           of wild8_arVQ
+           { __DEFAULT ->
+           let { x#5_ss3X = wordToWord16# (word32ToWord# x#3_ss3R) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#5_ss3X) 8#) 255##))
+                  wild8_arVQ
+           of
+           { (# ipv15_arVU, ipv16_arVV #) ->
+           let { p#3_ss3Z = plusAddr# p#2_ss3V 4# } in
+           case writeWord8OffAddrAsWord16# p#3_ss3Z 0# ipv16_arVV ipv15_arVU
+           of wild9_arVX
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#5_ss3X) 255##))
+                  wild9_arVX
+           of
+           { (# ipv17_arVZ, ipv18_arW0 #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#3_ss3Z 2#) 0# ipv18_arW0 ipv17_arVZ
+           of wild11_X2V
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 16#, ipv1_isbj, wild11_X2V #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word8HexFixed
+  = (\ eta_X2W eta1_X2X eta2_X2Y ->
+       case eta2_X2Y of wild1_ssgP { (# cur_ssgQ, end_ssgR, s_ssgS #) ->
+       case <# (minusAddr# end_ssgR cur_ssgQ) 2# of {
+         __DEFAULT ->
+           case eta_X2W of { W8# x#_arWa ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (word8ToWord# x#_arWa))
+                  s_ssgS
+           of
+           { (# ipv_arWd, ipv1_arWe #) ->
+           case writeWord8OffAddrAsWord16# cur_ssgQ 0# ipv1_arWe ipv_arWd
+           of wild_X2Z
+           { __DEFAULT ->
+           (# plusAddr# cur_ssgQ 2#, end_ssgR, wild_X2Z #)
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 2# eta1_X2X wild1_ssgP of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X2W of { W8# x#_arWa ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (word8ToWord# x#_arWa))
+                  ipv2_isbk
+           of
+           { (# ipv4_arWd, ipv5_arWe #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arWe ipv4_arWd
+           of wild_X2Z
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 2#, ipv1_isbj, wild_X2Z #)
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word16HexFixed
+  = (\ eta_X30 eta1_X31 eta2_X32 ->
+       case eta2_X32 of wild1_ssgU { (# cur_ssgV, end_ssgW, s_ssgX #) ->
+       case <# (minusAddr# end_ssgW cur_ssgV) 4# of {
+         __DEFAULT ->
+           case eta_X30 of { W16# x#_arWq ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#_arWq) 8#) 255##))
+                  s_ssgX
+           of
+           { (# ipv_arWC, ipv1_arWD #) ->
+           case writeWord8OffAddrAsWord16# cur_ssgV 0# ipv1_arWD ipv_arWC
+           of wild2_arWI
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#_arWq) 255##))
+                  wild2_arWI
+           of
+           { (# ipv2_arWN, ipv3_arWO #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# cur_ssgV 2#) 0# ipv3_arWO ipv2_arWN
+           of wild3_X33
+           { __DEFAULT ->
+           (# plusAddr# cur_ssgV 4#, end_ssgW, wild3_X33 #)
+           }
+           }
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 4# eta1_X31 wild1_ssgU of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X30 of { W16# x#_arWq ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#_arWq) 8#) 255##))
+                  ipv2_isbk
+           of
+           { (# ipv4_arWC, ipv5_arWD #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arWD ipv4_arWC
+           of wild2_arWI
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#_arWq) 255##))
+                  wild2_arWI
+           of
+           { (# ipv6_arWN, ipv3_arWO #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# ipv_isbi 2#) 0# ipv3_arWO ipv6_arWN
+           of wild3_X33
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 4#, ipv1_isbj, wild3_X33 #)
+           }
+           }
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word32HexFixed
+  = (\ eta_X34 eta1_X35 eta2_X36 ->
+       case eta2_X36 of wild1_ssgZ { (# cur_ssh0, end_ssh1, s_ssh2 #) ->
+       case <# (minusAddr# end_ssh1 cur_ssh0) 8# of {
+         __DEFAULT ->
+           case eta_X34 of { W32# x#_arWX ->
+           let {
+             x#1_ss41
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#_arWX) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#1_ss41) 8#) 255##))
+                  s_ssh2
+           of
+           { (# ipv_arX9, ipv1_arXa #) ->
+           case writeWord8OffAddrAsWord16# cur_ssh0 0# ipv1_arXa ipv_arX9
+           of wild2_arXf
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#1_ss41) 255##))
+                  wild2_arXf
+           of
+           { (# ipv2_arXh, ipv3_arXi #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# cur_ssh0 2#) 0# ipv3_arXi ipv2_arXh
+           of wild3_arXk
+           { __DEFAULT ->
+           let { x#2_ss43 = wordToWord16# (word32ToWord# x#_arWX) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss43) 8#) 255##))
+                  wild3_arXk
+           of
+           { (# ipv4_arXq, ipv5_arXr #) ->
+           let { p#1_ss45 = plusAddr# cur_ssh0 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss45 0# ipv5_arXr ipv4_arXq
+           of wild5_arXt
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss43) 255##))
+                  wild5_arXt
+           of
+           { (# ipv6_arXv, ipv7_arXw #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss45 2#) 0# ipv7_arXw ipv6_arXv
+           of wild4_X37
+           { __DEFAULT ->
+           (# plusAddr# cur_ssh0 8#, end_ssh1, wild4_X37 #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X35 wild1_ssgZ of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X34 of { W32# x#_arWX ->
+           let {
+             x#1_ss41
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#_arWX) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#1_ss41) 8#) 255##))
+                  ipv2_isbk
+           of
+           { (# ipv4_arX9, ipv5_arXa #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arXa ipv4_arX9
+           of wild2_arXf
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#1_ss41) 255##))
+                  wild2_arXf
+           of
+           { (# ipv6_arXh, ipv3_arXi #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# ipv_isbi 2#) 0# ipv3_arXi ipv6_arXh
+           of wild3_arXk
+           { __DEFAULT ->
+           let { x#2_ss43 = wordToWord16# (word32ToWord# x#_arWX) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss43) 8#) 255##))
+                  wild3_arXk
+           of
+           { (# ipv7_arXq, ipv8_arXr #) ->
+           let { p#1_ss45 = plusAddr# ipv_isbi 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss45 0# ipv8_arXr ipv7_arXq
+           of wild5_arXt
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss43) 255##))
+                  wild5_arXt
+           of
+           { (# ipv9_arXv, ipv10_arXw #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss45 2#) 0# ipv10_arXw ipv9_arXv
+           of wild4_X37
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild4_X37 #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+word64HexFixed
+  = (\ eta_X38 eta1_X39 eta2_X3a ->
+       case eta2_X3a of wild1_ssh4 { (# cur_ssh5, end_ssh6, s_ssh7 #) ->
+       case <# (minusAddr# end_ssh6 cur_ssh5) 16# of {
+         __DEFAULT ->
+           case eta_X38 of { W64# x#_arXF ->
+           let {
+             x#1_ss47
+               = wordToWord32#
+                   (word64ToWord# (uncheckedShiftRL64# x#_arXF 32#)) } in
+           let {
+             x#2_ss49
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#1_ss47) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss49) 8#) 255##))
+                  s_ssh7
+           of
+           { (# ipv_arXS, ipv1_arXT #) ->
+           case writeWord8OffAddrAsWord16# cur_ssh5 0# ipv1_arXT ipv_arXS
+           of wild2_arXY
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss49) 255##))
+                  wild2_arXY
+           of
+           { (# ipv2_arY0, ipv3_arY1 #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# cur_ssh5 2#) 0# ipv3_arY1 ipv2_arY0
+           of wild3_arY3
+           { __DEFAULT ->
+           let { x#3_ss4b = wordToWord16# (word32ToWord# x#1_ss47) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#3_ss4b) 8#) 255##))
+                  wild3_arY3
+           of
+           { (# ipv4_arY7, ipv5_arY8 #) ->
+           let { p#1_ss4d = plusAddr# cur_ssh5 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss4d 0# ipv5_arY8 ipv4_arY7
+           of wild4_arYa
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#3_ss4b) 255##))
+                  wild4_arYa
+           of
+           { (# ipv6_arYc, ipv7_arYd #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss4d 2#) 0# ipv7_arYd ipv6_arYc
+           of wild5_arYf
+           { __DEFAULT ->
+           let { x#4_ss4f = wordToWord32# (word64ToWord# x#_arXF) } in
+           let {
+             x#5_ss4h
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#4_ss4f) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#5_ss4h) 8#) 255##))
+                  wild5_arYf
+           of
+           { (# ipv8_arYm, ipv9_arYn #) ->
+           let { p#2_ss4j = plusAddr# cur_ssh5 8# } in
+           case writeWord8OffAddrAsWord16# p#2_ss4j 0# ipv9_arYn ipv8_arYm
+           of wild7_arYp
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#5_ss4h) 255##))
+                  wild7_arYp
+           of
+           { (# ipv10_arYr, ipv11_arYs #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#2_ss4j 2#) 0# ipv11_arYs ipv10_arYr
+           of wild8_arYu
+           { __DEFAULT ->
+           let { x#6_ss4l = wordToWord16# (word32ToWord# x#4_ss4f) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#6_ss4l) 8#) 255##))
+                  wild8_arYu
+           of
+           { (# ipv12_arYy, ipv13_arYz #) ->
+           let { p#3_ss4n = plusAddr# p#2_ss4j 4# } in
+           case writeWord8OffAddrAsWord16# p#3_ss4n 0# ipv13_arYz ipv12_arYy
+           of wild9_arYB
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#6_ss4l) 255##))
+                  wild9_arYB
+           of
+           { (# ipv14_arYD, ipv15_arYE #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#3_ss4n 2#) 0# ipv15_arYE ipv14_arYD
+           of wild11_X3b
+           { __DEFAULT ->
+           (# plusAddr# cur_ssh5 16#, end_ssh6, wild11_X3b #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 16# eta1_X39 wild1_ssh4 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X38 of { W64# x#_arXF ->
+           let {
+             x#1_ss47
+               = wordToWord32#
+                   (word64ToWord# (uncheckedShiftRL64# x#_arXF 32#)) } in
+           let {
+             x#2_ss49
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#1_ss47) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss49) 8#) 255##))
+                  ipv2_isbk
+           of
+           { (# ipv4_arXS, ipv5_arXT #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arXT ipv4_arXS
+           of wild2_arXY
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss49) 255##))
+                  wild2_arXY
+           of
+           { (# ipv6_arY0, ipv3_arY1 #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# ipv_isbi 2#) 0# ipv3_arY1 ipv6_arY0
+           of wild3_arY3
+           { __DEFAULT ->
+           let { x#3_ss4b = wordToWord16# (word32ToWord# x#1_ss47) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#3_ss4b) 8#) 255##))
+                  wild3_arY3
+           of
+           { (# ipv7_arY7, ipv8_arY8 #) ->
+           let { p#1_ss4d = plusAddr# ipv_isbi 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss4d 0# ipv8_arY8 ipv7_arY7
+           of wild4_arYa
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#3_ss4b) 255##))
+                  wild4_arYa
+           of
+           { (# ipv9_arYc, ipv10_arYd #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss4d 2#) 0# ipv10_arYd ipv9_arYc
+           of wild5_arYf
+           { __DEFAULT ->
+           let { x#4_ss4f = wordToWord32# (word64ToWord# x#_arXF) } in
+           let {
+             x#5_ss4h
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#4_ss4f) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#5_ss4h) 8#) 255##))
+                  wild5_arYf
+           of
+           { (# ipv11_arYm, ipv12_arYn #) ->
+           let { p#2_ss4j = plusAddr# ipv_isbi 8# } in
+           case writeWord8OffAddrAsWord16# p#2_ss4j 0# ipv12_arYn ipv11_arYm
+           of wild7_arYp
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#5_ss4h) 255##))
+                  wild7_arYp
+           of
+           { (# ipv13_arYr, ipv14_arYs #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#2_ss4j 2#) 0# ipv14_arYs ipv13_arYr
+           of wild8_arYu
+           { __DEFAULT ->
+           let { x#6_ss4l = wordToWord16# (word32ToWord# x#4_ss4f) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#6_ss4l) 8#) 255##))
+                  wild8_arYu
+           of
+           { (# ipv15_arYy, ipv16_arYz #) ->
+           let { p#3_ss4n = plusAddr# p#2_ss4j 4# } in
+           case writeWord8OffAddrAsWord16# p#3_ss4n 0# ipv16_arYz ipv15_arYy
+           of wild9_arYB
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#6_ss4l) 255##))
+                  wild9_arYB
+           of
+           { (# ipv17_arYD, ipv18_arYE #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#3_ss4n 2#) 0# ipv18_arYE ipv17_arYD
+           of wild11_X3b
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 16#, ipv1_isbj, wild11_X3b #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+floatHexFixed
+  = (\ eta_X3c eta1_X3d eta2_X3e ->
+       case eta2_X3e of wild1_ssh9 { (# cur_ssha, end_sshb, s_sshc #) ->
+       case <# (minusAddr# end_sshb cur_ssha) 8# of {
+         __DEFAULT ->
+           case eta_X3c of { F# f#_arYN ->
+           let { x#_ss4p = castFloatToWord32# f#_arYN } in
+           let {
+             x#1_ss4r
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#_ss4p) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#1_ss4r) 8#) 255##))
+                  s_sshc
+           of
+           { (# ipv_arZ3, ipv1_arZ4 #) ->
+           case writeWord8OffAddrAsWord16# cur_ssha 0# ipv1_arZ4 ipv_arZ3
+           of wild2_arZ9
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#1_ss4r) 255##))
+                  wild2_arZ9
+           of
+           { (# ipv2_arZb, ipv3_arZc #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# cur_ssha 2#) 0# ipv3_arZc ipv2_arZb
+           of wild3_arZe
+           { __DEFAULT ->
+           let { x#2_ss4t = wordToWord16# (word32ToWord# x#_ss4p) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss4t) 8#) 255##))
+                  wild3_arZe
+           of
+           { (# ipv4_arZk, ipv5_arZl #) ->
+           let { p#1_ss4v = plusAddr# cur_ssha 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss4v 0# ipv5_arZl ipv4_arZk
+           of wild5_arZn
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss4t) 255##))
+                  wild5_arZn
+           of
+           { (# ipv6_arZp, ipv7_arZq #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss4v 2#) 0# ipv7_arZq ipv6_arZp
+           of wild4_X3f
+           { __DEFAULT ->
+           (# plusAddr# cur_ssha 8#, end_sshb, wild4_X3f #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 8# eta1_X3d wild1_ssh9 of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X3c of { F# f#_arYN ->
+           let { x#_ss4p = castFloatToWord32# f#_arYN } in
+           let {
+             x#1_ss4r
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#_ss4p) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#1_ss4r) 8#) 255##))
+                  ipv2_isbk
+           of
+           { (# ipv4_arZ3, ipv5_arZ4 #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arZ4 ipv4_arZ3
+           of wild2_arZ9
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#1_ss4r) 255##))
+                  wild2_arZ9
+           of
+           { (# ipv6_arZb, ipv3_arZc #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# ipv_isbi 2#) 0# ipv3_arZc ipv6_arZb
+           of wild3_arZe
+           { __DEFAULT ->
+           let { x#2_ss4t = wordToWord16# (word32ToWord# x#_ss4p) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss4t) 8#) 255##))
+                  wild3_arZe
+           of
+           { (# ipv7_arZk, ipv8_arZl #) ->
+           let { p#1_ss4v = plusAddr# ipv_isbi 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss4v 0# ipv8_arZl ipv7_arZk
+           of wild5_arZn
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss4t) 255##))
+                  wild5_arZn
+           of
+           { (# ipv9_arZp, ipv10_arZq #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss4v 2#) 0# ipv10_arZq ipv9_arZp
+           of wild4_X3f
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 8#, ipv1_isbj, wild4_X3f #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+doubleHexFixed
+  = (\ eta_X3g eta1_X3h eta2_X3i ->
+       case eta2_X3i of wild1_sshe { (# cur_sshf, end_sshg, s_sshh #) ->
+       case <# (minusAddr# end_sshg cur_sshf) 16# of {
+         __DEFAULT ->
+           case eta_X3g of { D# d#_arZz ->
+           let { x#_ss4x = castDoubleToWord64# d#_arZz } in
+           let {
+             x#1_ss4z
+               = wordToWord32#
+                   (word64ToWord# (uncheckedShiftRL64# x#_ss4x 32#)) } in
+           let {
+             x#2_ss4B
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#1_ss4z) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss4B) 8#) 255##))
+                  s_sshh
+           of
+           { (# ipv_arZQ, ipv1_arZR #) ->
+           case writeWord8OffAddrAsWord16# cur_sshf 0# ipv1_arZR ipv_arZQ
+           of wild2_arZW
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss4B) 255##))
+                  wild2_arZW
+           of
+           { (# ipv2_arZY, ipv3_arZZ #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# cur_sshf 2#) 0# ipv3_arZZ ipv2_arZY
+           of wild3_as01
+           { __DEFAULT ->
+           let { x#3_ss4D = wordToWord16# (word32ToWord# x#1_ss4z) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#3_ss4D) 8#) 255##))
+                  wild3_as01
+           of
+           { (# ipv4_as05, ipv5_as06 #) ->
+           let { p#1_ss4F = plusAddr# cur_sshf 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss4F 0# ipv5_as06 ipv4_as05
+           of wild4_as08
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#3_ss4D) 255##))
+                  wild4_as08
+           of
+           { (# ipv6_as0a, ipv7_as0b #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss4F 2#) 0# ipv7_as0b ipv6_as0a
+           of wild5_as0d
+           { __DEFAULT ->
+           let { x#4_ss4H = wordToWord32# (word64ToWord# x#_ss4x) } in
+           let {
+             x#5_ss4J
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#4_ss4H) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#5_ss4J) 8#) 255##))
+                  wild5_as0d
+           of
+           { (# ipv8_as0k, ipv9_as0l #) ->
+           let { p#2_ss4L = plusAddr# cur_sshf 8# } in
+           case writeWord8OffAddrAsWord16# p#2_ss4L 0# ipv9_as0l ipv8_as0k
+           of wild7_as0n
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#5_ss4J) 255##))
+                  wild7_as0n
+           of
+           { (# ipv10_as0p, ipv11_as0q #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#2_ss4L 2#) 0# ipv11_as0q ipv10_as0p
+           of wild8_as0s
+           { __DEFAULT ->
+           let { x#6_ss4N = wordToWord16# (word32ToWord# x#4_ss4H) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#6_ss4N) 8#) 255##))
+                  wild8_as0s
+           of
+           { (# ipv12_as0w, ipv13_as0x #) ->
+           let { p#3_ss4P = plusAddr# p#2_ss4L 4# } in
+           case writeWord8OffAddrAsWord16# p#3_ss4P 0# ipv13_as0x ipv12_as0w
+           of wild9_as0z
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#6_ss4N) 255##))
+                  wild9_as0z
+           of
+           { (# ipv14_as0B, ipv15_as0C #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#3_ss4P 2#) 0# ipv15_as0C ipv14_as0B
+           of wild11_X3j
+           { __DEFAULT ->
+           (# plusAddr# cur_sshf 16#, end_sshg, wild11_X3j #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 16# eta1_X3h wild1_sshe of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X3g of { D# d#_arZz ->
+           let { x#_ss4x = castDoubleToWord64# d#_arZz } in
+           let {
+             x#1_ss4z
+               = wordToWord32#
+                   (word64ToWord# (uncheckedShiftRL64# x#_ss4x 32#)) } in
+           let {
+             x#2_ss4B
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#1_ss4z) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#2_ss4B) 8#) 255##))
+                  ipv2_isbk
+           of
+           { (# ipv4_arZQ, ipv5_arZR #) ->
+           case writeWord8OffAddrAsWord16# ipv_isbi 0# ipv5_arZR ipv4_arZQ
+           of wild2_arZW
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#2_ss4B) 255##))
+                  wild2_arZW
+           of
+           { (# ipv6_arZY, ipv3_arZZ #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# ipv_isbi 2#) 0# ipv3_arZZ ipv6_arZY
+           of wild3_as01
+           { __DEFAULT ->
+           let { x#3_ss4D = wordToWord16# (word32ToWord# x#1_ss4z) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#3_ss4D) 8#) 255##))
+                  wild3_as01
+           of
+           { (# ipv7_as05, ipv8_as06 #) ->
+           let { p#1_ss4F = plusAddr# ipv_isbi 4# } in
+           case writeWord8OffAddrAsWord16# p#1_ss4F 0# ipv8_as06 ipv7_as05
+           of wild4_as08
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#3_ss4D) 255##))
+                  wild4_as08
+           of
+           { (# ipv9_as0a, ipv10_as0b #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#1_ss4F 2#) 0# ipv10_as0b ipv9_as0a
+           of wild5_as0d
+           { __DEFAULT ->
+           let { x#4_ss4H = wordToWord32# (word64ToWord# x#_ss4x) } in
+           let {
+             x#5_ss4J
+               = wordToWord16#
+                   (uncheckedShiftRL# (word32ToWord# x#4_ss4H) 16#) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#5_ss4J) 8#) 255##))
+                  wild5_as0d
+           of
+           { (# ipv11_as0k, ipv12_as0l #) ->
+           let { p#2_ss4L = plusAddr# ipv_isbi 8# } in
+           case writeWord8OffAddrAsWord16# p#2_ss4L 0# ipv12_as0l ipv11_as0k
+           of wild7_as0n
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#5_ss4J) 255##))
+                  wild7_as0n
+           of
+           { (# ipv13_as0p, ipv14_as0q #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#2_ss4L 2#) 0# ipv14_as0q ipv13_as0p
+           of wild8_as0s
+           { __DEFAULT ->
+           let { x#6_ss4N = wordToWord16# (word32ToWord# x#4_ss4H) } in
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int#
+                     (and# (uncheckedShiftRL# (word16ToWord# x#6_ss4N) 8#) 255##))
+                  wild8_as0s
+           of
+           { (# ipv15_as0w, ipv16_as0x #) ->
+           let { p#3_ss4P = plusAddr# p#2_ss4L 4# } in
+           case writeWord8OffAddrAsWord16# p#3_ss4P 0# ipv16_as0x ipv15_as0w
+           of wild9_as0z
+           { __DEFAULT ->
+           case readWord16OffAddr#
+                  (__label "hs_bytestring_lower_hex_table" (data))
+                  (word2Int# (and# (word16ToWord# x#6_ss4N) 255##))
+                  wild9_as0z
+           of
+           { (# ipv17_as0B, ipv18_as0C #) ->
+           case writeWord8OffAddrAsWord16#
+                  (plusAddr# p#3_ss4P 2#) 0# ipv18_as0C ipv17_as0B
+           of wild11_X3j
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 16#, ipv1_isbj, wild11_X3j #)
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+char7
+  = (\ eta_X3k eta1_X3l eta2_X3m ->
+       case eta2_X3m of wild1_sshj { (# cur_sshk, end_sshl, s_sshm #) ->
+       case <# (minusAddr# end_sshl cur_sshk) 1# of {
+         __DEFAULT ->
+           case eta_X3k of { C# c#_as0L ->
+           case writeWord8OffAddr#
+                  cur_sshk
+                  0#
+                  (wordToWord8# (int2Word# (andI# (ord# c#_as0L) 127#)))
+                  s_sshm
+           of s2_as0V
+           { __DEFAULT ->
+           (# plusAddr# cur_sshk 1#, end_sshl, s2_as0V #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 1# eta1_X3l wild1_sshj of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X3k of { C# c#_as0L ->
+           case writeWord8OffAddr#
+                  ipv_isbi
+                  0#
+                  (wordToWord8# (int2Word# (andI# (ord# c#_as0L) 127#)))
+                  ipv2_isbk
+           of s2_as0V
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 1#, ipv1_isbj, s2_as0V #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+Rec {
+$sgo1_rskp
+  = \ sc_ssk2 sc1_ssk3 sc2_ssk4 sc3_ssk1 sc4_ssk0 ->
+      case sc4_ssk0 of {
+        [] -> (# sc_ssk2, sc1_ssk3, sc2_ssk4 #);
+        : y_ah0g ys_ah0h ->
+          case <# (minusAddr# sc1_ssk3 sc_ssk2) 1# of {
+            __DEFAULT ->
+              case y_ah0g of { C# c#_as0L ->
+              case writeWord8OffAddr#
+                     sc_ssk2
+                     0#
+                     (wordToWord8# (int2Word# (andI# (ord# c#_as0L) 127#)))
+                     sc2_ssk4
+              of s2_as0V
+              { __DEFAULT ->
+              $sgo1_rskp (plusAddr# sc_ssk2 1#) sc1_ssk3 s2_as0V sc3_ssk1 ys_ah0h
+              }
+              };
+            1# ->
+              case $fIsStringBuilder1
+                     1# sc3_ssk1 (# sc_ssk2, sc1_ssk3, sc2_ssk4 #)
+              of
+              { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+              case y_ah0g of { C# c#_as0L ->
+              case writeWord8OffAddr#
+                     ipv_isbi
+                     0#
+                     (wordToWord8# (int2Word# (andI# (ord# c#_as0L) 127#)))
+                     ipv2_isbk
+              of s2_as0V
+              { __DEFAULT ->
+              $sgo1_rskp
+                (plusAddr# ipv_isbi 1#) ipv1_isbj s2_as0V sc3_ssk1 ys_ah0h
+              }
+              }
+              }
+          }
+      }
+end Rec }
+
+go1_rskq
+  = \ ds_ah0d eta_B0 eta1_B1 ->
+      case eta1_B1 of wild_sshq { (# cur_sshr, end_sshs, s_ssht #) ->
+      case ds_ah0d of {
+        [] -> wild_sshq;
+        : y_ah0g ys_ah0h ->
+          case <# (minusAddr# end_sshs cur_sshr) 1# of {
+            __DEFAULT ->
+              case y_ah0g of { C# c#_as0L ->
+              case writeWord8OffAddr#
+                     cur_sshr
+                     0#
+                     (wordToWord8# (int2Word# (andI# (ord# c#_as0L) 127#)))
+                     s_ssht
+              of s2_as0V
+              { __DEFAULT ->
+              $sgo1_rskp (plusAddr# cur_sshr 1#) end_sshs s2_as0V eta_B0 ys_ah0h
+              }
+              };
+            1# ->
+              case $fIsStringBuilder1 1# eta_B0 wild_sshq of
+              { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+              case y_ah0g of { C# c#_as0L ->
+              case writeWord8OffAddr#
+                     ipv_isbi
+                     0#
+                     (wordToWord8# (int2Word# (andI# (ord# c#_as0L) 127#)))
+                     ipv2_isbk
+              of s2_as0V
+              { __DEFAULT ->
+              $sgo1_rskp (plusAddr# ipv_isbi 1#) ipv1_isbj s2_as0V eta_B0 ys_ah0h
+              }
+              }
+              }
+          }
+      }
+      }
+
+string7
+  = (\ eta_is12 eta1_is13 eta2_is14 ->
+       go1_rskq eta_is12 eta1_is13 eta2_is14)
+    `cast` <Co:6> :: ...
+
+char8
+  = (\ eta_X3o eta1_X3p eta2_X3q ->
+       case eta2_X3q of wild1_sshv { (# cur_sshw, end_sshx, s_sshy #) ->
+       case <# (minusAddr# end_sshx cur_sshw) 1# of {
+         __DEFAULT ->
+           case eta_X3o of { C# c#_as1F ->
+           case writeWord8OffAddr#
+                  cur_sshw 0# (wordToWord8# (int2Word# (ord# c#_as1F))) s_sshy
+           of s2_as1P
+           { __DEFAULT ->
+           (# plusAddr# cur_sshw 1#, end_sshx, s2_as1P #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 1# eta1_X3p wild1_sshv of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           case eta_X3o of { C# c#_as1F ->
+           case writeWord8OffAddr#
+                  ipv_isbi 0# (wordToWord8# (int2Word# (ord# c#_as1F))) ipv2_isbk
+           of s2_as1P
+           { __DEFAULT ->
+           (# plusAddr# ipv_isbi 1#, ipv1_isbj, s2_as1P #)
+           }
+           }
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+Rec {
+$sgo2_rskr
+  = \ sc_ssjv sc1_ssjw sc2_ssjx sc3_ssju sc4_ssjt ->
+      case sc4_ssjt of {
+        [] -> (# sc_ssjv, sc1_ssjw, sc2_ssjx #);
+        : y_ah0g ys_ah0h ->
+          case <# (minusAddr# sc1_ssjw sc_ssjv) 1# of {
+            __DEFAULT ->
+              case y_ah0g of { C# c#_as1F ->
+              case writeWord8OffAddr#
+                     sc_ssjv 0# (wordToWord8# (int2Word# (ord# c#_as1F))) sc2_ssjx
+              of s2_as1P
+              { __DEFAULT ->
+              $sgo2_rskr (plusAddr# sc_ssjv 1#) sc1_ssjw s2_as1P sc3_ssju ys_ah0h
+              }
+              };
+            1# ->
+              case $fIsStringBuilder1
+                     1# sc3_ssju (# sc_ssjv, sc1_ssjw, sc2_ssjx #)
+              of
+              { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+              case y_ah0g of { C# c#_as1F ->
+              case writeWord8OffAddr#
+                     ipv_isbi 0# (wordToWord8# (int2Word# (ord# c#_as1F))) ipv2_isbk
+              of s2_as1P
+              { __DEFAULT ->
+              $sgo2_rskr
+                (plusAddr# ipv_isbi 1#) ipv1_isbj s2_as1P sc3_ssju ys_ah0h
+              }
+              }
+              }
+          }
+      }
+end Rec }
+
+string8
+  = (\ eta_X3s eta1_X3t eta2_X3u ->
+       case eta2_X3u of wild_sshC { (# cur_sshD, end_sshE, s_sshF #) ->
+       case eta_X3s of {
+         [] -> wild_sshC;
+         : y_ah0g ys_ah0h ->
+           case <# (minusAddr# end_sshE cur_sshD) 1# of {
+             __DEFAULT ->
+               case y_ah0g of { C# c#_as1F ->
+               case writeWord8OffAddr#
+                      cur_sshD 0# (wordToWord8# (int2Word# (ord# c#_as1F))) s_sshF
+               of s2_as1P
+               { __DEFAULT ->
+               $sgo2_rskr
+                 (plusAddr# cur_sshD 1#) end_sshE s2_as1P eta1_X3t ys_ah0h
+               }
+               };
+             1# ->
+               case $fIsStringBuilder1 1# eta1_X3t wild_sshC of
+               { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+               case y_ah0g of { C# c#_as1F ->
+               case writeWord8OffAddr#
+                      ipv_isbi 0# (wordToWord8# (int2Word# (ord# c#_as1F))) ipv2_isbk
+               of s2_as1P
+               { __DEFAULT ->
+               $sgo2_rskr
+                 (plusAddr# ipv_isbi 1#) ipv1_isbj s2_as1P eta1_X3t ys_ah0h
+               }
+               }
+               }
+           }
+       }
+       })
+    `cast` <Co:6> :: ...
+
+charUtf8
+  = (\ x_X3w eta_X3x eta1_X3y ->
+       case eta1_X3y of wild1_sshH { (# cur_sshI, end_sshJ, s_sshK #) ->
+       join {
+         $sw_ssit sc_ssin sc1_ssio sc2_ssip
+           = case x_X3w of { C# c#_afZL ->
+             case <=# (ord# c#_afZL) 127# of {
+               __DEFAULT ->
+                 case <=# (ord# c#_afZL) 2047# of {
+                   __DEFAULT ->
+                     case <=# (ord# c#_afZL) 65535# of {
+                       __DEFAULT ->
+                         case writeWord8OffAddr#
+                                sc_ssin
+                                0#
+                                (wordToWord8#
+                                   (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 18#) 240#)))
+                                sc2_ssip
+                         of s2_afZg
+                         { __DEFAULT ->
+                         case writeWord8OffAddr#
+                                (plusAddr# sc_ssin 1#)
+                                0#
+                                (wordToWord8#
+                                   (int2Word#
+                                      (+#
+                                         (andI# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 63#) 128#)))
+                                s2_afZg
+                         of s1_afZk
+                         { __DEFAULT ->
+                         case writeWord8OffAddr#
+                                (plusAddr# sc_ssin 2#)
+                                0#
+                                (wordToWord8#
+                                   (int2Word#
+                                      (+# (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#) 128#)))
+                                s1_afZk
+                         of s3_afZo
+                         { __DEFAULT ->
+                         case writeWord8OffAddr#
+                                (plusAddr# sc_ssin 3#)
+                                0#
+                                (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                s3_afZo
+                         of s4_afZs
+                         { __DEFAULT ->
+                         (# plusAddr# sc_ssin 4#, sc1_ssio, s4_afZs #)
+                         }
+                         }
+                         }
+                         };
+                       1# ->
+                         case writeWord8OffAddr#
+                                sc_ssin
+                                0#
+                                (wordToWord8#
+                                   (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 224#)))
+                                sc2_ssip
+                         of s2_afYV
+                         { __DEFAULT ->
+                         case writeWord8OffAddr#
+                                (plusAddr# sc_ssin 1#)
+                                0#
+                                (wordToWord8#
+                                   (int2Word#
+                                      (+# (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#) 128#)))
+                                s2_afYV
+                         of s1_afYZ
+                         { __DEFAULT ->
+                         case writeWord8OffAddr#
+                                (plusAddr# sc_ssin 2#)
+                                0#
+                                (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                s1_afYZ
+                         of s3_afZ3
+                         { __DEFAULT ->
+                         (# plusAddr# sc_ssin 3#, sc1_ssio, s3_afZ3 #)
+                         }
+                         }
+                         }
+                     };
+                   1# ->
+                     case writeWord8OffAddr#
+                            sc_ssin
+                            0#
+                            (wordToWord8#
+                               (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 192#)))
+                            sc2_ssip
+                     of s2_afYF
+                     { __DEFAULT ->
+                     case writeWord8OffAddr#
+                            (plusAddr# sc_ssin 1#)
+                            0#
+                            (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                            s2_afYF
+                     of s1_afYJ
+                     { __DEFAULT ->
+                     (# plusAddr# sc_ssin 2#, sc1_ssio, s1_afYJ #)
+                     }
+                     }
+                 };
+               1# ->
+                 case writeWord8OffAddr#
+                        sc_ssin 0# (wordToWord8# (int2Word# (ord# c#_afZL))) sc2_ssip
+                 of s2_afYs
+                 { __DEFAULT ->
+                 (# plusAddr# sc_ssin 1#, sc1_ssio, s2_afYs #)
+                 }
+             }
+             } } in
+       case <# (minusAddr# end_sshJ cur_sshI) 4# of {
+         __DEFAULT -> jump $sw_ssit cur_sshI end_sshJ s_sshK;
+         1# ->
+           case $fIsStringBuilder1 4# eta_X3x wild1_sshH of
+           { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+           jump $sw_ssit ipv_isbi ipv1_isbj ipv2_isbk
+           }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+Rec {
+$sgo3_rsks
+  = \ sc_ssiG sc1_ssiH sc2_ssiI sc3_ssiF sc4_ssiE ->
+      case sc4_ssiE of {
+        [] -> (# sc_ssiG, sc1_ssiH, sc2_ssiI #);
+        : y_ah0g ys_ah0h ->
+          join {
+            $sw_ssj5 sc5_ssiZ sc6_ssj0 sc7_ssj1
+              = case y_ah0g of { C# c#_afZL ->
+                case <=# (ord# c#_afZL) 127# of {
+                  __DEFAULT ->
+                    case <=# (ord# c#_afZL) 2047# of {
+                      __DEFAULT ->
+                        case <=# (ord# c#_afZL) 65535# of {
+                          __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   sc5_ssiZ
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 18#) 240#)))
+                                   sc7_ssj1
+                            of s2_afZg
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_ssiZ 1#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 63#)
+                                            128#)))
+                                   s2_afZg
+                            of s1_afZk
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_ssiZ 2#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#)
+                                            128#)))
+                                   s1_afZk
+                            of s3_afZo
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_ssiZ 3#)
+                                   0#
+                                   (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                   s3_afZo
+                            of s4_afZs
+                            { __DEFAULT ->
+                            $sgo3_rsks
+                              (plusAddr# sc5_ssiZ 4#) sc6_ssj0 s4_afZs sc3_ssiF ys_ah0h
+                            }
+                            }
+                            }
+                            };
+                          1# ->
+                            case writeWord8OffAddr#
+                                   sc5_ssiZ
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 224#)))
+                                   sc7_ssj1
+                            of s2_afYV
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_ssiZ 1#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#)
+                                            128#)))
+                                   s2_afYV
+                            of s1_afYZ
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_ssiZ 2#)
+                                   0#
+                                   (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                   s1_afYZ
+                            of s3_afZ3
+                            { __DEFAULT ->
+                            $sgo3_rsks
+                              (plusAddr# sc5_ssiZ 3#) sc6_ssj0 s3_afZ3 sc3_ssiF ys_ah0h
+                            }
+                            }
+                            }
+                        };
+                      1# ->
+                        case writeWord8OffAddr#
+                               sc5_ssiZ
+                               0#
+                               (wordToWord8#
+                                  (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 192#)))
+                               sc7_ssj1
+                        of s2_afYF
+                        { __DEFAULT ->
+                        case writeWord8OffAddr#
+                               (plusAddr# sc5_ssiZ 1#)
+                               0#
+                               (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                               s2_afYF
+                        of s1_afYJ
+                        { __DEFAULT ->
+                        $sgo3_rsks
+                          (plusAddr# sc5_ssiZ 2#) sc6_ssj0 s1_afYJ sc3_ssiF ys_ah0h
+                        }
+                        }
+                    };
+                  1# ->
+                    case writeWord8OffAddr#
+                           sc5_ssiZ 0# (wordToWord8# (int2Word# (ord# c#_afZL))) sc7_ssj1
+                    of s2_afYs
+                    { __DEFAULT ->
+                    $sgo3_rsks
+                      (plusAddr# sc5_ssiZ 1#) sc6_ssj0 s2_afYs sc3_ssiF ys_ah0h
+                    }
+                }
+                } } in
+          case <# (minusAddr# sc1_ssiH sc_ssiG) 4# of {
+            __DEFAULT -> jump $sw_ssj5 sc_ssiG sc1_ssiH sc2_ssiI;
+            1# ->
+              case $fIsStringBuilder1
+                     4# sc3_ssiF (# sc_ssiG, sc1_ssiH, sc2_ssiI #)
+              of
+              { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+              jump $sw_ssj5 ipv_isbi ipv1_isbj ipv2_isbk
+              }
+          }
+      }
+end Rec }
+
+stringUtf8
+  = (\ eta_is2c eta1_is2d eta2_is2e ->
+       case eta2_is2e of wild_sshT { (# cur_sshU, end_sshV, s_sshW #) ->
+       case eta_is2c of {
+         [] -> wild_sshT;
+         : y_ah0g ys_ah0h ->
+           join {
+             $sw_ssiA sc_ssiu sc1_ssiv sc2_ssiw
+               = case y_ah0g of { C# c#_afZL ->
+                 case <=# (ord# c#_afZL) 127# of {
+                   __DEFAULT ->
+                     case <=# (ord# c#_afZL) 2047# of {
+                       __DEFAULT ->
+                         case <=# (ord# c#_afZL) 65535# of {
+                           __DEFAULT ->
+                             case writeWord8OffAddr#
+                                    sc_ssiu
+                                    0#
+                                    (wordToWord8#
+                                       (int2Word#
+                                          (+# (uncheckedIShiftRA# (ord# c#_afZL) 18#) 240#)))
+                                    sc2_ssiw
+                             of s2_afZg
+                             { __DEFAULT ->
+                             case writeWord8OffAddr#
+                                    (plusAddr# sc_ssiu 1#)
+                                    0#
+                                    (wordToWord8#
+                                       (int2Word#
+                                          (+#
+                                             (andI# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 63#)
+                                             128#)))
+                                    s2_afZg
+                             of s1_afZk
+                             { __DEFAULT ->
+                             case writeWord8OffAddr#
+                                    (plusAddr# sc_ssiu 2#)
+                                    0#
+                                    (wordToWord8#
+                                       (int2Word#
+                                          (+#
+                                             (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#)
+                                             128#)))
+                                    s1_afZk
+                             of s3_afZo
+                             { __DEFAULT ->
+                             case writeWord8OffAddr#
+                                    (plusAddr# sc_ssiu 3#)
+                                    0#
+                                    (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                    s3_afZo
+                             of s4_afZs
+                             { __DEFAULT ->
+                             $sgo3_rsks
+                               (plusAddr# sc_ssiu 4#) sc1_ssiv s4_afZs eta1_is2d ys_ah0h
+                             }
+                             }
+                             }
+                             };
+                           1# ->
+                             case writeWord8OffAddr#
+                                    sc_ssiu
+                                    0#
+                                    (wordToWord8#
+                                       (int2Word#
+                                          (+# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 224#)))
+                                    sc2_ssiw
+                             of s2_afYV
+                             { __DEFAULT ->
+                             case writeWord8OffAddr#
+                                    (plusAddr# sc_ssiu 1#)
+                                    0#
+                                    (wordToWord8#
+                                       (int2Word#
+                                          (+#
+                                             (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#)
+                                             128#)))
+                                    s2_afYV
+                             of s1_afYZ
+                             { __DEFAULT ->
+                             case writeWord8OffAddr#
+                                    (plusAddr# sc_ssiu 2#)
+                                    0#
+                                    (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                    s1_afYZ
+                             of s3_afZ3
+                             { __DEFAULT ->
+                             $sgo3_rsks
+                               (plusAddr# sc_ssiu 3#) sc1_ssiv s3_afZ3 eta1_is2d ys_ah0h
+                             }
+                             }
+                             }
+                         };
+                       1# ->
+                         case writeWord8OffAddr#
+                                sc_ssiu
+                                0#
+                                (wordToWord8#
+                                   (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 192#)))
+                                sc2_ssiw
+                         of s2_afYF
+                         { __DEFAULT ->
+                         case writeWord8OffAddr#
+                                (plusAddr# sc_ssiu 1#)
+                                0#
+                                (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                s2_afYF
+                         of s1_afYJ
+                         { __DEFAULT ->
+                         $sgo3_rsks
+                           (plusAddr# sc_ssiu 2#) sc1_ssiv s1_afYJ eta1_is2d ys_ah0h
+                         }
+                         }
+                     };
+                   1# ->
+                     case writeWord8OffAddr#
+                            sc_ssiu 0# (wordToWord8# (int2Word# (ord# c#_afZL))) sc2_ssiw
+                     of s2_afYs
+                     { __DEFAULT ->
+                     $sgo3_rsks
+                       (plusAddr# sc_ssiu 1#) sc1_ssiv s2_afYs eta1_is2d ys_ah0h
+                     }
+                 }
+                 } } in
+           case <# (minusAddr# end_sshV cur_sshU) 4# of {
+             __DEFAULT -> jump $sw_ssiA cur_sshU end_sshV s_sshW;
+             1# ->
+               case $fIsStringBuilder1 4# eta1_is2d wild_sshT of
+               { (# ipv_isbi, ipv1_isbj, ipv2_isbk #) ->
+               jump $sw_ssiA ipv_isbi ipv1_isbj ipv2_isbk
+               }
+           }
+       }
+       })
+    `cast` <Co:6> :: ...
+
+$trModule4 = "main"#
+
+$trModule3 = TrNameS $trModule4
+
+$trModule2 = "Wireform.Builder.Internal.Prim"#
+
+$trModule1 = TrNameS $trModule2
+
+$trModule = Module $trModule3 $trModule1
+
+floatDec
+  = (\ x_ae7g ->
+       let {
+         eta_ss4V
+           = $fShowDouble_$sshowSignedFloat
+               $fShowDouble2 minExpt x_ae7g [] } in
+       \ eta1_B1 eta2_B2 -> go1_rskq eta_ss4V eta1_B1 eta2_B2)
+    `cast` <Co:5> :: ...
+
+doubleDec
+  = (\ x_X3B ->
+       let {
+         eta_ss4X
+           = $fShowDouble_$sshowSignedFloat
+               $fShowDouble2 minExpt x_X3B [] } in
+       \ eta1_B1 eta2_B2 -> go1_rskq eta_ss4X eta1_B1 eta2_B2)
+    `cast` <Co:5> :: ...
+
+integerDec
+  = (\ x_X3E ->
+       let { eta_ss4Z = $w$cshowsPrec1 0# x_X3E [] } in
+       \ eta1_B1 eta2_B2 -> go1_rskq eta_ss4Z eta1_B1 eta2_B2)
+    `cast` <Co:5> :: ...
+
+

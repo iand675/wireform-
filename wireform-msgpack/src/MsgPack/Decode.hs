@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE UnboxedSums #-}
 
 {- | MessagePack binary decoding.
 
@@ -19,7 +20,7 @@ module MsgPack.Decode (
 ) where
 
 import Control.Monad.ST (stToIO)
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits (shiftL, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
@@ -32,6 +33,7 @@ import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
+import MsgPack.Timestamp (decodeTimestampPayload)
 import MsgPack.Value qualified as MV'
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Wireform.FFI (decodeTextFast)
@@ -364,64 +366,10 @@ decodeFixExt p len off elen origBs
 decodeExtData :: Ptr Word8 -> Int -> Int -> Int8 -> Int -> ByteString -> DecResult
 decodeExtData _ len off ty elen origBs
   | off + elen > len = pure $ Left "MsgPack.Decode: ext truncated"
-  | ty == -1 = decodeTimestamp off elen origBs
+  | ty == -1 =
+      pure $! case decodeTimestampPayload origBs off elen of
+        (# timestamp | #) -> Right (timestamp, off + elen)
+        (# | e #) -> Left e
   | otherwise = do
       let !slice = BSU.unsafeTake elen (BSU.unsafeDrop off origBs)
       pure $ Right (MV'.Ext ty slice, off + elen)
-
-
-decodeTimestamp :: Int -> Int -> ByteString -> DecResult
-decodeTimestamp off elen origBs = case elen of
-  4 -> do
-    let !b0 = fromIntegral (BSU.unsafeIndex origBs off) :: Word64
-        !b1 = fromIntegral (BSU.unsafeIndex origBs (off + 1)) :: Word64
-        !b2 = fromIntegral (BSU.unsafeIndex origBs (off + 2)) :: Word64
-        !b3 = fromIntegral (BSU.unsafeIndex origBs (off + 3)) :: Word64
-        !secs = (b0 `shiftL` 24) .|. (b1 `shiftL` 16) .|. (b2 `shiftL` 8) .|. b3
-    pure $ Right (MV'.Timestamp (fromIntegral secs) 0, off + 4)
-  8 -> do
-    let !b0 = fromIntegral (BSU.unsafeIndex origBs off) :: Word64
-        !b1 = fromIntegral (BSU.unsafeIndex origBs (off + 1)) :: Word64
-        !b2 = fromIntegral (BSU.unsafeIndex origBs (off + 2)) :: Word64
-        !b3 = fromIntegral (BSU.unsafeIndex origBs (off + 3)) :: Word64
-        !b4 = fromIntegral (BSU.unsafeIndex origBs (off + 4)) :: Word64
-        !b5 = fromIntegral (BSU.unsafeIndex origBs (off + 5)) :: Word64
-        !b6 = fromIntegral (BSU.unsafeIndex origBs (off + 6)) :: Word64
-        !b7 = fromIntegral (BSU.unsafeIndex origBs (off + 7)) :: Word64
-        !w64 =
-          (b0 `shiftL` 56)
-            .|. (b1 `shiftL` 48)
-            .|. (b2 `shiftL` 40)
-            .|. (b3 `shiftL` 32)
-            .|. (b4 `shiftL` 24)
-            .|. (b5 `shiftL` 16)
-            .|. (b6 `shiftL` 8)
-            .|. b7
-        !nsAdj = w64 `shiftR` 34
-        !secs = w64 .&. 0x3FFFFFFFF
-    pure $ Right (MV'.Timestamp (fromIntegral secs) (fromIntegral nsAdj), off + 8)
-  12 -> do
-    let !b0 = fromIntegral (BSU.unsafeIndex origBs off) :: Word64
-        !b1 = fromIntegral (BSU.unsafeIndex origBs (off + 1)) :: Word64
-        !b2 = fromIntegral (BSU.unsafeIndex origBs (off + 2)) :: Word64
-        !b3 = fromIntegral (BSU.unsafeIndex origBs (off + 3)) :: Word64
-        !ns32 = (b0 `shiftL` 24) .|. (b1 `shiftL` 16) .|. (b2 `shiftL` 8) .|. b3
-    let !b4 = fromIntegral (BSU.unsafeIndex origBs (off + 4)) :: Word64
-        !b5 = fromIntegral (BSU.unsafeIndex origBs (off + 5)) :: Word64
-        !b6 = fromIntegral (BSU.unsafeIndex origBs (off + 6)) :: Word64
-        !b7 = fromIntegral (BSU.unsafeIndex origBs (off + 7)) :: Word64
-        !b8 = fromIntegral (BSU.unsafeIndex origBs (off + 8)) :: Word64
-        !b9 = fromIntegral (BSU.unsafeIndex origBs (off + 9)) :: Word64
-        !b10 = fromIntegral (BSU.unsafeIndex origBs (off + 10)) :: Word64
-        !b11 = fromIntegral (BSU.unsafeIndex origBs (off + 11)) :: Word64
-        !sec64 =
-          (b4 `shiftL` 56)
-            .|. (b5 `shiftL` 48)
-            .|. (b6 `shiftL` 40)
-            .|. (b7 `shiftL` 32)
-            .|. (b8 `shiftL` 24)
-            .|. (b9 `shiftL` 16)
-            .|. (b10 `shiftL` 8)
-            .|. b11
-    pure $ Right (MV'.Timestamp (fromIntegral sec64 :: Int64) (fromIntegral ns32 :: Word32), off + 12)
-  _ -> pure $ Left $ "MsgPack.Decode: invalid timestamp ext size: " ++ show elen

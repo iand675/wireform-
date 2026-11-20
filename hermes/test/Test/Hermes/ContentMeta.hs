@@ -2,19 +2,29 @@
 
 module Test.Hermes.ContentMeta (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.List (intercalate)
+import qualified Data.ByteString.Char8 as BSC
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.ContentCoding (ContentCoding (..))
+import Network.HTTP.ContentNegotiation (MediaType (..))
+import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), decodeExtendedValue, parseExtendedValue, renderExtendedValue)
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers.ContentDisposition (ContentDisposition (..), contentDispositionFilename)
+import Network.HTTP.Headers.ContentEncoding (ContentEncoding (..), contentCodings)
 import qualified Network.HTTP.Headers.ContentLanguage as CL
 import qualified Network.HTTP.Headers.ContentLocation as CLoc
+import Network.HTTP.Headers.ContentType (ContentType (..), contentTypeParameters)
 import qualified Network.HTTP.Headers.MIMEVersion as MV
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Headers.SetCookie (SetCookies (..))
 import Test.Syd
 import Test.Syd.Hedgehog ()
 
@@ -81,14 +91,11 @@ unit_cl_render =
     in renderCL v `shouldBe` "de, en"
 
 
-genSubtag :: Gen String
-genSubtag = Gen.list (Range.constant 1 8) (Gen.element ['a' .. 'z'])
-
-
 genTag :: Gen CL.LanguageTag
 genTag = do
-  subtags <- Gen.list (Range.constant 1 3) genSubtag
-  pure (CL.LanguageTag (ST.fromString (intercalate "-" subtags)))
+  primary <- ST.pack <$> Gen.list (Range.constant 2 8) (Gen.element ['a' .. 'z'])
+  private <- Gen.list (Range.constant 0 3) (ST.pack <$> Gen.list (Range.constant 1 8) (Gen.element ['a' .. 'z']))
+  pure (CL.LanguageTag (if null private then primary else primary <> "-x" <> foldMap ("-" <>) private))
 
 
 prop_cl_roundtrip :: Property
@@ -101,10 +108,27 @@ prop_cl_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+unit_cl_fields :: Spec
+unit_cl_fields = it "checks BCP 47 tags across sparse and repeated fields" $ do
+  let wire = "zh-cmn-Hans-CN, es-419, i-klingon, X-pvt, en-u-ca-gregory"
+      fields = headerMapFromList [("Content-Language", "zh-cmn-Hans-CN,, es-419"), ("content-language", "i-klingon, X-pvt, en-u-ca-gregory")]
+      tags = fmap CL.LanguageTag ["zh-cmn-Hans-CN", "es-419", "i-klingon", "X-pvt", "en-u-ca-gregory"]
+  case lookupHeader @CL.ContentLanguage fields of
+    Right (Just value) -> do
+      CL.contentLanguageTagList value `shouldBe` tags
+      renderCL value `shouldBe` wire
+    other -> expectationFailure (show other)
+  lookupHeader @CL.ContentLanguage (headerMapFromList [("content-language", " , ")])
+    `shouldBe` Right (Just CL.ContentLanguageEmpty)
+  lookupHeader @CL.ContentLanguage (headerMapFromList []) `shouldBe` Right Nothing
+  let invalid = ["*", "en--US", "en_US", "en-x", "x", "en-u", "en-a-foo-A-bar", "de-1901-1901", "en-US-Latn", "abcdefghx"]
+  map (isLeft . parseCL) invalid `shouldBe` replicate (length invalid) True
+
+
 -- Content-Location ----------------------------------------------------------
 
 unit_cloc_parse :: Spec
-unit_cloc_parse = it "parses an opaque URI reference" $
+unit_cloc_parse = it "parses a fragmentless URI reference" $
   case parseCLoc "/index.html" of
     Right (CLoc.ContentLocation u) -> u `shouldBe` ST.fromString "/index.html"
     other -> error (show other)
@@ -132,6 +156,25 @@ unit_mv_render =
     renderMV (MV.MIMEVersion 1 0) `shouldBe` "1.0"
 
 
+typedMIMEVersion :: Spec
+typedMIMEVersion = describe "typed MIME-Version" $ do
+  it "ignores nested comments and quoted pairs around the version tokens" $ do
+    let wire = " \t(produced (by MIME)) 01 (major) . (minor \\))000 (end)"
+        expected = MV.MIMEVersion 1 0
+    parseMV wire `shouldBe` Right expected
+    lookupHeader @MV.MIMEVersion (headerMapFromList [("MIME-Version", wire)]) `shouldBe` Right (Just expected)
+    lookupRawHeader "MIME-Version" (setHeader expected (headerMapFromList [])) `shouldBe` Just ("1.0" :| [])
+  it "checks component overflow, rejects malformed tokens and enforces a single field line" $ do
+    let limit = BSC.pack (show (maxBound :: Int))
+        tooBig = BSC.pack (show (toInteger (maxBound :: Int) + 1))
+    parseMV (limit <> "." <> limit) `shouldBe` Right (MV.MIMEVersion maxBound maxBound)
+    forM_ ["", "1.", ".0", "-1.0", "1.0.3", "1 (x) 2.0", "1.0 (unterminated", "1.0 (x\r)", tooBig <> ".0", "1." <> tooBig] $ \wire -> do
+      parseMV wire `shouldSatisfy` isLeft
+      lookupHeader @MV.MIMEVersion (headerMapFromList [("MIME-Version", wire)]) `shouldSatisfy` isLeft
+    lookupHeader @MV.MIMEVersion (headerMapFromList [("MIME-Version", "1.0"), ("MIME-Version", "2.0")])
+      `shouldSatisfy` isLeft
+
+
 prop_mv_roundtrip :: Property
 prop_mv_roundtrip = property $ do
   major <- forAll (Gen.int (Range.constant 0 99))
@@ -149,10 +192,122 @@ tests =
     sequence_
       [ unit_cl_parse
       , unit_cl_render
+      , unit_cl_fields
       , it "Content-Language round-trip" prop_cl_roundtrip
       , unit_cloc_parse
       , unit_cloc_render
       , unit_mv_parse
       , unit_mv_render
       , it "MIME-Version round-trip" prop_mv_roundtrip
+      , typedMIMEVersion
+      , representationHeaders
       ]
+
+
+representationHeaders :: Spec
+representationHeaders = do
+  it "sets repeated typed fields in order and handles a renderer that emits no fields" $ do
+    let fields = headerMapFromList [("Set-Cookie", "a=1"), ("Set-Cookie", "b=2")]
+    case lookupHeader @SetCookies fields of
+      Right (Just cookies) -> do
+        headerMapToList (setHeader cookies (headerMapFromList [("Set-Cookie", "old=1")])) `shouldBe` headerMapToList fields
+        setHeader (SetCookies []) fields `shouldBe` fields
+      other -> expectationFailure (show other)
+  describe "Content-Type" $ do
+    it "preserves the case and delimiters in a quoted multipart boundary" $ do
+      let wire = "multipart/form-data;boundary=\"Aa:B, 01\""
+          fields = headerMapFromList [("Content-Type", " \t" <> wire <> "\t")]
+          value = ParameterizedContentType (MediaType "multipart" "form-data") (("boundary", "Aa:B, 01") :| [])
+      lookupHeader @ContentType fields `shouldBe` Right (Just value)
+      contentTypeParameters value `shouldBe` [("boundary", "Aa:B, 01")]
+      headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("content-type", wire)]
+    it "accepts a bare media type and preserves the original constructor" $
+      lookupHeader @ContentType (headerMapFromList [("content-type", "application/json")])
+        `shouldBe` Right (Just (ContentType (MediaType "application" "json")))
+    it "rejects wildcards, malformed parameters and repeated singleton fields" $ do
+      let parse = lookupHeader @ContentType . headerMapFromList
+      map (isLeft . parse) [[("content-type", "text/*")], [("content-type", "*/json")], [("content-type", "application/*+json")], [("content-type", "text/html;broken=")], [("content-type", "text/html"), ("content-type", "application/json")]]
+        `shouldBe` replicate 5 True
+    it "round-trips opaque bytes in quoted parameters" $ do
+      let wire = "application/example;parameter=\"" <> BS.pack [0x80, 0x5c, 0xff, 0x22]
+          canonical = "application/example;parameter=\"" <> BS.pack [0x80, 0xff, 0x22]
+          value = ParameterizedContentType (MediaType "application" "example") (("parameter", ST.pack ['\x80', '\xff']) :| [])
+      lookupHeader @ContentType (headerMapFromList [("content-type", wire)]) `shouldBe` Right (Just value)
+      headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("content-type", canonical)]
+    it "round-trips empty, token and quoted parameter values" $
+      property $ do
+        parameter <- forAll (ST.pack <$> Gen.list (Range.linear 0 60) (Gen.element ("abcdABCD0123;,:\"\\ \t" :: String)))
+        let value = ParameterizedContentType (MediaType "application" "custom") (("param", parameter) :| [])
+        lookupHeader @ContentType (setHeader value (headerMapFromList [])) === Right (Just value)
+  describe "Content-Encoding" $ do
+    it "round-trips a chain with repeated fields, aliases and custom names" $ do
+      let fields = headerMapFromList [("Content-Encoding", " X-GZIP, , Br"), ("content-encoding", "gzip-extra, Deflate ")]
+          value = ContentEncodingChain GZip (Brotli :| [Custom "gzip-extra", Deflate])
+          serialized = setHeader value (headerMapFromList [])
+      lookupHeader @ContentEncoding fields `shouldBe` Right (Just value)
+      contentCodings value `shouldBe` [GZip, Brotli, Custom "gzip-extra", Deflate]
+      headerMapToList serialized `shouldBe` [("content-encoding", "gzip, br, gzip-extra, deflate")]
+      lookupHeader @ContentEncoding serialized `shouldBe` Right (Just value)
+    it "round-trips a present empty list and distinguishes it from an absent field" $ do
+      let empty = headerMapFromList []
+          sparse = headerMapFromList [("content-encoding", " \t, "), ("Content-Encoding", ""), ("Content-Encoding", ",\t")]
+          serialized = setHeader ContentEncodingEmpty empty
+      lookupHeader @ContentEncoding empty `shouldBe` Right Nothing
+      lookupHeader @ContentEncoding sparse `shouldBe` Right (Just ContentEncodingEmpty)
+      headerMapToList serialized `shouldBe` [("content-encoding", "")]
+      lookupHeader @ContentEncoding serialized `shouldBe` Right (Just ContentEncodingEmpty)
+      contentCodings ContentEncodingEmpty `shouldBe` []
+    it "rejects invalid entries in later lines instead of decoding part of the chain" $
+      isLeft (lookupHeader @ContentEncoding (headerMapFromList [("content-encoding", "gzip"), ("content-encoding", "br;q=1")])) `shouldBe` True
+    it "preserves case for unknown codings and recognizes known whole tokens case insensitively" $ do
+      lookupHeader @ContentEncoding (headerMapFromList [("content-encoding", "GZIP-Extension")]) `shouldBe` Right (Just (ContentEncoding (Custom "GZIP-Extension")))
+      lookupHeader @ContentEncoding (headerMapFromList [("content-encoding", "ZsTd")]) `shouldBe` Right (Just (ContentEncoding ZStd))
+  describe "Content-Disposition" $ do
+    it "round-trips an escaped filename and keeps filename* on the wire" $ do
+      let value = ContentDisposition "attachment" [("filename", "one, two\".txt"), ("filename*", "UTF-8''caf%C3%A9.txt")]
+          fields = setHeader value (headerMapFromList [])
+      headerMapToList fields `shouldBe` [("content-disposition", "attachment;filename=\"one, two\\\".txt\";filename*=UTF-8''caf%C3%A9.txt")]
+      lookupHeader @ContentDisposition fields `shouldBe` Right (Just value)
+      lookupHeader @ContentDisposition (headerMapFromList [("content-disposition", "attachment;filename = \"one, two\\\".txt\";filename*= UTF-8''caf%C3%A9.txt")])
+        `shouldBe` Right (Just value)
+    it "prefers a decodable extended filename and preserves its original spelling" $ do
+      let wire = "attachment;FILENAME=plain.txt;Filename*=uTf-8'en-GB'%e2%82%AC+rates.txt"
+          fields = headerMapFromList [("content-disposition", wire)]
+      case lookupHeader @ContentDisposition fields of
+        Right (Just value) -> do
+          contentDispositionFilename value `shouldBe` Just "\x20ac+rates.txt"
+          headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("content-disposition", wire)]
+        other -> expectationFailure (show other)
+      let filename wireValue =
+            fmap (>>= contentDispositionFilename) (lookupHeader @ContentDisposition (headerMapFromList [("content-disposition", wireValue)]))
+      filename "attachment; filename*=ISO-8859-1''caf%E9.txt" `shouldBe` Right (Just "caf\xe9.txt")
+      filename "attachment; filename*=UTF-8''%ff; filename=plain%20.txt" `shouldBe` Right (Just "plain%20.txt")
+      filename "attachment; filename*=x-unknown''bytes; filename=plain.txt" `shouldBe` Right (Just "plain.txt")
+    it "rejects duplicate names and malformed extended syntax" $ do
+      let parse wire = lookupHeader @ContentDisposition (headerMapFromList [("content-disposition", wire)])
+          invalid =
+            [ "attachment;filename=one; FILENAME=two"
+            , "attachment;name*=UTF-8''one; NAME*=UTF-8''two"
+            , "attachment;filename*=UTF-8''a%ZZ"
+            , "attachment;filename*=UTF-8''a%A"
+            , "attachment;filename*=\"UTF-8''report.txt\""
+            , "attachment;filename*=UTF-8'en--GB'file"
+            , "attachment;filename*=UTF-8''a*b"
+            , "attachment;filename*=''name.txt"
+            ]
+      map (isLeft . parse) invalid `shouldBe` replicate (length invalid) True
+    it "preserves opaque regular filename bytes" $ do
+      let wire = "attachment;filename=\"caf" <> BS.pack [0xe9] <> ".txt\""
+          fields = headerMapFromList [("content-disposition", wire)]
+      case lookupHeader @ContentDisposition fields of
+        Right (Just value) -> do
+          contentDispositionFilename value `shouldBe` Just "caf\xe9.txt"
+          headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("content-disposition", wire)]
+        other -> expectationFailure (show other)
+    it "decodes and renders an extended parameter with its language and octets" $ do
+      let wire = "UTF-8'en-GB'%e2%82%ac%20a+b%27%2a"
+          octets = BS.pack [0xe2, 0x82, 0xac] <> " a+b'*"
+          value = ExtendedValue "UTF-8" (Just "en-GB") octets
+      parseExtendedValue wire `shouldBe` Right value
+      decodeExtendedValue value `shouldBe` Just "\x20ac a+b'*"
+      M.toStrictByteString (renderExtendedValue value) `shouldBe` "UTF-8'en-GB'%E2%82%AC%20a+b%27%2A"

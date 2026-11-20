@@ -6,10 +6,8 @@ Run from the wireform-proto directory:
 -}
 module Main where
 
-import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Proto.CodeGen (GenerateOpts (..), defaultGenerateOpts, generateModuleText)
-import Proto.IDL.Parser (parseProtoFile)
+import Proto.CodeGen (GenerateOpts (..), buildTypeRegistry, defaultGenerateOpts, generateModuleText)
 import Proto.IDL.Parser.Resolver (ResolvedProto (..), resolveProtoImports)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
@@ -46,7 +44,8 @@ main = do
           Right rp -> do
             -- Use modulePath (without data/proto/ prefix) so the generated
             -- module name is Proto.Google.Protobuf.Foo, not Proto.Data.Proto.Google.Protobuf.Foo
-            let code = generateModuleText opts mempty modulePath (rpFile rp)
+            let registry = buildTypeRegistry opts [(modulePath, rp)]
+                code = generateModuleText opts registry modulePath (rpFile rp)
             createDirectoryIfMissing True (takeDirectory hsPath)
             TIO.writeFile hsPath code
             putStrLn $ "Generated " <> hsPath

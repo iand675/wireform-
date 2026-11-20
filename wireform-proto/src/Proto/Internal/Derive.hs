@@ -50,6 +50,7 @@ module Proto.Internal.Derive (
   mkSizeInstanceWith,
   mkDecodeInstance,
   mkDecodeInstanceWith,
+  mkDecodeInstanceWithVerifiedStrings,
   mkSemigroupInstance,
   mkSemigroupInstanceWith,
   mkMonoidInstance,
@@ -72,17 +73,20 @@ module Proto.Internal.Derive (
 import Data.Bifunctor qualified
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (maybeToList)
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Vector qualified as V
+import Data.Vector.Unboxed qualified as VU
 import Data.Word (Word32, Word64)
 import Language.Haskell.TH
 import Proto.Decode qualified as PD
 import Proto.Encode qualified as PE
+import Proto.Google.Protobuf.Struct qualified as PGS
 import Proto.Internal.Encode.Archetype qualified as PA
 import Proto.Internal.Wire (Tag)
 import Proto.Internal.Wire qualified as PWire
@@ -92,7 +96,6 @@ import Proto.Registry qualified as PReg
 import Proto.Repr (BytesAdapter (..), BytesRep (..), MapAdapter (..), RepeatedAdapter (..), StringAdapter (..), StringRep (..))
 import Proto.Repr qualified as PR
 import Proto.Schema qualified as PS
-import Wireform.Builder qualified as BB
 import Wireform.Derive.Modifier (MapKeyScalar (..))
 
 
@@ -173,6 +176,10 @@ data OneofVariant = OneofVariant
   -- ^ The constructor's single argument type.
   , ovType :: !ProtoFieldType
   -- ^ Wire encoding for the arm's payload.
+  , ovDelimited :: !Bool
+  -- ^ Whether a submessage uses start and end tags.
+  , ovSchemaEnum :: !Bool
+  -- ^ The arm has generated 'PS.ProtoEnum' metadata.
   , ovStringAdapter :: StringAdapter
   {- ^ String adapter for this variant when
   @ovType = PFScalar SString@.
@@ -196,6 +203,8 @@ oneofVariant con tg innerTy ty =
     , ovTag = tg
     , ovInnerTy = innerTy
     , ovType = ty
+    , ovDelimited = False
+    , ovSchemaEnum = False
     , ovStringAdapter = PR.strictTextAdapter
     , ovBytesAdapter = PR.strictBytesAdapter
     }
@@ -275,6 +284,10 @@ data ProtoField = ProtoField
   For maps, this is the value type. For oneofs this is the
   carrier @Maybe SumType@ — body builders ignore it.
   -}
+  , pfSchemaEnum :: !Bool
+  -- ^ The field has generated 'PS.ProtoEnum' metadata.
+  , pfDelimited :: !Bool
+  -- ^ A submessage delimited by group tags.
   , pfStringAdapter :: StringAdapter
   {- ^ Adapter for proto @string@ fields. Only consulted when
   @pfType = PFScalar SString@.
@@ -297,6 +310,8 @@ protoField sel tg knd ty inner =
     , pfKind = knd
     , pfType = ty
     , pfInnerTy = inner
+    , pfSchemaEnum = False
+    , pfDelimited = False
     , pfStringAdapter = PR.strictTextAdapter
     , pfBytesAdapter = PR.strictBytesAdapter
     }
@@ -356,10 +371,11 @@ readSel meta sel msgVar
 -- Wire-tag helpers
 -- ---------------------------------------------------------------------------
 
-wireVarint, wire64Bit, wireLengthDelimited, wire32Bit :: Int
+wireVarint, wire64Bit, wireLengthDelimited, wireStartGroup, wire32Bit :: Int
 wireVarint = 0
 wire64Bit = 1
 wireLengthDelimited = 2
+wireStartGroup = 3
 wire32Bit = 5
 
 
@@ -387,6 +403,19 @@ scalarWireType = \case
   SDouble -> wire64Bit
   SString -> wireLengthDelimited
   SBytes -> wireLengthDelimited
+
+
+protoFieldWireType :: ProtoFieldType -> Int
+protoFieldWireType = \case
+  PFScalar s -> scalarWireType s
+  PFSubmessage -> wireLengthDelimited
+  PFEnum -> wireVarint
+
+
+wireTypeOfField :: ProtoField -> Int
+wireTypeOfField pf
+  | pfDelimited pf = wireStartGroup
+  | otherwise = protoFieldWireType (pfType pf)
 
 
 -- ---------------------------------------------------------------------------
@@ -470,7 +499,11 @@ unrecognised tags into a parallel accumulator and writes the
 reversed list to the slot in the final record.
 -}
 messageDecoderBodyWith :: MessageMeta -> Name -> [ProtoField] -> Q Exp
-messageDecoderBodyWith meta conName fs = do
+messageDecoderBodyWith = messageDecoderBodyWithVerifiedStrings []
+
+
+messageDecoderBodyWithVerifiedStrings :: [Int] -> MessageMeta -> Name -> [ProtoField] -> Q Exp
+messageDecoderBodyWithVerifiedStrings verifiedStrings meta conName fs = do
   accNames <- mapM (\(i, _) -> newName ("acc_" ++ show (i :: Int))) (zip [0 ..] fs)
   let pairs = zip fs accNames
   initEs <- mapM initFor pairs
@@ -478,7 +511,7 @@ messageDecoderBodyWith meta conName fs = do
   ufAccM <- case mmUnknownFieldsSel meta of
     Nothing -> pure Nothing
     Just _ -> Just <$> newName "acc_unknown_"
-  loopBody <- decodeLoopBody meta conName loopName pairs ufAccM
+  loopBody <- decodeLoopBody verifiedStrings meta conName loopName pairs ufAccM
   let allParams = map VarP accNames <> maybe [] (\n -> [VarP n]) ufAccM
       loopFun =
         FunD
@@ -541,8 +574,12 @@ mkDecodeInstance = mkDecodeInstanceWith defaultMessageMeta
 
 
 mkDecodeInstanceWith :: MessageMeta -> Type -> Name -> [ProtoField] -> Q Dec
-mkDecodeInstanceWith meta ty conName fs = do
-  body <- messageDecoderBodyWith meta conName fs
+mkDecodeInstanceWith = mkDecodeInstanceWithVerifiedStrings []
+
+
+mkDecodeInstanceWithVerifiedStrings :: [Int] -> MessageMeta -> Type -> Name -> [ProtoField] -> Q Dec
+mkDecodeInstanceWithVerifiedStrings verifiedStrings meta ty conName fs = do
+  body <- messageDecoderBodyWithVerifiedStrings verifiedStrings meta conName fs
   -- AGENTS.md ("Performance" → "Decoder monad style") requires
   -- @{-# INLINE messageDecoder #-}@ on every instance: the
   -- continuation-passing dispatch in 'getTagOrU' is only worth its
@@ -565,9 +602,9 @@ class; GHC checks that every superclass instance ('MessageEncode',
 'Proto.Registry.discoverRegistry' looks up via 'reify' to build the
 runtime type registry.
 -}
-mkIsMessageInstance :: Type -> Dec
-mkIsMessageInstance ty =
-  InstanceD Nothing [] (AppT (ConT ''PReg.IsMessage) ty) []
+mkIsMessageInstance :: Cxt -> Type -> Dec
+mkIsMessageInstance context ty =
+  InstanceD Nothing context (AppT (ConT ''PReg.IsMessage) ty) []
 
 
 {- | Generate a 'Semigroup' instance encoding protobuf merge semantics.
@@ -575,8 +612,7 @@ mkIsMessageInstance ty =
 For each field, @a '<>' b@ combines using the following rules:
 
   * Repeated: append via the field's underlying 'Semigroup' (vector @++@).
-  * Map: take the union via the field's underlying 'Semigroup'
-    (@Data.Map.Strict@ is left-biased, so existing keys win on conflict).
+  * Map: take the union, preferring incoming entries on key collisions.
   * Optional (@Maybe@) submessage: incoming 'Just' wins; otherwise keep
     the existing value.
   * Oneof: incoming variant wins when set; otherwise keep the existing.
@@ -599,7 +635,7 @@ mkSemigroupInstanceWith meta ty conName fs = do
             getB = readSel meta sel bName
         in case pfKind pf of
              FKRepeated _ _ -> [|$(pure getA) <> $(pure getB)|]
-             FKMap _ -> [|$(pure getA) <> $(pure getB)|]
+             FKMap _ -> [|Map.union $(pure getB) $(pure getA)|]
              FKOneof _ -> [|case $(pure getB) of Nothing -> $(pure getA); b' -> b'|]
              FKMaybe -> [|case $(pure getB) of Nothing -> $(pure getA); b' -> b'|]
              _ -> case pfType pf of
@@ -608,6 +644,8 @@ mkSemigroupInstanceWith meta ty conName fs = do
                PFScalar SBool -> [|if not $(pure getB) then $(pure getA) else $(pure getB)|]
                PFScalar SString -> [|if $(pure getB) == mempty then $(pure getA) else $(pure getB)|]
                PFScalar SBytes -> [|if $(pure getB) == mempty then $(pure getA) else $(pure getB)|]
+               PFScalar SFloat -> [|if PE.isDefaultFloat $(pure getB) then $(pure getA) else $(pure getB)|]
+               PFScalar SDouble -> [|if PE.isDefaultDouble $(pure getB) then $(pure getA) else $(pure getB)|]
                PFScalar _ -> [|if $(pure getB) == 0 then $(pure getA) else $(pure getB)|]
   fieldExps <-
     mapM
@@ -930,11 +968,9 @@ oneofEncodeArm v ov =
         )
           { pfStringAdapter = ovStringAdapter ov
           , pfBytesAdapter = ovBytesAdapter ov
+          , pfDelimited = ovDelimited ov
           }
-      tagInt = case ovType ov of
-        PFScalar s -> tagByteFor (ovTag ov) (scalarWireType s)
-        PFSubmessage -> tagByteFor (ovTag ov) wireLengthDelimited
-        PFEnum -> tagByteFor (ovTag ov) wireVarint
+      tagInt = pfTagByte pseudo
   in encodeSingleE pseudo tagInt v
 
 
@@ -950,6 +986,7 @@ oneofSizeArm v ov =
         )
           { pfStringAdapter = ovStringAdapter ov
           , pfBytesAdapter = ovBytesAdapter ov
+          , pfDelimited = ovDelimited ov
           }
   in sizeSingleE pseudo v
 
@@ -964,10 +1001,7 @@ pfTagByte pf = case pfKind pf of
   -- branch ignores @pfTagByte@ entirely (it builds the tag itself
   -- via 'putTag').
   FKRepeated _ ModePacked -> tagByteFor (pfTag pf) wireLengthDelimited
-  _ -> case pfType pf of
-    PFScalar s -> tagByteFor (pfTag pf) (scalarWireType s)
-    PFSubmessage -> tagByteFor (pfTag pf) wireLengthDelimited
-    PFEnum -> tagByteFor (pfTag pf) wireVarint
+  _ -> tagByteFor (pfTag pf) (wireTypeOfField pf)
 
 
 {- | Build the encoder for one map key. Keys are always singular
@@ -1060,13 +1094,15 @@ defaultPredE sc v = case sc of
   SBool -> [|not $(varE v)|]
   SString -> [|T.null $(varE v)|]
   SBytes -> [|BS.null $(varE v)|]
-  SFloat -> [|($(varE v) :: Float) == 0|]
-  SDouble -> [|($(varE v) :: Double) == 0|]
+  SFloat -> [|PE.isDefaultFloat $(varE v)|]
+  SDouble -> [|PE.isDefaultDouble $(varE v)|]
   _ -> [|$(varE v) == 0|]
 
 
 encodeSingleE :: ProtoField -> Int -> Name -> Q Exp
 encodeSingleE pf tagInt v
+  | pfDelimited pf =
+      [|PE.encodeFieldGroup $(litE (integerL (fromIntegral (pfTag pf)))) $(varE v)|]
   -- Field numbers > 31 produce tag bytes > 255 (since
   -- @tag = (fn << 3) | wt@ — fn=32 with the smallest wire type
   -- already gives 256). The 'PA.archXxx' family bakes the tag
@@ -1429,6 +1465,8 @@ handles multi-byte varint tags correctly.
 -}
 sizeSingleE :: ProtoField -> Name -> Q Exp
 sizeSingleE pf v
+  | pfDelimited pf =
+      [|PE.fieldGroupSize $(litE (integerL (fromIntegral (pfTag pf)))) $(varE v)|]
   | tag1Byte = archSizeE
   | otherwise = slowSizeE
   where
@@ -1578,6 +1616,17 @@ scalarPackableType pf = case pfType pf of
   _ -> False
 
 
+packedFixedDecoderE :: ProtoField -> Maybe (Q Exp)
+packedFixedDecoderE pf = case pfType pf of
+  PFScalar SFixed32 -> Just [|PD.decodePackedFixed32|]
+  PFScalar SFixed64 -> Just [|PD.decodePackedFixed64|]
+  PFScalar SSFixed32 -> Just [|VU.map (fromIntegral :: Word32 -> Int32) <$> PD.decodePackedFixed32|]
+  PFScalar SSFixed64 -> Just [|VU.map (fromIntegral :: Word64 -> Int64) <$> PD.decodePackedFixed64|]
+  PFScalar SFloat -> Just [|PD.decodePackedFloat|]
+  PFScalar SDouble -> Just [|PD.decodePackedDouble|]
+  _ -> Nothing
+
+
 {- | Decode a packed length-delimited block of elements into the
 supplied accumulator using 'snocFn' to append each value.
 
@@ -1606,50 +1655,9 @@ decodePackedInto elemDec snocFn acc0 = do
 {-# INLINE decodePackedInto #-}
 
 
-{- | Decode a singular submessage field that may appear multiple
-times on the wire, merging into any previous occurrence.
-
-Proto3 spec: when the same singular submessage field appears
-multiple times, the parser must concatenate-and-decode rather
-than overwrite. By the proto3 catenation property
-(@concat(serialize(x), serialize(y)) == serialize(merge(x, y))@),
-we can implement this by re-encoding the previous value and
-prepending its bytes to the new occurrence's bytes.
-
-Lives here (rather than in 'Proto.Decode') because the
-@MessageEncode@ constraint would otherwise create a cyclic
-dependency between 'Proto.Encode' and 'Proto.Decode'.
--}
-decodeFieldMessageMerge
-  :: forall a
-   . (PE.MessageEncode a, PD.MessageDecode a)
-  => Maybe a
-  -> PD.Decoder (Maybe a)
-decodeFieldMessageMerge prev = do
-  newBytes <- PD.getLengthDelimited
-  let combined = case prev of
-        Nothing -> newBytes
-        Just old ->
-          -- Encode the previous value to bytes (no length prefix
-          -- — that's what 'buildMessage' produces) and concat
-          -- with the new bytes. Decoding the result gives the
-          -- spec-mandated merge.
-          let !oldBytes = BL.toStrict (BB.toLazyByteString (PE.buildMessage old))
-          in oldBytes <> newBytes
-  case PD.decodeMessage combined of
-    Right merged -> pure (Just merged)
-    Left e ->
-      -- Concatenation of two valid messages is always valid per
-      -- the proto3 catenation property. A decode failure here
-      -- means the new bytes themselves were malformed (truncated
-      -- submessage, etc.) — propagate the error rather than
-      -- silently drop the new occurrence.
-      PD.decodeFail (PD.SubMessageError e)
-{-# INLINE decodeFieldMessageMerge #-}
-
-
 decodeLoopBody
-  :: MessageMeta
+  :: [Int]
+  -> MessageMeta
   -> Name
   -- ^ Record constructor.
   -> Name
@@ -1660,7 +1668,7 @@ decodeLoopBody
   'mmUnknownFieldsSel' is set).
   -}
   -> Q Exp
-decodeLoopBody meta conName loopName pairs ufAccM = do
+decodeLoopBody verifiedStrings meta conName loopName pairs ufAccM = do
   fnVar <- newName "fn"
   wtVar <- newName "wt"
   let declaredAssigns = map (Data.Bifunctor.bimap pfSelector VarE) pairs
@@ -1672,25 +1680,31 @@ decodeLoopBody meta conName loopName pairs ufAccM = do
 
   fieldMatches <- concat <$> mapM (decodeArm meta loopName wtVar pairs ufAccM) pairs
   let allAccs = map snd pairs
+      capture ufAcc decoder = do
+        ufVar <- newName "uf"
+        [|
+          do
+            $(varP ufVar) <- $decoder
+            $(recurseLoopWithUFE loopName allAccs ufAcc (VarE ufVar))
+          |]
+      verifiedStringMatch field = do
+        let decoder = [|PD.captureVerifiedStringExtension $(litE (integerL (fromIntegral field)))|]
+        body <- case ufAccM of
+          Just ufAcc -> capture ufAcc decoder
+          Nothing -> [|$decoder >> $(recurseLoopE loopName allAccs ufAccM)|]
+        pure (wireMatch wtVar field wireLengthDelimited False body)
+  verifiedMatches <- traverse verifiedStringMatch verifiedStrings
   defaultBody <- case (mmUnknownFieldsSel meta, ufAccM) of
-    (Just _, Just ufAcc) -> do
-      ufVar <- newName "uf"
-      [|
-        do
-          -- 'withTagM' passes 'wt' as a raw 'Int'; 'captureUnknownField'
-          -- and 'skipField' both want a 'WireType'. 'toEnum' bridges
-          -- the two without allocating a 'Tag' record on the hot path.
-          $(varP ufVar) <- PD.captureUnknownField $(varE fnVar) (toEnum $(varE wtVar))
-          $(recurseLoopWithUFE loopName allAccs ufAcc (VarE ufVar))
-        |]
+    (Just _, Just ufAcc) ->
+      capture ufAcc [|PD.captureUnknownField $(varE fnVar) (toEnum $(varE wtVar))|]
     _ ->
       [|
         do
-          _ <- PD.skipField (toEnum $(varE wtVar))
+          PD.skipTaggedWireType $(varE fnVar) $(varE wtVar)
           $(recurseLoopE loopName allAccs ufAccM)
         |]
   let defaultMatch = Match WildP (NormalB defaultBody) []
-      dispatchE = CaseE (VarE fnVar) (fieldMatches ++ [defaultMatch])
+      dispatchE = CaseE (VarE fnVar) (fieldMatches ++ verifiedMatches ++ [defaultMatch])
 
   -- 'withTagM' is the CPS counterpart to 'getTagOrU' + Tag pattern
   -- match: it threads the field number and wire type into the
@@ -1723,37 +1737,29 @@ decodeArm
   -> Q [Match]
 decodeArm meta loopName wtVar allPairs ufAccM (pf, accForThis) = case pfKind pf of
   FKBare -> singletonArm pf $ \vName -> do
-    decoderE <- fieldDecoderE pf vName
     let recurse = updateAccsE loopName allPairs ufAccM (pfSelector pf) (VarE vName)
-    [|
-      do
-        $(varP vName) <- $(pure decoderE)
-        $(pure recurse)
-      |]
+    if pfSchemaEnum pf
+      then decodeSchemaEnumE (pfTag pf) loopName allPairs ufAccM vName recurse
+      else do
+        decoderE <- fieldDecoderE pf vName
+        [|
+          do
+            $(varP vName) <- $(pure decoderE)
+            $(pure recurse)
+          |]
   FKMaybe -> singletonArm pf $ \vName -> case pfType pf of
-    -- Submessage fields under @Maybe@ have a special wire-format
-    -- contract: the proto3 spec says "if the same singular
-    -- submessage field appears multiple times on the wire, the
-    -- parser must merge them" rather than overwrite. We honour
-    -- that by feeding the previous accumulator value into the
-    -- decoder, which re-encodes it and concatenates with the new
-    -- bytes (proto3 catenation property:
-    -- @concat(serialize(x), serialize(y)) == serialize(merge(x, y))@).
     PFSubmessage -> do
       let recurse =
-            updateAccsE
-              loopName
-              allPairs
-              ufAccM
-              (pfSelector pf)
-              (VarE vName)
+            updateAccsE loopName allPairs ufAccM (pfSelector pf) (AppE (ConE 'Just) (VarE vName))
+          decoder
+            | pfDelimited pf = [|PD.decodeFieldGroupMerge $(litE (integerL (fromIntegral (pfTag pf))))|]
+            | otherwise = [|PD.decodeFieldMessageMerge|]
       [|
         do
-          $(varP vName) <- decodeFieldMessageMerge $(varE accForThis)
+          $(varP vName) <- $decoder $(varE accForThis)
           $(pure recurse)
         |]
     _ -> do
-      decoderE <- fieldDecoderE pf vName
       let recurse =
             updateAccsE
               loopName
@@ -1761,11 +1767,15 @@ decodeArm meta loopName wtVar allPairs ufAccM (pf, accForThis) = case pfKind pf 
               ufAccM
               (pfSelector pf)
               (AppE (ConE 'Just) (VarE vName))
-      [|
-        do
-          $(varP vName) <- $(pure decoderE)
-          $(pure recurse)
-        |]
+      if pfSchemaEnum pf
+        then decodeSchemaEnumE (pfTag pf) loopName allPairs ufAccM vName recurse
+        else do
+          decoderE <- fieldDecoderE pf vName
+          [|
+            do
+              $(varP vName) <- $(pure decoderE)
+              $(pure recurse)
+            |]
   FKRepeated rep _mode -> do
     vName <- newName "v"
     payload <- scalarDecoderE pf
@@ -1773,6 +1783,10 @@ decodeArm meta loopName wtVar allPairs ufAccM (pf, accForThis) = case pfKind pf 
     let recurse = updateAccsE loopName allPairs ufAccM (pfSelector pf) snocE
         recurseAfterPack acc' =
           updateAccsE loopName allPairs ufAccM (pfSelector pf) (VarE acc')
+    unpacked <-
+      if pfSchemaEnum pf
+        then decodeSchemaEnumE (pfTag pf) loopName allPairs ufAccM vName recurse
+        else [|do $(varP vName) <- $(pure payload); $(pure recurse)|]
     body <-
       if scalarPackableType pf
         then do
@@ -1786,95 +1800,95 @@ decodeArm meta loopName wtVar allPairs ufAccM (pf, accForThis) = case pfKind pf 
           acc' <- newName "acc'"
           elemDec <- scalarDecoderE pf
           elemSnocE <- repeatedSnocFnE rep
+          let ordinaryPacked = case packedFixedDecoderE pf of
+                Just decoder ->
+                  [|
+                    do
+                      values <- $decoder
+                      let $(varP acc') = VU.foldl' $(pure elemSnocE) $(varE accForThis) values
+                      $(pure (recurseAfterPack acc'))
+                    |]
+                Nothing ->
+                  [|
+                    do
+                      $(varP acc') <- decodePackedInto $(pure elemDec) $(pure elemSnocE) $(varE accForThis)
+                      $(pure (recurseAfterPack acc'))
+                    |]
+          packed <-
+            if pfSchemaEnum pf
+              then do
+                values <- newName "values"
+                rest <- newName "unknown"
+                let fn = litE (integerL (fromIntegral (pfTag pf)))
+                    unknowns = maybe (listE []) varE ufAccM
+                    next = updateAccsE loopName allPairs (rest <$ ufAccM) (pfSelector pf) (VarE acc')
+                [|
+                  if PS.protoEnumIsOpen (Proxy :: Proxy $(pure (pfInnerTy pf)))
+                    then $ordinaryPacked
+                    else do
+                      PD.PackedProtoEnum $(varP values) $(varP rest) <- PD.decodePackedProtoEnum $fn $unknowns
+                      let $(varP acc') = V.foldl' $(pure elemSnocE) $(varE accForThis) $(varE values)
+                      $(pure next)
+                  |]
+              else ordinaryPacked
           -- 'wt' is now a raw 'Int' (from 'withTagM'), so dispatch on
           -- the numeric wire-type constant directly. 2 is
           -- 'PWire.WireLengthDelimited' (packed wire type per the
           -- proto spec).
           [|
             case $(varE wtVar) of
-              2 -> do
-                $(varP acc') <-
-                  decodePackedInto
-                    $(pure elemDec)
-                    $(pure elemSnocE)
-                    $(varE accForThis)
-                $(pure (recurseAfterPack acc'))
-              _ -> do
-                $(varP vName) <- $(pure payload)
-                $(pure recurse)
+              2 -> $(pure packed)
+              _ -> $(pure unpacked)
             |]
         else
           -- Non-packable element type (string, bytes, submessage):
           -- fall through to the original one-element-per-occurrence
           -- shape.
-          [|
-            do
-              $(varP vName) <- $(pure payload)
-              $(pure recurse)
-            |]
-    pure
-      [ Match
-          (LitP (IntegerL (fromIntegral (pfTag pf))))
-          (NormalB body)
-          []
-      ]
+          pure unpacked
+    pure [wireMatch wtVar (pfTag pf) (wireTypeOfField pf) (scalarPackableType pf) body]
   FKMap mks -> do
-    let lit = LitP (IntegerL (fromIntegral (pfTag pf)))
-    bsVar <- newName "bs"
+    let keyWireType = litE (integerL (fromIntegral (scalarWireType (scalarOfMapKey mks))))
+        valueWireType = litE (integerL (fromIntegral (protoFieldWireType (pfType pf))))
     kVar <- newName "k"
     vVar <- newName "v"
     keyDec <- mapKeyDecoderE mks
-    valDec <- scalarDecoderE pf
     keyZero <- mapKeyZeroE mks
     valZero <- mapValueZeroE pf
-    let insertE =
-          AppE
-            ( AppE
-                (AppE (VarE 'Map.insert) (VarE kVar))
-                (VarE vVar)
-            )
-            (VarE accForThis)
+    let insertE = AppE (AppE (AppE (VarE 'Map.insert) (VarE kVar)) (VarE vVar)) (VarE accForThis)
         recurse = updateAccsE loopName allPairs ufAccM (pfSelector pf) insertE
-        skipRecurse =
-          updateAccsE
-            loopName
-            allPairs
-            ufAccM
-            (pfSelector pf)
-            (VarE accForThis)
     body <-
-      [|
-        do
-          $(varP bsVar) <- PD.getLengthDelimited
-          case PD.runDecoder
-            ( PD.decodeMapEntry
-                $(pure keyDec)
-                $(pure valDec)
-                $(pure keyZero)
-                $(pure valZero)
-            )
-            $(varE bsVar) of
-            Left _ -> $(pure skipRecurse)
-            Right ($(varP kVar), $(varP vVar)) -> $(pure recurse)
-        |]
-    pure [Match lit (NormalB body) []]
+      if pfSchemaEnum pf
+        then do
+          let fn = litE (integerL (fromIntegral (pfTag pf)))
+          [|
+            PD.decodeProtoEnumMapField $fn $keyWireType $(pure keyDec) $(pure keyZero) $(pure valZero)
+              $(lamE [varP kVar, varP vVar] (pure recurse))
+              $(unknownContinuationE loopName allPairs ufAccM)
+            |]
+        else do
+          entry <- case pfType pf of
+            PFSubmessage -> [|PD.decodeMessageMapEntryTyped $keyWireType $(pure keyDec) $(pure keyZero) $(pure valZero)|]
+            _ -> [|PD.decodeMapEntryTyped $keyWireType $(pure keyDec) $valueWireType $(scalarDecoderE pf) $(pure keyZero) $(pure valZero)|]
+          [|
+            do
+              ($(varP kVar), $(varP vVar)) <- PD.decodeLengthDelimitedWith $(pure entry)
+              $(pure recurse)
+            |]
+    pure [wireMatch wtVar (pfTag pf) wireLengthDelimited False body]
   FKOneof variants ->
-    traverse (oneofDecodeArm loopName allPairs ufAccM (pfSelector pf)) variants
+    traverse (oneofDecodeArm loopName wtVar allPairs ufAccM (pfSelector pf)) variants
   where
     singletonArm thisPf mkBody = do
       vName <- newName "v"
       body <- mkBody vName
-      pure
-        [ Match
-            (LitP (IntegerL (fromIntegral (pfTag thisPf))))
-            (NormalB body)
-            []
-        ]
+      pure [wireMatch wtVar (pfTag thisPf) (wireTypeOfField thisPf) False body]
     _unused_meta = meta -- reserved for future per-arm decisions
 
 
 oneofDecodeArm
   :: Name
+  -> Name
+  -- ^ wire type
   -> [(ProtoField, Name)]
   -> Maybe Name
   -- ^ unknown-fields accumulator (when in scope)
@@ -1882,7 +1896,7 @@ oneofDecodeArm
   -- ^ parent field's selector
   -> OneofVariant
   -> Q Match
-oneofDecodeArm loopName allPairs ufAccM sel ov = case ovType ov of
+oneofDecodeArm loopName wtVar allPairs ufAccM sel ov = case ovType ov of
   -- Submessage variants in a oneof have the same merge semantics
   -- as singular submessage fields outside an oneof: when the same
   -- variant is encountered twice on the wire, the parser must
@@ -1907,39 +1921,64 @@ oneofDecodeArm loopName allPairs ufAccM sel ov = case ovType ov of
                 []
             , Match WildP (NormalB (ConE 'Nothing)) []
             ]
+        decode
+          | ovDelimited ov = [|PD.decodeFieldGroupMerge $(litE (integerL (fromIntegral (ovTag ov))))|]
+          | otherwise = [|PD.decodeFieldMessageMerge|]
+        wireType = if ovDelimited ov then wireStartGroup else wireLengthDelimited
     body <-
       [|
         do
-          mNew <- decodeFieldMessageMerge $(pure prevExtractE)
-          case mNew of
-            Just $(varP vName) -> $(pure recurse)
-            Nothing ->
-              -- 'decodeFieldMessageMerge' only returns
-              -- Nothing when its input bytes were empty
-              -- AND the previous accumulator was Nothing,
-              -- which can't happen here (the wire just
-              -- delivered a length-delimited block for
-              -- this variant, so newBytes is non-empty
-              -- at minimum).
-              PD.decodeFail
-                ( PD.CustomError
-                    "oneof submessage merge produced Nothing"
-                )
+          $(varP vName) <- $decode $(pure prevExtractE)
+          $(pure recurse)
         |]
-    pure (Match (LitP (IntegerL (fromIntegral (ovTag ov)))) (NormalB body) [])
+    pure (wireMatch wtVar (ovTag ov) wireType False body)
   _ -> do
     vName <- newName "v"
-    payload <- variantDecoderE ov
+    let legacyNullValue = ovInnerTy ov == ConT ''PGS.NullValue
+    payload <-
+      if legacyNullValue
+        then [|PD.decodeFieldNullValue $(varE wtVar)|]
+        else variantDecoderE ov
     let conApp = AppE (ConE (ovConstructor ov)) (VarE vName)
         newVal = AppE (ConE 'Just) conApp
         recurse = updateAccsE loopName allPairs ufAccM sel newVal
     body <-
-      [|
-        do
-          $(varP vName) <- $(pure payload)
-          $(pure recurse)
-        |]
-    pure (Match (LitP (IntegerL (fromIntegral (ovTag ov)))) (NormalB body) [])
+      if ovSchemaEnum ov && not legacyNullValue
+        then decodeSchemaEnumE (ovTag ov) loopName allPairs ufAccM vName recurse
+        else [|do $(varP vName) <- $(pure payload); $(pure recurse)|]
+    pure (wireMatch wtVar (ovTag ov) (protoFieldWireType (ovType ov)) legacyNullValue body)
+
+
+decodeSchemaEnumE :: Int -> Name -> [(ProtoField, Name)] -> Maybe Name -> Name -> Exp -> Q Exp
+decodeSchemaEnumE field loopName pairs unknown value known =
+  [|
+    PD.decodeProtoEnum $(litE (integerL (fromIntegral field)))
+      $(lamE [varP value] (pure known))
+      $(unknownContinuationE loopName pairs unknown)
+    |]
+
+
+unknownContinuationE :: Name -> [(ProtoField, Name)] -> Maybe Name -> Q Exp
+unknownContinuationE loopName pairs unknown = do
+  uf <- newName "uf"
+  let accs = map snd pairs
+  case unknown of
+    Nothing -> lamE [wildP] (recurseLoopE loopName accs Nothing)
+    Just acc -> lamE [varP uf] (recurseLoopWithUFE loopName accs acc (VarE uf))
+
+
+-- A failed guard falls through to the unknown-field arm. Packable repeats
+-- and the legacy NullValue encoding also accept length-delimited input.
+wireMatch :: Name -> Int -> Int -> Bool -> Exp -> Match
+wireMatch wt field expected allowDelimited body =
+  let isWire code =
+        InfixE (Just (VarE wt)) (VarE '(==)) (Just (LitE (IntegerL (fromIntegral code))))
+      expectedWire = isWire expected
+      accepted =
+        if allowDelimited
+          then InfixE (Just expectedWire) (VarE '(||)) (Just (isWire wireLengthDelimited))
+          else expectedWire
+  in Match (LitP (IntegerL (fromIntegral field))) (GuardedB [(NormalG accepted, body)]) []
 
 
 {- | Look up the accumulator name for a given record selector
@@ -2005,7 +2044,9 @@ scalarDecoderE pf = case pfType pf of
   PFScalar SDouble -> [|PD.decodeFieldDouble|]
   PFScalar SString -> stringDecoderE (pfStringAdapter pf)
   PFScalar SBytes -> bytesDecoderE (pfBytesAdapter pf)
-  PFSubmessage -> [|PD.decodeFieldMessage|]
+  PFSubmessage
+    | pfDelimited pf -> [|PD.decodeFieldGroup $(litE (integerL (fromIntegral (pfTag pf))))|]
+    | otherwise -> [|PD.decodeFieldMessage|]
   PFEnum -> [|PD.decodeFieldEnum|]
 
 

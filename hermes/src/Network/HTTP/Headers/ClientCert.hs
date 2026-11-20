@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9440 §2.2 @Client-Cert@ — request header inserted by a
 TLS-terminating reverse proxy to convey the end-entity
@@ -30,13 +28,15 @@ See also: "Network.HTTP.Headers.ClientCertChain", "Network.HTTP.Headers.CertNotA
 -}
 module Network.HTTP.Headers.ClientCert (
   ClientCert (..),
+  ClientCertificateHeaders (..),
+  lookupClientCertificateHeaders,
   clientCertParser,
   renderClientCert,
 ) where
 
 import Data.ByteString (ByteString)
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
+import Network.HTTP.Headers.ClientCertChain (ClientCertChain (..))
 import Network.HTTP.Headers.HeaderFieldName (hClientCert)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -48,17 +48,35 @@ newtype ClientCert = ClientCert {clientCertBytes :: ByteString}
   deriving stock (Eq, Show)
 
 
+-- | The end-entity certificate and its optional accompanying chain.
+data ClientCertificateHeaders = ClientCertificateHeaders
+  { endEntityCertificate :: !ClientCert
+  , accompanyingCertificateChain :: !(Maybe ClientCertChain)
+  }
+  deriving stock (Eq, Show)
+
+
+-- | Read both fields and check the relationships defined in RFC 9440 section 2.3.
+lookupClientCertificateHeaders :: HeaderMap -> Either String (Maybe ClientCertificateHeaders)
+lookupClientCertificateHeaders fields = do
+  leaf <- lookupHeader fields
+  chain <- lookupHeader fields
+  case (leaf, chain) of
+    (Nothing, Nothing) -> Right Nothing
+    (Nothing, Just _) -> Left "Client-Cert-Chain requires Client-Cert"
+    (Just certificate, Just (ClientCertChain ancestors))
+      | clientCertBytes certificate `elem` ancestors ->
+          Left "Client-Cert-Chain contains the end-entity certificate"
+    (Just certificate, _) -> Right (Just (ClientCertificateHeaders certificate chain))
+
+
 instance KnownHeader ClientCert where
   type ParseFailure ClientCert = String
   type Cardinality ClientCert = 'ZeroOrOne
   type Direction ClientCert = 'Request
 
 
-  parseFromHeaders _ headers = case runParser clientCertParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Client-Cert header: " <> show rest
-    Fail -> Left "Failed to parse Client-Cert header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Client-Cert" clientCertParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderClientCert
@@ -68,8 +86,8 @@ instance KnownHeader ClientCert where
 
 
 clientCertParser :: ParserT st String ClientCert
-clientCertParser = ClientCert <$> (rfc8941Binary <* $(char ':'))
+clientCertParser = ClientCert <$> rfc8941Binary
 
 
 renderClientCert :: ClientCert -> M.Builder
-renderClientCert (ClientCert bs) = R.rfc8941Binary bs <> M.char7 ':'
+renderClientCert (ClientCert bs) = R.rfc8941Binary bs

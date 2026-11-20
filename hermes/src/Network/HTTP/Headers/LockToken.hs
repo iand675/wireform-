@@ -1,8 +1,6 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
-RFC 4918 §10.5 @Lock-Token@ request header — identifies, via its
-lock token, the lock to be removed by an @UNLOCK@ request.
+RFC 4918 §10.5 @Lock-Token@ header — identifies the lock to be removed
+by an @UNLOCK@ request or the lock created by a successful @LOCK@ response.
 
 == Grammar
 
@@ -21,8 +19,8 @@ module Network.HTTP.Headers.LockToken (
   renderLockToken,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (codedURL)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hLockToken)
 import qualified Network.HTTP.Headers.Mason as M
@@ -38,14 +36,10 @@ newtype LockToken = LockToken {lockTokenUri :: ST.ShortText}
 instance KnownHeader LockToken where
   type ParseFailure LockToken = String
   type Cardinality LockToken = 'ZeroOrOne
-  type Direction LockToken = 'Request
+  type Direction LockToken = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser lockTokenParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Lock-Token header: " <> show rest
-    Fail -> Left "Failed to parse Lock-Token header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Lock-Token" lockTokenParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderLockToken
@@ -55,12 +49,7 @@ instance KnownHeader LockToken where
 
 
 lockTokenParser :: ParserT st String LockToken
-lockTokenParser = do
-  ows
-  $(char '<')
-  uri <- shortASCIIFromParser_ (skipSome (satisfyAscii (/= '>')))
-  $(char '>')
-  pure (LockToken uri)
+lockTokenParser = LockToken <$> codedURL
 
 
 renderLockToken :: LockToken -> M.Builder

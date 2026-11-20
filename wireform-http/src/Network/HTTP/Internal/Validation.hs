@@ -52,6 +52,9 @@ module Network.HTTP.Internal.Validation (
   http2ForbiddenHeaders,
   isHttp2Forbidden,
   validateHttp2Headers,
+
+  -- * Byte-dependent metadata
+  isBodyDigestField,
 ) where
 
 import Control.Exception (Exception)
@@ -61,6 +64,7 @@ import Data.CaseInsensitive (CI)
 import Data.CaseInsensitive qualified as CI
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
+import Data.List (foldl')
 import Data.Word (Word8)
 
 
@@ -74,6 +78,17 @@ type HValue = ByteString
 
 
 type HRow = (HName, HValue)
+
+
+-- | A digest of the content or representation bytes, including legacy fields.
+isBodyDigestField :: HName -> Bool
+isBodyDigestField name = case CI.foldedCase name of
+  "content-digest" -> True
+  "repr-digest" -> True
+  "content-md5" -> True
+  "digest" -> True
+  _ -> False
+{-# INLINE isBodyDigestField #-}
 
 
 -- | Errors raised by the validating smart constructors.
@@ -202,23 +217,19 @@ field of the same message (RFC 9110 \u00a77.6.1: \"Connection enumerates
 the field names of headers that are scoped to this connection only\").
 -}
 stripHopByHop :: [HRow] -> [HRow]
-stripHopByHop hdrs =
-  let listed = case lookupRaw connection hdrs of
-        Nothing -> HS.empty
-        Just v ->
-          HS.fromList
-            [ CI.mk stripped
-            | tok <- BS.split 0x2C v
-            , let stripped = BS.dropWhile isWS (BS.dropWhileEnd isWS tok)
-            , not (BS.null stripped)
-            ]
-      banned = HS.union hopByHopHeaders listed
-  in [hv | hv@(n, _) <- hdrs, not (HS.member n banned)]
+stripHopByHop hdrs = filter (not . (`HS.member` banned) . fst) hdrs
   where
+    banned = foldl' addConnectionOptions hopByHopHeaders hdrs
+    addConnectionOptions names (name, value)
+      | name == connection = foldl' addOption names (BS.split 0x2C value)
+      | otherwise = names
+    addOption names option
+      | BS.null stripped = names
+      | otherwise = HS.insert (CI.mk stripped) names
+      where
+        stripped = BS.dropWhile isWS (BS.dropWhileEnd isWS option)
     isWS w = w == 0x20 || w == 0x09
     connection = CI.mk "Connection"
-    lookupRaw _ [] = Nothing
-    lookupRaw k ((n, v) : r) = if k == n then Just v else lookupRaw k r
 
 
 -- ---------------------------------------------------------------------------

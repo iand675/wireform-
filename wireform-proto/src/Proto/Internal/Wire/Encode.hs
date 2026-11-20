@@ -64,7 +64,7 @@ import Data.Text.Array qualified as TA
 import Data.Text.Foreign qualified as TF
 import Data.Text.Internal qualified as TI
 import Data.Word (Word32, Word64)
-import GHC.Exts (ByteArray#, Int (..), Int#, copyByteArrayToAddr#, plusAddr#)
+import GHC.Exts (ByteArray#, Int (..), Int#, copyByteArrayToAddr#, isTrue#, minusAddr#, plusAddr#, (+#), (-#), (<=#))
 import Proto.Internal.Wire (WireType, fieldTag)
 import Wireform.Builder (Builder)
 import Wireform.Builder qualified as B
@@ -203,19 +203,28 @@ fast-builder's current buffer chunk.
 
 This avoids the intermediate pinned 'BS.ByteString' allocation that
 @'B.byteStringCopy' . 'TE.encodeUtf8'@ would force. We use
-fast-builder's 'ensureBytes' to guarantee buffer space, then
-construct a raw 'Builder' that 'copyByteArrayToAddr#' 's the slice
-from the text's unpinned backing store into the builder's pinned
-buffer. Net cost is one buffer write, no heap allocation.
+a raw 'Builder' to copy each available chunk from the text's
+unpinned backing store. The fitting fast path performs one copy with
+no heap allocation; the overflow path advances the sink one chunk
+at a time, including rings smaller than the complete text payload.
 -}
 byteArraySliceBuilder :: ByteArray# -> Int# -> Int# -> Builder
 byteArraySliceBuilder arr# off# len# =
-  FBI.ensureBytes (I# len#)
-    <> FBI.Builder
-      ( \_ (# cur#, end#, s# #) ->
-          case copyByteArrayToAddr# arr# off# cur# len# s# of
-            s'# -> (# plusAddr# cur# len#, end#, s'# #)
-      )
+  FBI.Builder $ \sink (# cur#, end#, s# #) ->
+    let available# = minusAddr# end# cur#
+    in if isTrue# (len# <=# available#)
+         then case copyByteArrayToAddr# arr# off# cur# len# s# of
+           s'# -> (# plusAddr# cur# len#, end#, s'# #)
+         else
+           -- A ring cannot grant a contiguous reservation larger than itself.
+           -- Fill the current chunk, request one byte to advance/flush the
+           -- sink, and continue without an intermediate pinned ByteString.
+           case copyByteArrayToAddr# arr# off# cur# available# s# of
+             s'# ->
+               FBI.unBuilder
+                 (FBI.ensureBytes 1 <> byteArraySliceBuilder arr# (off# +# available#) (len# -# available#))
+                 sink
+                 (# end#, end#, s'# #)
 {-# INLINE byteArraySliceBuilder #-}
 
 

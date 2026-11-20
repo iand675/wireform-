@@ -1,15 +1,13 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Access-Control-Max-Age@ (WHATWG Fetch / W3C CORS) response header indicating
 how many seconds (delta-seconds) the results of a preflight request — the allowed
-methods and headers — may be cached by the browser. A negative value (commonly
-@-1@) signals that the result must not be cached.
+methods and headers — may be cached by the browser. A value of @0@ disables
+preflight caching.
 
 == Grammar
 
 @
-Access-Control-Max-Age = [ "-" ] 1*DIGIT
+Access-Control-Max-Age = delta-seconds
 @
 
 Spec: <https://fetch.spec.whatwg.org/#http-access-control-max-age>
@@ -22,14 +20,15 @@ module Network.HTTP.Headers.AccessControlMaxAge (
   renderAccessControlMaxAge,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAccessControlMaxAge)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 
 
--- | Value of the @Access-Control-Max-Age@ header, in seconds.
+-- | Non-negative age in seconds. Rendering clamps a negative input to zero.
 newtype AccessControlMaxAge = AccessControlMaxAge {maxAgeSeconds :: Int}
   deriving stock (Eq, Show)
 
@@ -40,11 +39,9 @@ instance KnownHeader AccessControlMaxAge where
   type Direction AccessControlMaxAge = 'Response
 
 
-  parseFromHeaders _ headers = case runParser accessControlMaxAgeParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Access-Control-Max-Age header: " <> show rest
-    Fail -> Left "Failed to parse Access-Control-Max-Age header"
-    Err e -> Left e
+  parseFromHeaders _ fields@(wire :| []) =
+    withShortDecimal wire (Right . AccessControlMaxAge) (parseMaxAgeField fields)
+  parseFromHeaders _ _ = Left "Multiple Access-Control-Max-Age field lines"
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccessControlMaxAge
@@ -54,11 +51,13 @@ instance KnownHeader AccessControlMaxAge where
 
 
 accessControlMaxAgeParser :: ParserT st String AccessControlMaxAge
-accessControlMaxAgeParser = do
-  negative <- optional $(char '-')
-  n <- anyAsciiDecimalInt
-  pure $ AccessControlMaxAge (maybe n (const (negate n)) negative)
+accessControlMaxAgeParser =
+  AccessControlMaxAge . fromIntegral <$> saturatingDeltaSeconds (fromIntegral (maxBound :: Int))
+
+
+parseMaxAgeField :: NonEmpty ByteString -> Either String AccessControlMaxAge
+parseMaxAgeField = parseSingleFieldLine "Access-Control-Max-Age" accessControlMaxAgeParser
 
 
 renderAccessControlMaxAge :: AccessControlMaxAge -> M.Builder
-renderAccessControlMaxAge (AccessControlMaxAge n) = M.intDec n
+renderAccessControlMaxAge (AccessControlMaxAge n) = M.intDec (max 0 n)

@@ -3,9 +3,6 @@
 // proto2 features 'loadProto' doesn't yet support and that the
 // conformance suite doesn't strictly require:
 //
-//   * 'group' declarations and group-typed fields (legacy
-//     proto2-only wire format using START_GROUP / END_GROUP).
-//     Tests targeting them stay 'skipped'.
 //   * 'message_set_wire_format' (proto1-era extension layout).
 //
 // The remaining surface (singular optional/required scalars,
@@ -189,6 +186,16 @@ message TestAllTypesProto2 {
 
   // Reserved for unknown fields test.
   reserved 1000 to 9999;
+
+  optional group Data = 201 {
+    optional int32 group_int32 = 202;
+    optional uint32 group_uint32 = 203;
+  }
+
+  optional group MultiWordGroupField = 204 {
+    optional int32 group_int32 = 205;
+    optional uint32 group_uint32 = 206;
+  }
 }
 
 message ForeignMessageProto2 {
@@ -203,6 +210,10 @@ enum ForeignEnumProto2 {
 
 extend TestAllTypesProto2 {
   optional int32 extension_int32 = 120;
+  optional group GroupField = 121 {
+    optional int32 group_int32 = 122;
+    optional uint32 group_uint32 = 123;
+  }
 }
 
 message UnknownToTestAllTypes {

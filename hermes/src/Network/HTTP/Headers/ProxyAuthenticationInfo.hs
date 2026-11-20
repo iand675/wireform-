@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Proxy-Authentication-Info@ — the proxy-side analogue of
 @Authentication-Info@: a response header in which an intermediary proxy
@@ -32,16 +30,12 @@ module Network.HTTP.Headers.ProxyAuthenticationInfo (
   CredentialParam (..),
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.ByteString as B
-import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Authorization (CredentialParam (..))
+import Network.HTTP.Headers.Authorization (CredentialParam (..), authParamParser, renderAuthParam)
 import Network.HTTP.Headers.HeaderFieldName (hProxyAuthenticationInfo)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import qualified Network.HTTP.Headers.Rendering.Util as R
 
 
 -- ---------------------------------------------------------------------------
@@ -63,18 +57,7 @@ instance KnownHeader ProxyAuthenticationInfo where
   type Direction ProxyAuthenticationInfo = 'Response
 
 
-  parseFromHeaders _ headers = do
-    pss <- traverse parseOne (NE.toList headers)
-    pure (ProxyAuthenticationInfo (concat pss))
-    where
-      parseOne hdr = case runParser proxyAuthenticationInfoParser hdr of
-        OK (ProxyAuthenticationInfo ps) leftover
-          | B.null (dropOws leftover) -> Right ps
-          | otherwise ->
-              Left ("Unconsumed input after parsing Proxy-Authentication-Info: " <> show leftover)
-        Fail -> Left "Failed to parse Proxy-Authentication-Info header"
-        Err err -> Left err
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = fmap ProxyAuthenticationInfo . parseListFieldLines "Proxy-Authentication-Info" (httpList authParamParser)
 
 
   renderToHeaders _ pai = [M.toStrictByteString (renderProxyAuthenticationInfo pai)]
@@ -91,24 +74,7 @@ instance KnownHeader ProxyAuthenticationInfo where
 @auth-param@ list.
 -}
 proxyAuthenticationInfoParser :: ParserT st String ProxyAuthenticationInfo
-proxyAuthenticationInfoParser = do
-  ows
-  ps <- authParamParser `sepBy` (ows *> $(char ',') *> ows)
-  ows
-  pure (ProxyAuthenticationInfo ps)
-
-
--- | @token BWS "=" BWS ( token / quoted-string )@.
-authParamParser :: ParserT st String (ShortText, CredentialParam)
-authParamParser = do
-  key <- rfc9110Token
-  bws
-  $(char '=')
-  bws
-  val <-
-    (CredentialParamString <$> rfc8941String)
-      <|> (CredentialParamToken <$> rfc9110Token)
-  pure (key, val)
+proxyAuthenticationInfoParser = ProxyAuthenticationInfo <$> httpList authParamParser
 
 
 -- ---------------------------------------------------------------------------
@@ -117,11 +83,4 @@ authParamParser = do
 
 renderProxyAuthenticationInfo :: ProxyAuthenticationInfo -> M.Builder
 renderProxyAuthenticationInfo (ProxyAuthenticationInfo ps) =
-  M.intersperse ", " (map renderParam ps)
-
-
-renderParam :: (ShortText, CredentialParam) -> M.Builder
-renderParam (k, v) =
-  R.shortText k <> M.char7 '=' <> case v of
-    CredentialParamToken t -> R.shortText t
-    CredentialParamString s -> R.rfc8941String s
+  M.intersperse ", " (map renderAuthParam ps)

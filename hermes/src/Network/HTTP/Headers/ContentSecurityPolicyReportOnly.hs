@@ -1,46 +1,50 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 {- |
-W3C Content Security Policy Level 3 @Content-Security-Policy-Report-Only@ —
-identical in syntax to 'Network.HTTP.Headers.ContentSecurityPolicy.ContentSecurityPolicy',
-but the user agent only /monitors/ the policy and reports violations
-rather than enforcing it.
+@Content-Security-Policy-Report-Only@ carries an ordered list of independent
+policies for reporting. It uses the same field grammar as
+"Network.HTTP.Headers.ContentSecurityPolicy".
 
-== Grammar
-
-Identical to @Content-Security-Policy@: a @\";\"@-separated
-@directive-set@ where each @directive@ is a @directive-name@ followed
-by zero or more whitespace-separated values. The directive grammar
-(parser and renderer) is shared with
-'Network.HTTP.Headers.ContentSecurityPolicy'; directive order and raw
-values are preserved.
-
-Spec: <https://www.w3.org/TR/CSP3/#cspro-header>
-
-See also: "Network.HTTP.Headers.ContentSecurityPolicy", "Network.HTTP.Headers.ReportingEndpoints", "Network.HTTP.Headers.NEL", "Network.HTTP.Headers.PermissionsPolicy".
+<https://www.w3.org/TR/CSP3/#cspro-header Content Security Policy Level 3>
 -}
 module Network.HTTP.Headers.ContentSecurityPolicyReportOnly (
-  ContentSecurityPolicyReportOnly (..),
+  ContentSecurityPolicyReportOnly (ContentSecurityPolicyReportOnly, csproDirectives, ContentSecurityPolicyReportOnlyList, csproPolicies),
   contentSecurityPolicyReportOnlyParser,
   renderContentSecurityPolicyReportOnly,
 ) where
 
-import qualified Data.ByteString as B
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.ContentSecurityPolicy (
+  CSPPolicy (..),
   Directive,
-  directiveSetParser,
-  renderDirectiveSet,
+  parsePolicyFieldLines,
+  policyListParser,
+  renderPolicyList,
  )
 import Network.HTTP.Headers.HeaderFieldName (hContentSecurityPolicyReportOnly)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 
 
--- | A report-only serialized policy: an ordered list of directives.
-newtype ContentSecurityPolicyReportOnly = ContentSecurityPolicyReportOnly
-  { csproDirectives :: [Directive]
+newtype ContentSecurityPolicyReportOnly = ContentSecurityPolicyReportOnlyList
+  { csproPolicies :: NonEmpty CSPPolicy
   }
   deriving stock (Eq, Show)
+
+
+{- | Construct one report-only policy or read its first policy's directives.
+Use 'csproPolicies' to inspect all policies.
+-}
+pattern ContentSecurityPolicyReportOnly :: [Directive] -> ContentSecurityPolicyReportOnly
+pattern ContentSecurityPolicyReportOnly {csproDirectives} <- (policyDirectives . NE.head . csproPolicies -> csproDirectives)
+  where
+    ContentSecurityPolicyReportOnly directives = ContentSecurityPolicyReportOnlyList (CSPPolicy directives :| [])
+
+
+{-# COMPLETE ContentSecurityPolicyReportOnly #-}
 
 
 instance KnownHeader ContentSecurityPolicyReportOnly where
@@ -49,15 +53,8 @@ instance KnownHeader ContentSecurityPolicyReportOnly where
   type Direction ContentSecurityPolicyReportOnly = 'Response
 
 
-  parseFromHeaders _ headers = case runParser contentSecurityPolicyReportOnlyParser (NE.head headers) of
-    OK cspro leftover
-      | B.null (dropOws leftover) -> Right cspro
-      | otherwise ->
-          Left ("Unconsumed input after parsing Content-Security-Policy-Report-Only: " <> show leftover)
-    Fail -> Left "Failed to parse Content-Security-Policy-Report-Only header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ =
+    fmap ContentSecurityPolicyReportOnlyList . parsePolicyFieldLines "Content-Security-Policy-Report-Only"
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentSecurityPolicyReportOnly
@@ -66,11 +63,9 @@ instance KnownHeader ContentSecurityPolicyReportOnly where
   headerName _ = hContentSecurityPolicyReportOnly
 
 
--- | Parse an entire @Content-Security-Policy-Report-Only@ value.
 contentSecurityPolicyReportOnlyParser :: ParserT st String ContentSecurityPolicyReportOnly
-contentSecurityPolicyReportOnlyParser = ContentSecurityPolicyReportOnly <$> directiveSetParser
+contentSecurityPolicyReportOnlyParser = ContentSecurityPolicyReportOnlyList <$> policyListParser
 
 
--- | Render an entire @Content-Security-Policy-Report-Only@ value.
 renderContentSecurityPolicyReportOnly :: ContentSecurityPolicyReportOnly -> M.Builder
-renderContentSecurityPolicyReportOnly = renderDirectiveSet . csproDirectives
+renderContentSecurityPolicyReportOnly = renderPolicyList . csproPolicies

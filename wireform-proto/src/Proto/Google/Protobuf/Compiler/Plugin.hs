@@ -21,6 +21,7 @@ module Proto.Google.Protobuf.Compiler.Plugin
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Int (Int32)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector as V
@@ -65,17 +66,21 @@ data CodeGeneratorResponse = CodeGeneratorResponse
   { cgrsError   :: !Text
   , cgrsFile    :: !(V.Vector CodeGeneratorResponseFile)
   , cgrsSupportedFeatures :: !Int
+  , cgrsMinimumEdition :: !Int32
+  , cgrsMaximumEdition :: !Int32
   } deriving stock (Show, Eq, Generic)
     deriving anyclass NFData
 
 defaultCodeGeneratorResponse :: CodeGeneratorResponse
-defaultCodeGeneratorResponse = CodeGeneratorResponse "" V.empty 0
+defaultCodeGeneratorResponse = CodeGeneratorResponse "" V.empty 0 0 0
 
 instance MessageEncode CodeGeneratorResponse where
   buildMessage cgr =
     (if cgrsError cgr == "" then mempty else encodeFieldString 1 (cgrsError cgr)) <>
     (if cgrsSupportedFeatures cgr == 0 then mempty
      else encodeFieldVarint 2 (fromIntegral (cgrsSupportedFeatures cgr))) <>
+    (if cgrsMinimumEdition cgr == 0 then mempty else encodeFieldVarint 3 (fromIntegral (cgrsMinimumEdition cgr))) <>
+    (if cgrsMaximumEdition cgr == 0 then mempty else encodeFieldVarint 4 (fromIntegral (cgrsMaximumEdition cgr))) <>
     V.foldl' (\a f -> a <> encodeFieldMessage 15 f) mempty (cgrsFile cgr)
 
 instance MessageDecode CodeGeneratorResponse where
@@ -87,6 +92,8 @@ instance MessageDecode CodeGeneratorResponse where
           UNothing -> pure r
           UJust (Tag 1 _)  -> do v <- decodeFieldString; loop r { cgrsError = v }
           UJust (Tag 2 _)  -> do v <- getVarint; loop r { cgrsSupportedFeatures = fromIntegral v }
+          UJust (Tag 3 _)  -> do v <- getVarint; loop r { cgrsMinimumEdition = fromIntegral v }
+          UJust (Tag 4 _)  -> do v <- getVarint; loop r { cgrsMaximumEdition = fromIntegral v }
           UJust (Tag 15 _) -> do v <- decodeFieldMessage; loop r { cgrsFile = V.snoc (cgrsFile r) v }
           UJust (Tag _ wt) -> skipField wt >> loop r
 

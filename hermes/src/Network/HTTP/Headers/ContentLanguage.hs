@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9110 §8.5 @Content-Language@ — representation metadata describing the
 natural language(s) of the intended audience for the enclosed representation.
@@ -11,10 +9,8 @@ Content-Language = #language-tag
 language-tag     = \<Language-Tag, see [RFC5646], Section 2.1\>
 @
 
-A @language-tag@ (RFC 5646) is a sequence of hyphen-separated subtags, each of
-which is an alphanumeric token — so every well-formed tag is also an RFC 9110
-@token@. We surface the list of tags, preserving their on-the-wire casing
-(language tags are case-insensitive but conventionally cased, e.g. @en-US@).
+The codec checks well-formed RFC 5646 tags, including their subtag order,
+and preserves their wire spelling. Registry membership is application policy.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-8.5>
 
@@ -23,15 +19,15 @@ See also: "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.ContentEncod
 module Network.HTTP.Headers.ContentLanguage (
   ContentLanguage (..),
   LanguageTag (..),
+  contentLanguageTagList,
   contentLanguageParser,
   renderContentLanguage,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
-import qualified Data.ByteString as B
-import Data.Foldable1 (fold1)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Network.HTTP.Grammar.LanguageTag (languageTagBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentLanguage)
 import qualified Network.HTTP.Headers.Mason as M
@@ -44,10 +40,17 @@ newtype LanguageTag = LanguageTag {unLanguageTag :: ST.ShortText}
   deriving stock (Eq, Show)
 
 
--- | A non-empty, comma-separated list of language tags.
-newtype ContentLanguage = ContentLanguage {contentLanguageTags :: NE.NonEmpty LanguageTag}
+-- | A comma-separated list of language tags.
+data ContentLanguage
+  = ContentLanguage {contentLanguageTags :: NE.NonEmpty LanguageTag}
+  | ContentLanguageEmpty
   deriving stock (Eq, Show)
-  deriving newtype (Semigroup)
+
+
+instance Semigroup ContentLanguage where
+  ContentLanguageEmpty <> tags = tags
+  tags <> ContentLanguageEmpty = tags
+  ContentLanguage left <> ContentLanguage right = ContentLanguage (left <> right)
 
 
 instance KnownHeader ContentLanguage where
@@ -56,9 +59,7 @@ instance KnownHeader ContentLanguage where
   type Direction ContentLanguage = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = do
-    res <- traverse runContentLanguageParser headers
-    pure (fold1 res)
+  parseFromHeaders _ = fmap fromTags . parseListFieldLines "Content-Language" tagList
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderContentLanguage
@@ -67,21 +68,24 @@ instance KnownHeader ContentLanguage where
   headerName _ = hContentLanguage
 
 
-runContentLanguageParser :: B.ByteString -> Either String ContentLanguage
-runContentLanguageParser bs = case runParser contentLanguageParser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left ("Unconsumed input after parsing Content-Language header: " <> show rest)
-  Fail -> Left "Failed to parse Content-Language header"
-  Err e -> Left e
-
-
 contentLanguageParser :: ParserT st String ContentLanguage
-contentLanguageParser =
-  ContentLanguage <$> (languageTag `sepBy1` (ows *> $(char ',') *> ows))
-  where
-    languageTag = LanguageTag <$> rfc9110Token
+contentLanguageParser = fromTags <$> tagList
+
+
+tagList :: ParserT st String [LanguageTag]
+tagList = httpList (LanguageTag . STU.fromByteStringUnsafe <$> languageTagBytes)
+
+
+fromTags :: [LanguageTag] -> ContentLanguage
+fromTags = maybe ContentLanguageEmpty ContentLanguage . NE.nonEmpty
+
+
+-- | Return the tags of an empty or populated field.
+contentLanguageTagList :: ContentLanguage -> [LanguageTag]
+contentLanguageTagList ContentLanguageEmpty = []
+contentLanguageTagList (ContentLanguage tags) = NE.toList tags
 
 
 renderContentLanguage :: ContentLanguage -> M.Builder
-renderContentLanguage =
-  sepByCommas1 . fmap (shortText . unLanguageTag) . contentLanguageTags
+renderContentLanguage ContentLanguageEmpty = mempty
+renderContentLanguage (ContentLanguage tags) = sepByCommas1 (fmap (shortText . unLanguageTag) tags)

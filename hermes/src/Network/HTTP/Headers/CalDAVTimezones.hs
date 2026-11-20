@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 7809 §7.1 @CalDAV-Timezones@ — a request header by which a CalDAV client
 tells the server whether to include time-zone (@VTIMEZONE@) data in the
@@ -25,7 +23,6 @@ module Network.HTTP.Headers.CalDAVTimezones (
   renderCalDAVTimezones,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hCalDAVTimezones)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,11 +40,7 @@ instance KnownHeader CalDAVTimezones where
   type Direction CalDAVTimezones = 'Request
 
 
-  parseFromHeaders _ headers = case runParser calDAVTimezonesParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing CalDAV-Timezones header: " <> show rest
-    Fail -> Left "Failed to parse CalDAV-Timezones header"
-    Err e -> Left e
+  parseFromHeaders _ = parseTFFieldLine "CalDAV-Timezones" CalDAVTimezones
 
 
   renderToHeaders _ = M.toStrictByteString . renderCalDAVTimezones
@@ -57,9 +50,8 @@ instance KnownHeader CalDAVTimezones where
 
 
 calDAVTimezonesParser :: ParserT st String CalDAVTimezones
-calDAVTimezonesParser =
-  CalDAVTimezones <$> ((True <$ $(char 'T')) <|> (False <$ $(char 'F')))
+calDAVTimezonesParser = CalDAVTimezones <$> tfFlag
 
 
 renderCalDAVTimezones :: CalDAVTimezones -> M.Builder
-renderCalDAVTimezones (CalDAVTimezones b) = M.char7 (if b then 'T' else 'F')
+renderCalDAVTimezones (CalDAVTimezones b) = if b then "T" else "F"

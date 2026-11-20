@@ -1,61 +1,62 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
-@Surrogate-Capability@ — Edge Architecture (Surrogate/1.0) request header by
-which a surrogate (edge cache \/ CDN node) advertises to the origin server the
-processing capabilities it offers.
+@Surrogate-Capability@ advertises the processing capabilities of each
+surrogate in an HTTP request chain. Device tokens are unique across the
+field, and entries and capability tokens retain their wire order.
 
-== Grammar (Edge Architecture Specification §2.1)
+A capability has a case-sensitive name and an optional slash-delimited
+version. Each device's nonempty set is enclosed in double quotes.
 
-@
-Surrogate-Capability = 1#capability
-capability           = device-token \"=\" DQUOTE capability-set DQUOTE
-device-token         = token
-capability-set       = capability *( SP capability )      ; opaque, kept raw
-@
-
-Each entry pairs a @device-token@ (a unique surrogate identifier) with a
-quoted capability set such as @\"Surrogate\/1.0 ESI\/1.0\"@.  The capability
-set is host-specific, so it is preserved verbatim ('Data.Text.Short.ShortText')
-rather than decomposed into individual @name\/version@ tokens — light structure
-over a raw value.
-
-See <https://www.w3.org/TR/edge-arch> for the specification.
+Spec: <https://www.w3.org/TR/edge-arch/>
 
 See also: "Network.HTTP.Headers.SurrogateControl", "Network.HTTP.Headers.CDNCacheControl", "Network.HTTP.Headers.CacheControl".
 -}
 module Network.HTTP.Headers.SurrogateCapability (
   SurrogateCapability (..),
   SurrogateCapabilityEntry (..),
+  SurrogateFeature (..),
+  surrogateCapabilityFeatures,
+  surrogateCapabilityFromFeatures,
+  surrogateCapabilitySetParser,
+  parseSurrogateFeatureSet,
+  renderSurrogateFeatureSet,
   surrogateCapabilityParser,
   renderSurrogateCapability,
 ) where
 
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.List.NonEmpty as NE
+import qualified Data.Set as Set
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Network.HTTP.Grammar.Parser
+import Network.HTTP.Grammar.Rendering (renderProductToken, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSurrogateCapability)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import qualified Wireform.Builder as WB
 
 
--- | A @Surrogate-Capability@ value: a non-empty list of capability entries.
 newtype SurrogateCapability = SurrogateCapability
   { surrogateCapabilityEntries :: NonEmpty SurrogateCapabilityEntry
   }
   deriving stock (Eq, Show)
 
 
-{- | A single @device-token=\"capability-set\"@ pairing.  The capability set is
-stored as the raw (unquoted) quote contents and is re-quoted on render.
--}
 data SurrogateCapabilityEntry = SurrogateCapabilityEntry
   { surrogateCapabilityDevice :: !ST.ShortText
-  -- ^ The device token identifying the surrogate.
   , surrogateCapabilitySet :: !ST.ShortText
-  -- ^ The opaque, (usually space-separated) capability set.
+  -- ^ The validated, unquoted wire spelling. See 'surrogateCapabilityFeatures'.
+  }
+  deriving stock (Eq, Show)
+
+
+-- | A case-sensitive capability product token.
+data SurrogateFeature = SurrogateFeature
+  { surrogateFeatureName :: !ST.ShortText
+  , surrogateFeatureVersion :: !(Maybe ST.ShortText)
   }
   deriving stock (Eq, Show)
 
@@ -66,51 +67,84 @@ instance KnownHeader SurrogateCapability where
   type Direction SurrogateCapability = 'Request
 
 
-  parseFromHeaders _ headers = case runParser surrogateCapabilityParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Surrogate-Capability header: " <> show rest
-    Fail -> Left "Failed to parse Surrogate-Capability header"
-    Err e -> Left e
+  parseFromHeaders _ fields = parseListFieldLines "Surrogate-Capability" capabilityList fields >>= validateEntries
 
 
-  renderToHeaders _ = M.toStrictByteString . renderSurrogateCapability
+  renderToHeaders _ value@(SurrogateCapability (first :| rest)) =
+    WB.toStrictByteStringExact (foldl' (addEntry 5) (addEntry 3 0 first) rest) (renderSurrogateCapability value)
+    where
+      -- Three bytes for equals and quotes, plus two for each comma separator.
+      addEntry punctuation size (SurrogateCapabilityEntry device capabilities) =
+        add (add (add size punctuation) (byteLength device)) (byteLength capabilities)
+      byteLength = SBS.length . ST.toShortByteString
+      add = BSI.checkedAdd "Surrogate-Capability"
 
 
   headerName _ = hSurrogateCapability
 
 
 surrogateCapabilityParser :: ParserT st String SurrogateCapability
-surrogateCapabilityParser = do
-  ows
-  first <- entryParser
-  rest <- many (ows *> $(char ',') *> ows *> entryParser)
-  ows
-  pure (SurrogateCapability (first :| rest))
+surrogateCapabilityParser = capabilityList >>= either err pure . validateEntries
 
 
-entryParser :: ParserT st String SurrogateCapabilityEntry
-entryParser = do
+capabilityList :: ParserT st String [SurrogateCapabilityEntry]
+capabilityList = httpList $ do
   device <- rfc9110Token
+  ows
   $(char '=')
-  value <- quotedString <|> rfc9110Token
+  ows
+  value <- surrogateCapabilitySetParser
   pure (SurrogateCapabilityEntry device value)
 
 
-renderSurrogateCapability :: SurrogateCapability -> M.Builder
-renderSurrogateCapability (SurrogateCapability entries) =
-  M.intersperse ", " (map renderEntry (NE.toList entries))
-
-
-renderEntry :: SurrogateCapabilityEntry -> M.Builder
-renderEntry (SurrogateCapabilityEntry device value) =
-  shortText device <> M.char7 '=' <> renderQuotedString value
-
-
--- | Render a quoted-string, escaping embedded DQUOTE and backslash.
-renderQuotedString :: ST.ShortText -> M.Builder
-renderQuotedString t = M.char7 '"' <> ST.foldl' escape mempty t <> M.char7 '"'
+validateEntries :: [SurrogateCapabilityEntry] -> Either String SurrogateCapability
+validateEntries entries = do
+  nonEmpty <- requireNonEmptyList "Surrogate-Capability" entries
+  if distinct entries
+    then Right (SurrogateCapability nonEmpty)
+    else Left "Duplicate Surrogate-Capability device token"
   where
-    escape b = \case
-      '"' -> b <> M.char7 '\\' <> M.char7 '"'
-      '\\' -> b <> M.char7 '\\' <> M.char7 '\\'
-      c -> b <> M.char7 c
+    distinct [_] = True
+    distinct [a, b] = surrogateCapabilityDevice a /= surrogateCapabilityDevice b
+    distinct xs = Set.size (Set.fromList (map surrogateCapabilityDevice xs)) == length xs
+
+
+-- | Read a quoted capability set and retain its spelling without the quotes.
+surrogateCapabilitySetParser :: ParserT st String ST.ShortText
+surrogateCapabilitySetParser =
+  $(char '"') *> shortASCIIFromParser_ (featureBytes *> skipMany ($(char ' ') *> featureBytes)) <* $(char '"')
+  where
+    featureBytes = tokenBytes *> optional_ ($(char '/') *> tokenBytes)
+
+
+-- | Read the typed features in a device's advertised order.
+surrogateCapabilityFeatures :: SurrogateCapabilityEntry -> Either String (NonEmpty SurrogateFeature)
+surrogateCapabilityFeatures = parseSurrogateFeatureSet . surrogateCapabilitySet
+
+
+-- | Read an unquoted capability set, as used by both surrogate fields.
+parseSurrogateFeatureSet :: ST.ShortText -> Either String (NonEmpty SurrogateFeature)
+parseSurrogateFeatureSet = parseFieldLine "surrogate capability set" features . ST.toByteString
+  where
+    features = (:|) <$> feature <*> many ($(char ' ') *> feature)
+    feature = SurrogateFeature <$> rfc9110Token <*> optional ($(char '/') *> rfc9110Token)
+
+
+-- | Build a capability entry from product tokens in advertised order.
+surrogateCapabilityFromFeatures :: ST.ShortText -> NonEmpty SurrogateFeature -> SurrogateCapabilityEntry
+surrogateCapabilityFromFeatures device =
+  SurrogateCapabilityEntry device . STU.fromByteStringUnsafe . M.toStrictByteString . renderSurrogateFeatureSet
+
+
+renderSurrogateFeatureSet :: NonEmpty SurrogateFeature -> M.Builder
+renderSurrogateFeatureSet (first :| rest) = renderFeature first <> foldMap ((" " <>) . renderFeature) rest
+  where
+    renderFeature (SurrogateFeature name version) = renderProductToken name version
+
+
+renderSurrogateCapability :: SurrogateCapability -> M.Builder
+renderSurrogateCapability (SurrogateCapability (first :| rest)) =
+  renderEntry first <> foldMap ((", " <>) . renderEntry) rest
+  where
+    renderEntry (SurrogateCapabilityEntry device value) = shortText device <> "=\"" <> shortText value <> M.char7 '"'
+{-# INLINE renderSurrogateCapability #-}

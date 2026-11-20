@@ -11,8 +11,10 @@ module Network.HTTP2.Client
   , withConnectionOnTransport
     -- * Requests
   , sendRequest
+  , sendRequestWithContinueTimeout
   , sendRequestStreamId
   , withResponse
+  , withResponseWithContinueTimeout
   , withResponseDeferred
   , drainResponseBody
     -- * Errors
@@ -29,18 +31,17 @@ import Control.Concurrent (forkIO, forkIOWithUnmask, killThread)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception
-  (Exception, SomeException, bracket, catch, evaluate, finally, mask, mask_, throwIO, try)
+  (Exception, SomeException, bracket, catch, finally, mask, mask_, throwIO, try)
 import Control.Monad (void, when)
 import Data.Bits ((.|.), (.&.), shiftL)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteString.Internal as BSI
 import Data.IORef
-import Foreign.ForeignPtr (withForeignPtr)
-import Foreign.Ptr (plusPtr)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
-import Data.Word (Word32)
+import Data.Word (Word32, Word64)
 import qualified Network.Socket as NS
 
 import Network.HTTP2.Connection
@@ -86,6 +87,10 @@ data RequestBody
   = ReqBodyNone
   | ReqBodyBytes !ByteString
   | ReqBodyStream !(IO (Maybe ByteString))
+  | ReqBodyBytesWithTrailers !ByteString !(NonEmpty (ByteString, ByteString))
+    -- ^ Fixed body (possibly empty) followed by a terminating trailer block.
+  | ReqBodyStreamWithTrailers !(IO (Maybe ByteString)) !(IO [(ByteString, ByteString)])
+    -- ^ Evaluate the trailer action when the body producer returns 'Nothing'.
 
 data ClientResponse = ClientResponse
   { crStreamId :: !StreamId
@@ -111,7 +116,8 @@ data ClientResponse = ClientResponse
     -- response had no trailers (the END_STREAM came in on DATA or on
     -- the initial HEADERS frame).  Must be called after the body has
     -- been fully drained — pulling trailers before observing the end
-    -- of the body will block.
+    -- of the body will block. A malformed trailer block raises
+    -- 'ClientStreamProtocolError'.
   , crCancel :: !(IO ())
     -- ^ Best-effort stream cancellation: emits @RST_STREAM(CANCEL)@
     -- to the peer and tears down the local inbox. Idempotent (the
@@ -129,17 +135,16 @@ data ClientResponse = ClientResponse
 -- | Per-stream inbox the recv loop pushes into.
 data StreamInbox = StreamInbox
   { siHeaders :: !(MVar (Either ClientStreamError ResponseHead))
-    -- ^ Filled exactly once when the response @HEADERS@ block arrives
+    -- ^ Filled exactly once when the final response @HEADERS@ block arrives
     -- (or when the stream is reset before any headers).
   , siBody :: !(TBQueue BodyItem)
     -- ^ Chunks streamed in by DATA frames, terminated by 'BodyEnd' or
     -- 'BodyError'.
-  , siTrailers :: !(MVar [(ByteString, ByteString)])
+  , siTrailers :: !(MVar (Either ClientStreamError [(ByteString, ByteString)]))
     -- ^ Filled exactly once when END_STREAM has been observed: with
     -- the decoded trailer block (a HEADERS frame /after/ the body),
     -- or with @[]@ when END_STREAM came in on DATA \/ on the initial
-    -- HEADERS frame.  Stream resets also fill this with @[]@ so that
-    -- waiting readers wake up.
+    -- HEADERS frame. Protocol errors are delivered to waiting readers.
   , siSendWindow :: !FlowControl
     -- ^ Per-stream HTTP\/2 send window (RFC 9113 § 6.9.1).
     -- Initialised from the peer's @SETTINGS_INITIAL_WINDOW_SIZE@ and
@@ -160,12 +165,20 @@ data StreamInbox = StreamInbox
     -- Accumulated in LIFO order by the recv loop as PUSH_PROMISE
     -- frames arrive; exposed via 'crPushPromises'.  Reversed on
     -- read so callers see promises in arrival order.
+  , siRequestMethod :: !ByteString
+  , siContinueGate :: !ContinueGate
   }
 
 data ResponseHead = ResponseHead
   { rhStatus :: !Int
   , rhHeaders :: ![(ByteString, ByteString)]
+  , rhContent :: !ResponseContent
   }
+
+data ResponseContent
+  = UnboundedContent
+  | NoContent
+  | DeclaredContent !(IORef Word64)
 
 data BodyItem
   = BodyChunk !ByteString
@@ -175,9 +188,12 @@ data BodyItem
 -- | Errors that can be observed on a single response stream.
 data ClientStreamError
   = ClientStreamReset !ErrorCode
-    -- ^ The peer sent @RST_STREAM@.
+    -- ^ Either endpoint reset the stream.
   | ClientStreamProtocolError !ByteString
     -- ^ The peer violated the HTTP\/2 wire protocol on this stream.
+  | ClientRequestHeaderError !ByteString
+    -- ^ The request headers or fixed trailers failed validation before
+    -- allocating a stream.
   | ClientStreamConnectionClosed
     -- ^ The connection went away before the stream completed.
   | ClientStreamRefusedAfterGoAway !StreamId
@@ -219,7 +235,6 @@ data PushPromiseReceived = PushPromiseReceived
 data ClientHandle = ClientHandle
   { chConnection :: !Connection
   , chStreams :: !(IORef (Map.Map StreamId StreamInbox))
-  , chPending :: !(IORef (Maybe Continuation))
   , chRecvUnacked :: !(IORef Int)
     -- ^ Connection-level recv-window debt (bytes received and
     -- consumed since the last connection-level @WINDOW_UPDATE@).
@@ -286,13 +301,6 @@ recvWindowAckThreshold = 32768
 clientHandleConnection :: ClientHandle -> Connection
 clientHandleConnection = chConnection
 
--- | Pending header-block continuation state.
-data Continuation = Continuation
-  { contStreamId :: !StreamId
-  , contInitialFlags :: !FrameFlags
-  , contBuffer :: !ByteString
-  }
-
 withConnection :: ClientConfig -> (ClientHandle -> IO a) -> IO a
 withConnection cfg action = do
   let hints = NS.defaultHints { NS.addrSocketType = NS.Stream }
@@ -330,7 +338,6 @@ withConnectionOnTransport cfg transport mSock action = do
     }
   sendClientPreface conn (clientSettings cfg)
   streamsRef <- newIORef Map.empty
-  pendingRef <- newIORef Nothing
   recvUnackedRef <- newIORef 0
   activeStreamsTv <- atomically (newTVar 0)
   goAwayTv <- atomically (newTVar Nothing)
@@ -340,7 +347,7 @@ withConnectionOnTransport cfg transport mSock action = do
   emptyDataRate <- newRateCounter
   recvWindowRef <- newIORef (65535 :: Int)
   recvDoneRef <- newIORef False
-  let handle = ClientHandle conn streamsRef pendingRef recvUnackedRef activeStreamsTv goAwayTv
+  let handle = ClientHandle conn streamsRef recvUnackedRef activeStreamsTv goAwayTv
                             pingRate settingsRate rstRate emptyDataRate
                             (settingsMaxHeaderListSize (clientSettings cfg))
                             recvWindowRef
@@ -383,19 +390,29 @@ sendClientPreface conn settings = do
 -- 'FramePayloadRaw' regardless of frame type, so dispatching by
 -- pattern would conflate unrelated frame shapes.
 clientRecvLoop :: ClientHandle -> IO ()
-clientRecvLoop handle = loop
+clientRecvLoop handle = do
+  maxFrame <- settingsMaxFrameSize <$> readIORef (connLocalSettings conn)
+  let receive = do
+        result <- recvFrame conn
+        case result of
+          Right frame
+            | fhLength (frameHeader frame) > maxFrame ->
+                abortConnection conn FrameSizeError "frame exceeds SETTINGS_MAX_FRAME_SIZE"
+          _ -> pure result
+      nextFragment = either (const Nothing) Just <$> receive
+      loop = do
+        result <- receive
+        case result of
+          Left _ -> pure ()
+          Right frame -> do
+            ok <- handleClientFrame handle nextFragment frame
+            when ok loop
+  loop `catch` (\(_ :: ConnectionError) -> pure ())
   where
     conn = chConnection handle
-    loop = do
-      result <- recvFrame conn
-      case result of
-        Left _ -> pure ()
-        Right frame -> do
-          ok <- handleClientFrame handle frame
-          if ok then loop else pure ()
 
-handleClientFrame :: ClientHandle -> Frame -> IO Bool
-handleClientFrame handle (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
+handleClientFrame :: ClientHandle -> IO (Maybe Frame) -> Frame -> IO Bool
+handleClientFrame handle receive (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
   FrameSettings
     | testFlag (fhFlags hdr) flagAck -> pure True
     | otherwise -> do
@@ -498,62 +515,14 @@ handleClientFrame handle (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
             failStream handle sid (ClientStreamReset code)
             pure True
 
-  FrameHeaders -> do
-    let sid = fhStreamId hdr
-        flags = fhFlags hdr
-    if not (testFlag flags flagEndHeaders)
-      then do
-        -- 'body' is a slice of the recv ring buffer; force-copy
-        -- before buffering across frames so the CONTINUATION
-        -- assembly doesn't see overwritten bytes.  See note on
-        -- 'forceCopyBS' below.
-        copiedBody <- forceCopyBS body
-        writeIORef (chPending handle) (Just Continuation
-          { contStreamId = sid
-          , contInitialFlags = flags
-          , contBuffer = copiedBody
-          })
-        pure True
-      else case stripHeaderPadding flags body of
-        Nothing -> do
-          failStream handle sid (ClientStreamProtocolError "malformed HEADERS frame")
-          pure True
-        Just block -> do
-          -- HPACK's 'decodeString' can hand back literal-string
-          -- slices of its input.  Our input here is itself a slice
-          -- of the recv ring buffer, which the next 'recvBufferRead'
-          -- will overwrite — so the slices' bytes turn to garbage
-          -- by the time the user code looks at them.  Eagerly copy
-          -- once at the boundary so every downstream slice is
-          -- backed by stable memory.
-          copied <- forceCopyBS block
-          deliverHeaders handle sid flags copied
+  FrameHeaders
+    | fhStreamId hdr == 0 -> abortConnection (chConnection handle) ProtocolError "HEADERS on stream 0"
+    | otherwise -> do
+        block <- recvHeaderBlockWith copyReceivedBytes (chConnection handle) receive hdr body
+        deliverHeaders handle (fhStreamId hdr) (fhFlags hdr) block
 
-  FrameContinuation -> do
-    pending <- readIORef (chPending handle)
-    case pending of
-      Nothing -> pure True
-      Just c
-        | contStreamId c /= fhStreamId hdr -> pure True
-        | testFlag (fhFlags hdr) flagEndHeaders -> do
-            writeIORef (chPending handle) Nothing
-            let assembled = contBuffer c <> body
-                origFlags = contInitialFlags c
-            case stripHeaderPadding origFlags assembled of
-              Nothing -> do
-                failStream handle (fhStreamId hdr)
-                  (ClientStreamProtocolError "malformed HEADERS continuation")
-                pure True
-              Just block -> do
-                copied <- forceCopyBS block
-                deliverHeaders handle (fhStreamId hdr) origFlags copied
-        | otherwise -> do
-            -- See note on CONTINUATION above: copy 'body' before
-            -- splicing into the cross-frame buffer.
-            copiedBody <- forceCopyBS body
-            writeIORef (chPending handle)
-              (Just c { contBuffer = contBuffer c <> copiedBody })
-            pure True
+  FrameContinuation ->
+    abortConnection (chConnection handle) ProtocolError "unexpected CONTINUATION"
 
   FrameData -> do
     let sid = fhStreamId hdr
@@ -575,7 +544,7 @@ handleClientFrame handle (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
       then do
         closeConnection (chConnection handle) EnhanceYourCalm "empty-DATA flood"
         pure False
-      else case stripDataPadding (fhFlags hdr) body of
+      else case stripFramePadding (fhFlags hdr) body of
         Nothing -> do
           failStream handle sid (ClientStreamProtocolError "malformed DATA frame")
           pure True
@@ -595,11 +564,10 @@ handleClientFrame handle (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
               hdrsSeen <- tryReadMVar (siHeaders inbox)
               case hdrsSeen of
                 Nothing -> do
-                  sendRstStream handle sid ProtocolError
-                  failStream handle sid
-                    (ClientStreamProtocolError "DATA received before response HEADERS")
+                  rejectResponse handle sid "DATA received before response HEADERS"
                   pure True
-                Just _ -> do
+                Just (Left _) -> pure True
+                Just (Right responseHead) -> do
                   -- Recv-window accounting (RFC 9113 §6.9.1): the
                   -- whole frame payload (including padding) is
                   -- charged, not the post-padding bytes.
@@ -618,18 +586,7 @@ handleClientFrame handle (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
                         closeConnection (chConnection handle) FlowControlError
                           "connection recv window underflow"
                         pure False
-                      else do
-                        -- 'forceCopyBS' (not 'BS.copy'): the payload is a
-                        -- zero-copy slice of the recv ring buffer, and
-                        -- 'BS.copy' is too lazy under inlining to make the
-                        -- memcpy happen before the buffer is overwritten.
-                        copied <- forceCopyBS payload
-                        atomically $ writeTBQueue (siBody inbox) (BodyChunk copied)
-                        when endStream $ do
-                          _ <- tryPutMVar (siTrailers inbox) []
-                          atomically $ writeTBQueue (siBody inbox) BodyEnd
-                          closeStream handle sid
-                        pure True
+                      else receiveContent handle sid inbox (rhContent responseHead) frameBytes payload endStream
 
   FramePushPromise -> do
     -- RFC 9113 §6.6: PUSH_PROMISE carries the promised stream ID
@@ -643,27 +600,38 @@ handleClientFrame handle (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
     --    requesting stream's inbox.
     let sid = fhStreamId hdr
     case stripPushPromisePayload (fhFlags hdr) body of
-      Nothing -> pure True  -- malformed: ignore
-      Just (promisedSid, block) -> do
-        copied <- forceCopyBS block
+      Nothing -> abortConnection (chConnection handle) ProtocolError "invalid PUSH_PROMISE payload"
+      Just (!promisedSid, first) -> do
+        block <- recvFieldBlockWith copyReceivedBytes (chConnection handle) receive hdr first
         res <- withMVar (connHpackDecoder (chConnection handle)) $ \decoder ->
-          decodeHeaderBlock decoder copied
+          decodeHeaderBlock decoder block
         case res of
           Left _ -> do
             closeConnection (chConnection handle) CompressionError
               "HPACK decode failed in PUSH_PROMISE"
             pure False
           Right headers -> do
-            hdrs <- forceCopyHeaders headers
             inboxes <- readIORef (chStreams handle)
             case Map.lookup sid inboxes of
               Nothing -> pure True
+              Just _
+                | promisedSid == 0 || odd promisedSid || Map.member promisedSid inboxes -> do
+                    closeConnection (chConnection handle) ProtocolError "invalid promised stream"
+                    pure False
+                | overClientHeaderLimit handle headers -> do
+                    sendRstStream handle promisedSid EnhanceYourCalm
+                    pure True
+                | Just _ <- validateRequestHead headers -> do
+                    sendRstStream handle promisedSid ProtocolError
+                    pure True
               Just reqInbox -> do
+                hdrs <- forceCopyHeaders headers
                 -- Create an inbox for the promised stream so the recv loop
                 -- can deliver its HEADERS and DATA frames.
                 ourInitial <- settingsInitialWindowSize <$>
                   readIORef (connLocalSettings (chConnection handle))
                 promisedInbox <- newPromisedStreamInbox (fromIntegral ourInitial)
+                  (maybe "" id (lookup ":method" hdrs))
                 atomicModifyIORef' (chStreams handle)
                   (\m -> (Map.insert promisedSid promisedInbox m, ()))
                 let pp = PushPromiseReceived
@@ -684,11 +652,8 @@ deliverHeaders
 deliverHeaders handle sid flags block = do
   res0 <- withMVar (connHpackDecoder (chConnection handle)) $ \decoder ->
     decodeHeaderBlock decoder block
-  -- 'forceCopyHeaders' rebuilds each name\/value into a fresh
-  -- malloc'd buffer.  HPACK literals + huffman-decoded strings can
-  -- otherwise stay as lazy thunks that read from @block@ (a recv
-  -- ring-buffer slice) when the user finally inspects them — by
-  -- which point the ring buffer has been recycled.
+  -- Copy each decoded name and value so long-lived headers release
+  -- the assembled block's storage.
   res <- case res0 of
     Right hs -> Right <$> forceCopyHeaders hs
     Left e   -> pure (Left e)
@@ -707,38 +672,98 @@ deliverHeaders handle sid flags block = do
       case Map.lookup sid inboxes of
         Nothing -> pure True
         Just inbox -> do
-          let (status, rest) = splitStatus headers
-              endStream = testFlag flags flagEndStream
-          -- 'tryPutMVar' is the discriminator: if the headers MVar
-          -- was empty, this was the initial HEADERS; otherwise this
-          -- is a trailer block.
-          wasInitial <- tryPutMVar (siHeaders inbox) (Right ResponseHead
-            { rhStatus = status
-            , rhHeaders = rest
-            })
-          if wasInitial
-            then do
-              when endStream $ do
-                -- Bodyless / trailer-less response.  Fill the
-                -- trailers MVar so a reader doesn't block, push the
-                -- body terminator, and release the stream.
-                _ <- tryPutMVar (siTrailers inbox) []
-                atomically $ writeTBQueue (siBody inbox) BodyEnd
-                closeStream handle sid
-            else do
-              -- Trailer block: RFC 9113 §8.1 forbids pseudo-headers
-              -- here, but a strict reject would conflict with too
-              -- many real peers; we just drop pseudo-headers and
-              -- deliver the rest.
-              let cleaned = filter
-                    (\(n, _) -> BS.null n || BS.head n /= 0x3A) headers
-              _ <- tryPutMVar (siTrailers inbox) cleaned
-              -- Trailer block always carries END_STREAM (else the
-              -- peer is malformed).  Either way, push the body
-              -- terminator and release the stream.
-              atomically $ writeTBQueue (siBody inbox) BodyEnd
-              closeStream handle sid
+          prior <- tryReadMVar (siHeaders inbox)
+          case prior of
+            Nothing -> case headers of
+              (":status", value) : fields | Just status <- parseResponseStatus value ->
+                case validateResponseFields fields of
+                  Just reason -> reject reason
+                  Nothing -> acceptHead inbox status fields
+              _ -> reject "invalid HTTP/2 response head"
+            Just (Right responseHead) -> case validateTrailerBlock flags headers of
+              Just reason -> reject reason
+              Nothing -> case rhContent responseHead of
+                NoContent -> reject "trailers on a response without content"
+                content -> do
+                  complete <- checkResponseContent content 0 True
+                  if complete
+                    then endResponse handle sid inbox headers
+                    else reject "response content-length mismatch"
+            Just (Left _) -> pure ()
           pure True
+  where
+    reject = rejectResponse handle sid
+    endStream = testFlag flags flagEndStream
+    acceptHead inbox status fields = do
+      rule <- responseContent (siRequestMethod inbox) status fields
+      case rule of
+        Left reason -> reject reason
+        Right content
+          | status < 200 ->
+              if endStream
+                then reject "informational response with END_STREAM"
+                else noteContinueResponse (siContinueGate inbox) status
+          | otherwise -> do
+              complete <- if endStream then checkResponseContent content 0 True else pure True
+              if complete
+                then do
+                  noteContinueResponse (siContinueGate inbox) status
+                  published <- tryPutMVar (siHeaders inbox) (Right (ResponseHead status fields content))
+                  when (published && endStream) $ endResponse handle sid inbox []
+                else reject "response content-length mismatch"
+
+receiveContent :: ClientHandle -> StreamId -> StreamInbox -> ResponseContent -> Int -> ByteString -> Bool -> IO Bool
+receiveContent handle sid inbox content frameBytes payload endStream = do
+  let contentBytes = BS.length payload
+  valid <- checkResponseContent content contentBytes endStream
+  if valid
+    then do
+      let paddingBytes = frameBytes - contentBytes
+      when (paddingBytes > 0) $ do
+        ackConnectionRecv handle paddingBytes
+        when (not endStream) $ ackStreamRecv handle sid inbox paddingBytes
+      -- The receive ring can be reused as soon as this handler returns.
+      copied <- copyReceivedBytes payload
+      atomically $ writeTBQueue (siBody inbox) (BodyChunk copied)
+      when endStream $ endResponse handle sid inbox []
+    else do
+      -- These bytes never reach a reader. Refund their connection credit.
+      ackConnectionRecv handle frameBytes
+      rejectResponse handle sid "response content-length mismatch"
+  pure True
+
+rejectResponse :: ClientHandle -> StreamId -> ByteString -> IO ()
+rejectResponse handle sid reason = do
+  sendRstStream handle sid ProtocolError
+  failStream handle sid (ClientStreamProtocolError reason)
+
+endResponse :: ClientHandle -> StreamId -> StreamInbox -> [Header] -> IO ()
+endResponse handle sid inbox trailers = do
+  suppressed <- finishContinueResponse (siContinueGate inbox)
+  when suppressed $
+    sendRstStream handle sid Cancel
+      `catch` (\(_ :: SomeException) -> pure ())
+  _ <- tryPutMVar (siTrailers inbox) (Right trailers)
+  atomically $ writeTBQueue (siBody inbox) BodyEnd
+  closeStream handle sid
+
+responseContent :: ByteString -> Int -> [Header] -> IO (Either ByteString ResponseContent)
+responseContent method status fields = case readResponseContentLength method status fields of
+  Left reason -> pure (Left reason)
+  Right ContentUnbounded -> pure (Right UnboundedContent)
+  Right ContentForbidden -> pure (Right NoContent)
+  Right (ContentExpected n) -> Right . DeclaredContent <$> newIORef n
+
+checkResponseContent :: ResponseContent -> Int -> Bool -> IO Bool
+checkResponseContent UnboundedContent _ _ = pure True
+checkResponseContent NoContent bytes _ = pure (bytes == 0)
+checkResponseContent (DeclaredContent ref) bytes endStream = do
+  remaining <- readIORef ref
+  case remainingContentLength remaining bytes endStream of
+    Nothing -> pure False
+    Just next -> do
+      when (bytes /= 0) $ writeIORef ref next
+      pure True
 
 -- | RFC 7541 §4.1 sizing: 32 + name + value per header.  Used to
 -- enforce our advertised @SETTINGS_MAX_HEADER_LIST_SIZE@ on response
@@ -750,8 +775,8 @@ deliverHeaders handle sid flags block = do
 forceCopyHeaders
   :: [(ByteString, ByteString)] -> IO [(ByteString, ByteString)]
 forceCopyHeaders = mapM $ \(n, v) -> do
-  n' <- forceCopyBS n
-  v' <- forceCopyBS v
+  n' <- copyReceivedBytes n
+  v' <- copyReceivedBytes v
   pure (n', v')
 
 overClientHeaderLimit
@@ -762,18 +787,6 @@ overClientHeaderLimit handle hs = case chMaxHeaderListSize handle of
     let total = foldr (\(n, v) acc -> acc + 32 + BS.length n + BS.length v) 0 hs
     in total > fromIntegral lim
 
-splitStatus
-  :: [(ByteString, ByteString)] -> (Int, [(ByteString, ByteString)])
-splitStatus = go 0 []
-  where
-    go acc rest [] = (acc, reverse rest)
-    go acc rest ((n, v) : xs)
-      | n == ":status" = case BS8.readInt v of
-          Just (k, _) -> go k rest xs
-          Nothing     -> go acc rest xs
-      | not (BS.null n) && BS.head n == 0x3A {- ':' -} = go acc rest xs
-      | otherwise = go acc ((n, v) : rest) xs
-
 -- | Notify any open inbox that the stream failed. Idempotent.
 failStream :: ClientHandle -> StreamId -> ClientStreamError -> IO ()
 failStream handle sid err = do
@@ -781,8 +794,11 @@ failStream handle sid err = do
   case Map.lookup sid inboxes of
     Nothing -> pure ()
     Just inbox -> do
+      stopContinue (siContinueGate inbox)
       _ <- tryPutMVar (siHeaders inbox) (Left err)
-      _ <- tryPutMVar (siTrailers inbox) []
+      _ <- tryPutMVar (siTrailers inbox) $ case err of
+        ClientStreamProtocolError _ -> Left err
+        _ -> Right []
       atomically $ writeTBQueue (siBody inbox) (BodyError err)
       closeStream handle sid
 
@@ -803,8 +819,9 @@ failOutstanding handle = do
   atomically $ writeTVar (chActiveStreams handle) 0
   where
     failOne (_, inbox) = do
+      stopContinue (siContinueGate inbox)
       _ <- tryPutMVar (siHeaders inbox) (Left ClientStreamConnectionClosed)
-      _ <- tryPutMVar (siTrailers inbox) []
+      _ <- tryPutMVar (siTrailers inbox) (Right [])
       atomically $ do
         full <- isFullTBQueue (siBody inbox)
         when full (void (flushTBQueue (siBody inbox)))
@@ -827,14 +844,13 @@ failOutstanding handle = do
 -- connection closes.  Use 'withResponse' to get RST_STREAM-on-abort
 -- cancellation semantics.
 sendRequest :: ClientHandle -> ClientRequest -> IO ClientResponse
-sendRequest handle req = do
-  (sid, inbox) <- registerAndSend handle req
-  -- 'readMVar' rather than 'takeMVar': leaving the headers in the
-  -- MVar is how 'deliverHeaders' distinguishes the initial HEADERS
-  -- block from the trailer block (via @tryPutMVar siHeaders@,
-  -- which only succeeds while the MVar is empty).  'takeMVar'
-  -- would empty the slot and the next HEADERS frame on the
-  -- stream would be silently re-classified as initial.
+sendRequest = sendRequestWithContinueTimeout 1_000_000
+
+-- | Like 'sendRequest', with a per-request continue timeout in microseconds.
+sendRequestWithContinueTimeout :: Int -> ClientHandle -> ClientRequest -> IO ClientResponse
+sendRequestWithContinueTimeout timeoutUs handle req = do
+  (sid, inbox) <- registerAndSend timeoutUs handle req
+  -- The MVar stays full to distinguish trailer blocks from response heads.
   headersResult <- readMVar (siHeaders inbox)
   case headersResult of
     Left err -> throwIO err
@@ -843,7 +859,7 @@ sendRequest handle req = do
       , crStatus = rhStatus rh
       , crResponseHeaders = rhHeaders rh
       , crResponseBody = nextBodyChunk handle sid inbox
-      , crResponseTrailers = readMVar (siTrailers inbox)
+      , crResponseTrailers = readMVar (siTrailers inbox) >>= either throwIO pure
       , crCancel = sendRstStream handle sid Cancel
                      `catch` (\(_ :: SomeException) -> pure ())
       , crPushPromises = reverse <$> readTVarIO (siPushPromises inbox)
@@ -864,6 +880,11 @@ withResponse
   -> IO a
 withResponse handle req action =
   withResponseDeferred handle req (\awaitResponse -> awaitResponse >>= action)
+
+-- | Like 'withResponse', with a per-request continue timeout in microseconds.
+withResponseWithContinueTimeout :: Int -> ClientHandle -> ClientRequest -> (ClientResponse -> IO a) -> IO a
+withResponseWithContinueTimeout timeoutUs handle req action =
+  withResponseDeferredWithContinueTimeout timeoutUs handle req (\awaitResponse -> awaitResponse >>= action)
 
 -- | Like 'withResponse', but the action is started immediately after the
 -- request HEADERS are sent; instead of a 'ClientResponse' it receives an
@@ -888,8 +909,11 @@ withResponseDeferred
   -> ClientRequest
   -> (IO ClientResponse -> IO a)
   -> IO a
-withResponseDeferred handle req action = mask $ \restore -> do
-  (sid, inbox) <- registerAndSend handle req
+withResponseDeferred = withResponseDeferredWithContinueTimeout 1_000_000
+
+withResponseDeferredWithContinueTimeout :: Int -> ClientHandle -> ClientRequest -> (IO ClientResponse -> IO a) -> IO a
+withResponseDeferredWithContinueTimeout timeoutUs handle req action = mask $ \restore -> do
+  (sid, inbox) <- registerAndSend timeoutUs handle req
   -- Cancel the stream if (a) the action raises an exception, or
   -- (b) the action returns without fully draining the body.  Both
   -- leave the stream in 'chStreams' (the recv loop only removes it
@@ -897,10 +921,11 @@ withResponseDeferred handle req action = mask $ \restore -> do
   let cancelIfOpen reason = do
         streams <- readIORef (chStreams handle)
         when (Map.member sid streams) $ do
+          stopContinue (siContinueGate inbox)
           sendRstStream handle sid Cancel
             `catch` (\(_ :: SomeException) -> pure ())
           _ <- tryPutMVar (siHeaders inbox) (Left reason)
-          _ <- tryPutMVar (siTrailers inbox) []
+          _ <- tryPutMVar (siTrailers inbox) (Right [])
           atomically $ writeTBQueue (siBody inbox) (BodyError reason)
           closeStream handle sid
       -- See note on 'readMVar' in 'sendRequest': 'takeMVar' would
@@ -914,7 +939,7 @@ withResponseDeferred handle req action = mask $ \restore -> do
             , crStatus = rhStatus rh
             , crResponseHeaders = rhHeaders rh
             , crResponseBody = nextBodyChunk handle sid inbox
-            , crResponseTrailers = readMVar (siTrailers inbox)
+            , crResponseTrailers = readMVar (siTrailers inbox) >>= either throwIO pure
             , crCancel = cancelIfOpen ClientStreamConnectionClosed
             , crPushPromises = reverse <$> readTVarIO (siPushPromises inbox)
             }
@@ -923,26 +948,6 @@ withResponseDeferred handle req action = mask $ \restore -> do
   case result of
     Left e -> throwIO e
     Right r -> pure r
-
--- | Eager byte-for-byte copy of a 'ByteString'.  Used to defang
--- zero-copy slices that share memory with the recv ring buffer
--- before they're stashed in long-lived per-stream queues.
---
--- This explicitly walks every byte so the underlying memcpy
--- happens /now/ rather than being deferred behind a lazy
--- 'unsafeDupablePerformIO' wrapper.  Bytestring's 'BS.copy' is
--- not safe here: under inlining the byte fetch can be hoisted
--- past the buffer-overwrite that motivated the copy in the
--- first place.
-forceCopyBS :: ByteString -> IO ByteString
-forceCopyBS (BSI.PS srcFp srcOff srcLen) = do
-  dstFp <- BSI.mallocByteString srcLen
-  withForeignPtr srcFp $ \src ->
-    withForeignPtr dstFp $ \dst ->
-      BSI.memcpy dst (src `plusPtr` srcOff) srcLen
-  let !result = BSI.PS dstFp 0 srcLen
-  -- Walk every byte once to materialise the memcpy synchronously.
-  BS.foldr' (\b acc -> b `seq` acc) () result `seq` pure result
 
 -- | Send an @RST_STREAM@ frame for the given stream ID.
 sendRstStream :: ClientHandle -> StreamId -> ErrorCode -> IO ()
@@ -982,7 +987,7 @@ awaitPushResponse handle sid inbox = do
       , crStatus           = rhStatus rh
       , crResponseHeaders  = rhHeaders rh
       , crResponseBody     = nextBodyChunk handle sid inbox
-      , crResponseTrailers = readMVar (siTrailers inbox)
+      , crResponseTrailers = readMVar (siTrailers inbox) >>= either throwIO pure
       , crCancel           = sendRstStream handle sid Cancel
                                `catch` (\(_ :: SomeException) -> pure ())
       , crPushPromises     = reverse <$> readTVarIO (siPushPromises inbox)
@@ -991,8 +996,8 @@ awaitPushResponse handle sid inbox = do
 -- | Allocate a 'StreamInbox' for a server-initiated (pushed) stream.
 -- Pushed streams are receive-only: the client never sends DATA on
 -- them, so the send-flow-control window is initialised to 0.
-newPromisedStreamInbox :: Int -> IO StreamInbox
-newPromisedStreamInbox ourInitialRecv = do
+newPromisedStreamInbox :: Int -> ByteString -> IO StreamInbox
+newPromisedStreamInbox ourInitialRecv method = do
   h  <- newEmptyMVar
   q  <- atomically (newTBQueue 64)
   t  <- newEmptyMVar
@@ -1000,7 +1005,7 @@ newPromisedStreamInbox ourInitialRecv = do
   ru <- newIORef 0
   rw <- newIORef ourInitialRecv
   pp <- atomically (newTVar [])
-  pure $ StreamInbox h q t sw ru rw pp
+  pure $ StreamInbox h q t sw ru rw pp method SendImmediately
 
 -- | Pull one chunk of the response body and replenish the recv
 -- windows that the chunk consumed.
@@ -1029,7 +1034,9 @@ nextBodyChunk handle sid inbox = do
     BodyEnd -> do
       atomically $ writeTBQueue (siBody inbox) BodyEnd
       pure Nothing
-    BodyError e -> throwIO e
+    BodyError e -> do
+      atomically $ writeTBQueue (siBody inbox) item
+      throwIO e
 
 -- | Tally @n@ bytes against the connection-level recv-window debt
 -- and flush a @WINDOW_UPDATE@ on stream 0 if we've crossed the
@@ -1085,13 +1092,43 @@ drainResponseBody resp = go []
 -- fire-and-forget behaviour; most users should prefer 'sendRequest'.
 sendRequestStreamId :: ClientHandle -> ClientRequest -> IO StreamId
 sendRequestStreamId handle req = do
-  (sid, _inbox) <- registerAndSend handle req
+  (sid, _inbox) <- registerAndSend 1_000_000 handle req
   pure sid
 
 registerAndSend
-  :: ClientHandle -> ClientRequest -> IO (StreamId, StreamInbox)
-registerAndSend handle req = do
+  :: Int -> ClientHandle -> ClientRequest -> IO (StreamId, StreamInbox)
+registerAndSend timeoutUs handle req = do
   let conn = chConnection handle
+      pseudoHeaders
+        | crMethod req == "CONNECT" = [(":method", crMethod req)]
+        | otherwise =
+            [ (":method", crMethod req)
+            , (":path", crPath req)
+            , (":scheme", crScheme req)
+            ]
+      authorityField authority
+        | BS.null authority = []
+        | otherwise = [(":authority", authority)]
+      headers = pseudoHeaders <> authorityField (crAuthority req) <> crHeaders req
+  requestHead <- either (throwIO . ClientRequestHeaderError) pure (parseRequestHead headers)
+  let allHeaders
+        | BS.null (crAuthority req) && not (BS.null (requestHeadAuthority requestHead)) =
+            pseudoHeaders <> authorityField (requestHeadAuthority requestHead) <> crHeaders req
+        | otherwise = headers
+      bodyKind = crBody req
+      endStreamOnHeaders = case bodyKind of
+        ReqBodyNone -> True
+        ReqBodyBytes bs -> BS.null bs
+        _ -> False
+      carriesContent = case bodyKind of
+        ReqBodyBytesWithTrailers bs _ -> not (BS.null bs)
+        _ -> not endStreamOnHeaders
+  case bodyKind of
+    ReqBodyBytesWithTrailers _ trailers
+      | Just reason <- validateTrailerBlock flagEndStream (NE.toList trailers) ->
+          throwIO (ClientRequestHeaderError reason)
+    _ -> pure ()
+  continueGate <- newContinueGate carriesContent (crMethod req) (requestHeadFields requestHead)
   -- Phase 1 (NO send lock): honour SETTINGS_MAX_CONCURRENT_STREAMS by
   -- blocking (STM retry) until a stream slot frees up, then reserve it. The
   -- stream id is deliberately NOT allocated here: id allocation must be
@@ -1118,19 +1155,7 @@ registerAndSend handle req = do
     ru <- newIORef 0
     rw <- newIORef (fromIntegral ourInitial)
     pp <- atomically (newTVar [])
-    pure $ StreamInbox h q t sw ru rw pp
-  let pseudoHeaders =
-        [ (":method", crMethod req)
-        , (":path", crPath req)
-        , (":scheme", crScheme req)
-        , (":authority", crAuthority req)
-        ]
-      allHeaders = pseudoHeaders <> crHeaders req
-      bodyKind = crBody req
-      endStreamOnHeaders = case bodyKind of
-        ReqBodyNone -> True
-        ReqBodyBytes bs -> BS.null bs
-        ReqBodyStream _ -> False
+    pure $ StreamInbox h q t sw ru rw pp (crMethod req) continueGate
   maxFrame <- peerMaxFrameSize conn
   -- Phase 2 (send lock HELD): allocate the next stream id (honouring a prior
   -- GOAWAY cap), register the stream so the recv loop can route its
@@ -1157,8 +1182,9 @@ registerAndSend handle req = do
         recvDone <- readIORef (chRecvDone handle)
         if recvDone
           then do
+            stopContinue continueGate
             _ <- tryPutMVar (siHeaders inbox) (Left ClientStreamConnectionClosed)
-            _ <- tryPutMVar (siTrailers inbox) []
+            _ <- tryPutMVar (siTrailers inbox) (Right [])
             atomically $ writeTBQueue (siBody inbox) (BodyError ClientStreamConnectionClosed)
             closeStream handle sid
             pure (Right sid)
@@ -1185,53 +1211,85 @@ registerAndSend handle req = do
   -- block until the whole request body had been written, deadlocking any
   -- peer that interleaves request and response. A failing producer aborts
   -- the stream with RST_STREAM(CANCEL).
-  case bodyKind of
-    ReqBodyNone -> pure ()
-    ReqBodyBytes b
-      | BS.null b -> pure ()
-      | otherwise -> sendBodyOneShot conn inbox sid b
-    ReqBodyStream producer ->
-      () <$ forkIO
-        ( sendBodyStream conn inbox sid producer
-            `catch` \(_ :: SomeException) ->
-              sendRstStream handle sid Cancel
-                `catch` \(_ :: SomeException) -> pure ()
+  let forkBody sendBody = () <$ forkIO
+        ( sendBody `catch` \(_ :: SomeException) -> do
+            sendRstStream handle sid Cancel
+              `catch` \(_ :: SomeException) -> pure ()
+            failStream handle sid (ClientStreamReset Cancel)
         )
+      sendFixedOrTrailers body trailers = do
+        when (not (BS.null body)) $ sendBodyOneShot conn inbox sid False body
+        sendRequestTrailers conn sid (NE.toList trailers)
+      sendBody = case bodyKind of
+        ReqBodyNone -> pure ()
+        ReqBodyBytes b
+          | BS.null b -> pure ()
+          | otherwise -> sendBodyOneShot conn inbox sid True b
+        ReqBodyStream producer ->
+          sendBodyStream conn inbox sid producer (pure [])
+        ReqBodyBytesWithTrailers body trailers ->
+          sendFixedOrTrailers body trailers
+        ReqBodyStreamWithTrailers producer produceTrailers ->
+          sendBodyStream conn inbox sid producer produceTrailers
+  case continueGate of
+    WaitForContinue _ -> forkBody $ do
+      allowed <- awaitContinue timeoutUs continueGate
+      when allowed sendBody
+    SendImmediately -> case bodyKind of
+      ReqBodyStream _ -> forkBody sendBody
+      ReqBodyStreamWithTrailers _ _ -> forkBody sendBody
+      _ -> sendBody
   pure (sid, inbox)
 
 -- | Send a known-length body chunked to the peer's MAX_FRAME_SIZE,
--- terminating with END_STREAM.  Both connection- and stream-level
+-- optionally terminating with END_STREAM. Both connection- and stream-level
 -- flow windows are respected.
-sendBodyOneShot :: Connection -> StreamInbox -> StreamId -> ByteString -> IO ()
-sendBodyOneShot conn inbox sid b = do
+sendBodyOneShot :: Connection -> StreamInbox -> StreamId -> Bool -> ByteString -> IO ()
+sendBodyOneShot conn inbox sid endStream b = do
   maxFrame <- peerMaxFrameSize conn
   loop b maxFrame
   where
     loop bs maxFrame
-      | BS.length bs <= maxFrame = sendDataFrame conn inbox sid True bs
+      | BS.length bs <= maxFrame = sendDataFrame conn inbox sid endStream bs
       | otherwise = do
           let (chunk, rest) = BS.splitAt maxFrame bs
           sendDataFrame conn inbox sid False chunk
           loop rest maxFrame
 
 -- | Pump a streaming-body producer onto the wire as a sequence of DATA
--- frames, terminated by an empty DATA + END_STREAM.  Each chunk is
+-- frames, terminated by a trailer block or an empty DATA + END_STREAM. Each chunk is
 -- split to the peer's MAX_FRAME_SIZE and gated on both the
 -- connection-level and per-stream send flow windows.
 sendBodyStream
-  :: Connection -> StreamInbox -> StreamId -> IO (Maybe ByteString) -> IO ()
-sendBodyStream conn inbox sid producer = loop
+  :: Connection
+  -> StreamInbox
+  -> StreamId
+  -> IO (Maybe ByteString)
+  -> IO [(ByteString, ByteString)]
+  -> IO ()
+sendBodyStream conn inbox sid producer produceTrailers = loop
   where
     loop = do
       mChunk <- producer
       case mChunk of
-        Nothing -> sendDataFrame conn inbox sid True BS.empty
+        Nothing -> do
+          trailers <- produceTrailers
+          case trailers of
+            [] -> sendDataFrame conn inbox sid True BS.empty
+            _ -> case validateTrailerBlock flagEndStream trailers of
+              Just reason -> fail (BS8.unpack reason)
+              Nothing -> sendRequestTrailers conn sid trailers
         Just bs
           | BS.null bs -> loop
           | otherwise -> do
               maxFrame <- peerMaxFrameSize conn
               sendChunkChopped conn inbox sid bs maxFrame
               loop
+
+sendRequestTrailers :: Connection -> StreamId -> [(ByteString, ByteString)] -> IO ()
+sendRequestTrailers conn sid trailers = do
+  maxFrame <- peerMaxFrameSize conn
+  encodeAndSendHeaderBlock conn sid True 0 trailers maxFrame
 
 sendChunkChopped
   :: Connection -> StreamInbox -> StreamId -> ByteString -> Int -> IO ()
@@ -1309,34 +1367,11 @@ peerMaxFrameSize conn = do
 -- Frame helpers
 ------------------------------------------------------------------------
 
--- | Strip the @Padded@ prefix/suffix from a DATA / HEADERS payload.
--- Returns 'Nothing' when the pad length byte claims more padding than
--- the frame contains.
-stripDataPadding :: FrameFlags -> ByteString -> Maybe ByteString
-stripDataPadding flags bs
-  | not (testFlag flags flagPadded) = Just bs
-  | BS.null bs = Nothing
-  | otherwise =
-      let padLen = fromIntegral (BS.head bs)
-          total  = BS.length bs
-      in if padLen + 1 > total
-           then Nothing
-           else Just (BS.take (total - padLen - 1) (BS.drop 1 bs))
-
--- | Strip the optional padding /and/ PRIORITY (flag 'flagPriority')
--- prefixes from a HEADERS payload.
-stripHeaderPadding :: FrameFlags -> ByteString -> Maybe ByteString
-stripHeaderPadding flags bs0 = do
-  bs1 <- stripDataPadding flags bs0
-  if testFlag flags flagPriority
-    then if BS.length bs1 >= 5 then Just (BS.drop 5 bs1) else Nothing
-    else Just bs1
-
 -- | Decode a PUSH_PROMISE payload into (promisedStreamId, headerBlock).
 -- Strips optional padding (RFC 9113 §6.6).
 stripPushPromisePayload :: FrameFlags -> ByteString -> Maybe (StreamId, ByteString)
 stripPushPromisePayload flags bs0 = do
-  bs1 <- stripDataPadding flags bs0
+  bs1 <- stripFramePadding flags bs0
   if BS.length bs1 < 4
     then Nothing
     else Just ( readWord32 bs1 .&. 0x7FFFFFFF

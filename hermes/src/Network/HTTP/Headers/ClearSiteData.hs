@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 {- |
 @Clear-Site-Data@ — a response header (W3C) by which an origin
@@ -12,11 +13,11 @@ Clear-Site-Data = 1#( quoted-string )
 @
 
 Each member is a quoted directive: @"cache"@, @"cookies"@,
-@"storage"@, @"executionContexts"@, or the wildcard @"*"@ (every
-data type). Unrecognised directives are preserved verbatim (without
-the surrounding quotes).
+@"storage"@, @"executionContexts"@, @"clientHints"@, or the wildcard
+@"*"@ (every data type). Unrecognised directives retain their quoted
+body, including any escapes or opaque bytes.
 
-Spec: <https://www.w3.org/TR/clear-site-data/>
+Spec: <https://w3c.github.io/webappsec-clear-site-data/#header>
 
 See also: "Network.HTTP.Headers.SetCookie", "Network.HTTP.Headers.CacheControl", "Network.HTTP.Headers.ContentSecurityPolicy", "Network.HTTP.Headers.StrictTransportSecurity".
 -}
@@ -28,8 +29,8 @@ module Network.HTTP.Headers.ClearSiteData (
 ) where
 
 import qualified Data.ByteString as B
-import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Short as SBS
+import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hClearSiteData)
@@ -48,10 +49,14 @@ data SiteData
     SiteDataStorage
   | -- | @"executionContexts"@
     SiteDataExecutionContexts
+  | -- | @"clientHints"@
+    SiteDataClientHints
   | -- | @"*"@ — every data type.
     SiteDataWildcard
-  | -- | Any other directive, preserved verbatim (without quotes).
+  | -- | Any other directive with a UTF-8 body and canonical quoting.
     SiteDataOther !ST.ShortText
+  | -- | An extension's validated wire body, with escapes intact.
+    SiteDataOtherWireBytes !SBS.ShortByteString
   deriving stock (Eq, Show)
 
 
@@ -66,15 +71,8 @@ instance KnownHeader ClearSiteData where
   type Direction ClearSiteData = 'Response
 
 
-  parseFromHeaders _ headers = case runParser clearSiteDataParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise ->
-          Left ("Unconsumed input after parsing Clear-Site-Data: " <> show leftover)
-    Fail -> Left "Failed to parse Clear-Site-Data header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ fields =
+    ClearSiteData <$> (parseListFieldLines "Clear-Site-Data" siteDataList fields >>= requireNonEmptyList "Clear-Site-Data")
 
 
   renderToHeaders _ = M.toStrictByteString . renderClearSiteData
@@ -85,21 +83,41 @@ instance KnownHeader ClearSiteData where
 
 clearSiteDataParser :: ParserT st String ClearSiteData
 clearSiteDataParser = do
-  ows
-  first <- siteData
-  rest <- many (ows *> $(char ',') *> ows *> siteData)
-  ows
-  pure (ClearSiteData (first :| rest))
+  directives <- siteDataList
+  either err (pure . ClearSiteData) (requireNonEmptyList "Clear-Site-Data" directives)
+
+
+siteDataList :: ParserT st String [SiteData]
+siteDataList = listWithEmptySlots $(char ',') siteDataParser
+
+
+siteDataParser :: ParserT st String SiteData
+siteDataParser =
+  $( switch
+       [|
+         case _ of
+           "\"cache\"" -> pure SiteDataCache
+           "\"cookies\"" -> pure SiteDataCookies
+           "\"storage\"" -> pure SiteDataStorage
+           "\"executionContexts\"" -> pure SiteDataExecutionContexts
+           "\"clientHints\"" -> pure SiteDataClientHints
+           "\"*\"" -> pure SiteDataWildcard
+         |]
+   )
+    <|> extension
   where
-    siteData = do
-      s <- quotedString
-      pure $ case ST.toString s of
-        "cache" -> SiteDataCache
-        "cookies" -> SiteDataCookies
-        "storage" -> SiteDataStorage
-        "executionContexts" -> SiteDataExecutionContexts
-        "*" -> SiteDataWildcard
-        _ -> SiteDataOther s
+    extension = do
+      body <- httpQuotedWireBytes
+      let decoded
+            | not (B.elem 92 body) = ST.fromByteString body
+            | canonicalPairs body = ST.fromByteString (unquotePairs body)
+            | otherwise = Nothing
+      pure (maybe (SiteDataOtherWireBytes (SBS.toShort body)) SiteDataOther decoded)
+
+    -- Unescaping any other pair would change the wire spelling on render.
+    canonicalPairs body = case B.uncons (B.drop 1 (B.dropWhile (/= 92) body)) of
+      Nothing -> True
+      Just (escaped, rest) -> (escaped == 34 || escaped == 92) && canonicalPairs rest
 
 
 renderClearSiteData :: ClearSiteData -> M.Builder
@@ -111,5 +129,7 @@ renderClearSiteData (ClearSiteData ds) =
       SiteDataCookies -> "\"cookies\""
       SiteDataStorage -> "\"storage\""
       SiteDataExecutionContexts -> "\"executionContexts\""
+      SiteDataClientHints -> "\"clientHints\""
       SiteDataWildcard -> "\"*\""
-      SiteDataOther t -> R.rfc8941String (RFC8941String t)
+      SiteDataOther t -> M.byteString (R.encodeHttpQuotedBytes (ST.toShortByteString t))
+      SiteDataOtherWireBytes body -> M.char7 '"' <> M.shortByteString body <> M.char7 '"'

@@ -1,5 +1,7 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 {- |
-@Isolation@ — the de-facto (un-prefixed) spelling of OData's isolation
+@Isolation@ — the OData 4.01 spelling of the isolation
 header, semantically identical to @OData-Isolation@. A request header by
 which a client asks that the request be isolated from external changes; the
 only value defined by the specification is @snapshot@ (snapshot isolation).
@@ -10,11 +12,11 @@ only value defined by the specification is @snapshot@ (snapshot isolation).
 Isolation = "snapshot"
 @
 
-Surfaced as an enumeration with a forward-compatible fallback constructor
-for any future isolation level token. The value is case-sensitive.
+The @snapshot@ literal is case-insensitive. Other isolation tokens are
+retained so the recipient can handle an unsupported isolation level.
 
-Spec: OData Version 4.01 Part 1: Protocol §8.2.5
-<https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part1-protocol.html#sec_HeaderODataIsolation>
+Spec: OData Version 4.01 Part 1: Protocol §8.2.6
+<https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part1-protocol.html#sec_HeaderIsolationODataIsolation>
 
 See also: "Network.HTTP.Headers.ODataIsolation", "Network.HTTP.Headers.ODataVersion",
 "Network.HTTP.Headers.ODataMaxVersion", "Network.HTTP.Headers.Prefer".
@@ -25,7 +27,7 @@ module Network.HTTP.Headers.Isolation (
   renderIsolation,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hIsolation)
@@ -49,25 +51,21 @@ instance KnownHeader Isolation where
   type Direction Isolation = 'Request
 
 
-  parseFromHeaders _ headers = case runParser isolationParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Isolation header: " <> show rest
-    Fail -> Left "Failed to parse Isolation header"
-    Err e -> Left e
+  parseFromHeaders _ ("snapshot" :| []) = Right Snapshot
+  parseFromHeaders _ fields = parseSingleFieldLine "Isolation" isolationParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderIsolation
+  renderToHeaders _ Snapshot = "snapshot"
+  renderToHeaders _ value = M.toStrictByteString (renderIsolation value)
 
 
   headerName _ = hIsolation
 
 
 isolationParser :: ParserT st String Isolation
-isolationParser = classify <$> rfc9110Token
-  where
-    classify t
-      | t == ST.fromString "snapshot" = Snapshot
-      | otherwise = IsolationOther t
+isolationParser =
+  ($(switchAsciiCI [|case _ of "snapshot" -> pure Snapshot|]) <* notFollowedBy (skipSatisfyAscii isTokenChar))
+    <|> (IsolationOther <$> rfc9110Token)
 
 
 renderIsolation :: Isolation -> M.Builder

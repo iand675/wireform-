@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {- | URI representation and helpers for the wireform HTTP client.
 
@@ -19,7 +21,7 @@ prefix) and gets composed with a relative request URI by the
 -}
 module Network.HTTP.Client.URI (
   -- * Parsed URIs
-  URI (..),
+  URI (URI, uriScheme, uriAuthority, uriUserinfoBytes, uriPath, uriQuery, uriFragment),
   Scheme (..),
   Authority (..),
   parseURI,
@@ -27,9 +29,13 @@ module Network.HTTP.Client.URI (
   uriHost,
   uriPort,
   uriPathAndQuery,
+  uriRawQuery,
+  uriQueryComponent,
+  uriFragmentComponent,
 
   -- * Userinfo and IPv6 helpers
   uriUserinfo,
+  withoutUserinfo,
   isIPv6Host,
   renderHostPort,
 
@@ -52,6 +58,7 @@ module Network.HTTP.Client.URI (
 
   -- * Reference resolution (RFC 3986 §5)
   resolveReference,
+  resolveHttpReference,
 
   -- * Base URLs
   BaseURL (..),
@@ -81,11 +88,13 @@ module Network.HTTP.Client.URI (
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
-import Data.Char (toLower)
+import Data.CaseInsensitive qualified as CI
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IDN qualified as IDN
+import Network.HTTP.Grammar.Authority qualified as HTTPAuthority
+import Network.HTTP.Grammar.Parser qualified as HTTPGrammar
 import Network.HTTP.PercentEncoding qualified as PE
 import Network.URI.Template (ToTemplateValue (..), UriTemplate, parseTemplate, uri)
 import Network.URI.Template qualified as Template
@@ -112,26 +121,52 @@ data Authority = Authority
 absolute URIs at the wire boundary — relative URIs are composed
 with a 'BaseURL' upstream via 'withBaseURL'.
 -}
-data URI = URI
-  { uriScheme :: !Scheme
-  , uriAuthority :: !Authority
-  , uriUserinfoBytes :: !(Maybe ByteString)
+data URI = ParsedURI
+  { parsedScheme :: !Scheme
+  , parsedAuthority :: !Authority
+  , parsedUserinfo :: !(Maybe ByteString)
   {- ^ Userinfo as bytes (\"user\" or \"user:password\"), without
   any percent-decoding. RFC 3986 \u00a73.2.1 reserves this slot
   in the URI; HTTP transports treat it as input to Basic auth
   rather than putting it on the wire.
   -}
-  , uriPath :: !ByteString
+  , parsedPath :: !ByteString
   {- ^ Path component starting with @\"/\"@ (or empty for an
   authority-only URI like @http:\/\/host@; we normalise to
   @\"/\"@ when sending).
   -}
-  , uriQuery :: !ByteString
-  -- ^ Query component without the leading @\"?\"@. Empty if absent.
-  , uriFragment :: !ByteString
-  -- ^ Fragment without the leading @\"#\"@. Empty if absent.
+  , uriQueryComponent :: !(Maybe ByteString)
+  -- ^ Query without the delimiter. @Just ""@ represents a bare @?@.
+  , uriFragmentComponent :: !(Maybe ByteString)
+  -- ^ Fragment without the delimiter. @Just ""@ represents a bare @#@.
   }
   deriving stock (Eq, Show)
+
+
+{- | Byte-oriented construction and matching. 'uriQuery' and
+'uriFragment' yield empty bytes when their component is absent.
+Construction and record updates through this pattern treat empty
+bytes as absent. Use the component fields to retain explicit empty
+delimiters.
+-}
+pattern URI :: Scheme -> Authority -> Maybe ByteString -> ByteString -> ByteString -> ByteString -> URI
+pattern URI{uriScheme, uriAuthority, uriUserinfoBytes, uriPath, uriQuery, uriFragment} <-
+  ParsedURI uriScheme uriAuthority uriUserinfoBytes uriPath
+    (componentBytes -> uriQuery) (componentBytes -> uriFragment)
+  where
+    URI scheme authority userinfo path query fragment =
+      ParsedURI scheme authority userinfo path (nonEmptyComponent query) (nonEmptyComponent fragment)
+{-# COMPLETE URI #-}
+
+
+componentBytes :: Maybe ByteString -> ByteString
+componentBytes = maybe BS.empty id
+
+
+nonEmptyComponent :: ByteString -> Maybe ByteString
+nonEmptyComponent bytes
+  | BS.null bytes = Nothing
+  | otherwise = Just bytes
 
 
 defaultPort :: Scheme -> Int
@@ -148,7 +183,7 @@ uriPort u = case authPort (uriAuthority u) of
   Nothing -> defaultPort (uriScheme u)
 
 
-{- | The effective host (lowercased ASCII bytes). For an IPv6 literal
+{- | The host as parsed from the authority. For an IPv6 literal
 this returns the address bytes /without/ surrounding brackets;
 'renderHostPort' adds them back.
 -}
@@ -159,6 +194,11 @@ uriHost = authHost . uriAuthority
 -- | Userinfo as bytes (without any percent-decoding), or 'Nothing'.
 uriUserinfo :: URI -> Maybe ByteString
 uriUserinfo = uriUserinfoBytes
+
+
+-- | Remove userinfo while preserving the other URI components.
+withoutUserinfo :: URI -> URI
+withoutUserinfo u = u{parsedUserinfo = Nothing}
 
 
 {- | True if @host@ looks like an IPv6 literal (contains @:@). Used by
@@ -230,7 +270,7 @@ parseURIIdna t = do
     then Right u
     else do
       h' <- hostToAscii (TE.decodeUtf8 h)
-      Right u {uriAuthority = auth {authHost = h'}}
+      Right u {parsedAuthority = auth {authHost = h'}}
 
 
 {- | Concatenation of path and query suitable for the HTTP\/1.1
@@ -238,9 +278,19 @@ request-target or HTTP\/2 @:path@ pseudo-header.
 -}
 uriPathAndQuery :: URI -> ByteString
 uriPathAndQuery u =
-  let p = if BS.null (uriPath u) then "/" else uriPath u
-      q = uriQuery u
-  in if BS.null q then p else p <> "?" <> q
+  let p = if BS.null (parsedPath u) then "/" else parsedPath u
+  in case uriQueryComponent u of
+       Nothing -> p
+       Just q -> p <> "?" <> q
+
+
+-- | Query bytes with the leading delimiter when the component is present.
+uriRawQuery :: URI -> ByteString
+uriRawQuery = renderComponent "?" . uriQueryComponent
+
+
+renderComponent :: ByteString -> Maybe ByteString -> ByteString
+renderComponent delimiter = maybe BS.empty (delimiter <>)
 
 
 -- | Render a 'URI' back to its canonical absolute form.
@@ -259,8 +309,8 @@ renderURI u =
         Nothing -> ""
         Just p -> ":" <> BS8.pack (show p)
       path = if BS.null (uriPath u) then "/" else uriPath u
-      query = if BS.null (uriQuery u) then "" else "?" <> uriQuery u
-      frag = if BS.null (uriFragment u) then "" else "#" <> uriFragment u
+      query = uriRawQuery u
+      frag = renderComponent "#" (uriFragmentComponent u)
   in scheme <> ui <> hostBs <> portBs <> path <> query <> frag
 
 
@@ -286,27 +336,17 @@ parseURI bs = do
         Nothing -> (Nothing, rest2)
       (authBs, pathQF) = splitAuthority hostStart
   auth <- parseAuthority authBs
-  let (pathBs, qfBs) = BS.break (\b -> b == 0x3F || b == 0x23) pathQF
-      (queryBs0, fragBs0) =
-        case BS.uncons qfBs of
-          Just (0x3F, q) ->
-            let (q', rest) = BS.break (== 0x23) q
-            in (q', dropHash rest)
-          Just (0x23, f) -> ("", f)
-          _ -> ("", "")
+  let TargetParts path query fragment = splitTargetParts pathQF
   pure
-    URI
-      { uriScheme = scheme
-      , uriAuthority = auth
-      , uriUserinfoBytes = userinfo
-      , uriPath = if BS.null pathBs then "/" else pathBs
-      , uriQuery = queryBs0
-      , uriFragment = fragBs0
+    ParsedURI
+      { parsedScheme = scheme
+      , parsedAuthority = auth
+      , parsedUserinfo = userinfo
+      , parsedPath = if BS.null path then "/" else path
+      , uriQueryComponent = query
+      , uriFragmentComponent = fragment
       }
   where
-    dropHash b = case BS.uncons b of
-      Just (0x23, r) -> r
-      _ -> b
     orFail Nothing msg = Left msg
     orFail (Just x) _ = Right x
 
@@ -318,12 +358,29 @@ parseURI bs = do
     splitAuthority = BS.break (\b -> b == 0x2F || b == 0x3F || b == 0x23)
 
 
+data TargetParts = TargetParts !ByteString !(Maybe ByteString) !(Maybe ByteString)
+
+
+splitTargetParts :: ByteString -> TargetParts
+splitTargetParts bytes =
+  let (path, suffix) = BS.break (\b -> b == 0x3F || b == 0x23) bytes
+  in case BS.uncons suffix of
+       Just (0x3F, rest) ->
+         let (query, fragment) = BS.break (== 0x23) rest
+         in TargetParts path (Just query) (BS.stripPrefix "#" fragment)
+       Just (0x23, fragment) -> TargetParts path Nothing (Just fragment)
+       _ -> TargetParts path Nothing Nothing
+{-# INLINE splitTargetParts #-}
+
+
 splitScheme :: ByteString -> Either String (Scheme, ByteString)
 splitScheme bs =
   let (sBs, rest) = BS.break (== 0x3A) bs
-      lowered = BS8.pack (map toLower (BS8.unpack sBs))
+      lowered = CI.foldCase sBs
   in case BS.uncons rest of
        Just (0x3A, body)
+         | sBs == "http" -> Right (SchemeHttp, body)
+         | sBs == "https" -> Right (SchemeHttps, body)
          | lowered == "http" -> Right (SchemeHttp, body)
          | lowered == "https" -> Right (SchemeHttps, body)
          | otherwise -> Left ("unsupported URI scheme: " <> BS8.unpack sBs)
@@ -338,15 +395,11 @@ parseAuthority bs0
       case BS.elemIndex 0x5D bs0 of
         Nothing -> Left "URI: unterminated IPv6 authority"
         Just j ->
-          let host = BS.take j (BS.drop 1 bs0) -- drop '[' and ']'
+          let host = BS.take (j - 1) (BS.drop 1 bs0)
               tail_ = BS.drop (j + 1) bs0
           in case BS.uncons tail_ of
                Nothing -> Right (Authority host Nothing)
-               Just (0x3A, portBs) -> case BS8.readInt portBs of
-                 Just (n, leftover)
-                   | BS.null leftover ->
-                       Right (Authority host (Just n))
-                 _ -> Left ("URI: invalid IPv6 port: " <> BS8.unpack portBs)
+               Just (0x3A, portBs) -> Authority host <$> parsePort portBs
                _ -> Left ("URI: junk after IPv6 authority: " <> BS8.unpack tail_)
   -- Plain host or IPv4 literal: split on the rightmost ':' (if any).
   | otherwise = case BS.elemIndexEnd 0x3A bs0 of
@@ -354,12 +407,12 @@ parseAuthority bs0
         | i > 0 ->
             let (h, p0) = BS.splitAt i bs0
                 p = BS.drop 1 p0
-            in case BS8.readInt p of
-                 Just (n, leftover)
-                   | BS.null leftover ->
-                       Right (Authority h (Just n))
-                 _ -> Right (Authority bs0 Nothing)
+            in Authority h <$> parsePort p
       _ -> Right (Authority bs0 Nothing)
+  where
+    parsePort bytes
+      | BS.null bytes = Right Nothing
+      | otherwise = Just . fromIntegral <$> HTTPGrammar.parseFieldLine "URI port" HTTPAuthority.portNumber bytes
 
 
 stripPrefixBS :: ByteString -> ByteString -> Maybe ByteString
@@ -417,13 +470,13 @@ unsafeBaseURL t = case parseBaseURL t of
 renderBaseURL :: BaseURL -> ByteString
 renderBaseURL b =
   renderURI
-    URI
-      { uriScheme = baseScheme b
-      , uriAuthority = baseAuthority b
-      , uriUserinfoBytes = Nothing
-      , uriPath = if BS.null (basePath b) then "/" else basePath b
-      , uriQuery = ""
-      , uriFragment = ""
+    ParsedURI
+      { parsedScheme = baseScheme b
+      , parsedAuthority = baseAuthority b
+      , parsedUserinfo = Nothing
+      , parsedPath = if BS.null (basePath b) then "/" else basePath b
+      , uriQueryComponent = Nothing
+      , uriFragmentComponent = Nothing
       }
 
 
@@ -444,13 +497,10 @@ resolveAgainst base req =
         | BS.null reqPath || reqPath == "/" = basePath' <> "/"
         | "/" `BS.isPrefixOf` reqPath = basePath' <> reqPath
         | otherwise = basePath' <> "/" <> reqPath
-  in URI
-       { uriScheme = baseScheme base
-       , uriAuthority = baseAuthority base
-       , uriUserinfoBytes = uriUserinfoBytes req
-       , uriPath = joined
-       , uriQuery = uriQuery req
-       , uriFragment = uriFragment req
+  in req
+       { parsedScheme = baseScheme base
+       , parsedAuthority = baseAuthority base
+       , parsedPath = joined
        }
 
 
@@ -545,7 +595,7 @@ addQueryParam k v u =
   let kv = PE.encodeQueryComponent k <> "=" <> PE.encodeQueryComponent v
       q = uriQuery u
       q' = if BS.null q then kv else q <> "&" <> kv
-  in u {uriQuery = q'}
+  in u {uriQueryComponent = Just q'}
 
 
 -- | Append several @(key, value)@ pairs.
@@ -555,7 +605,7 @@ addQueryParams kvs u = foldl (\acc (k, v) -> addQueryParam k v acc) u kvs
 
 -- | Replace the query string with the supplied pairs (percent-encoded).
 setQueryParams :: [(ByteString, ByteString)] -> URI -> URI
-setQueryParams kvs u = u {uriQuery = PE.renderQueryString kvs}
+setQueryParams kvs u = u {uriQueryComponent = nonEmptyComponent (PE.renderQueryString kvs)}
 
 
 {- | Decode the query string into a list of @(key, value)@ pairs,
@@ -572,7 +622,7 @@ queryParams = PE.decodeQueryString . uriQuery
 
 {- | RFC 3986 §6 syntax-based normalization. Idempotent.
 
-* Scheme and host are already lowercased at parse time.
+* The scheme is parsed case-insensitively and the host is folded to lowercase.
 * Default ports collapse to 'Nothing'.
 * The path is run through 'removeDotSegments'.
 * Percent-escapes have their hex digits uppercased and their
@@ -587,13 +637,13 @@ normalizeURI u =
       path0 = if BS.null (uriPath u) then "/" else uriPath u
       path1 = removeDotSegments path0
       pathN = normalizePercentEncoding path1
-      queryN = normalizePercentEncoding (uriQuery u)
-      fragN = normalizePercentEncoding (uriFragment u)
+      queryN = normalizePercentEncoding <$> uriQueryComponent u
+      fragN = normalizePercentEncoding <$> uriFragmentComponent u
   in u
-       { uriAuthority = auth {authPort = port'}
-       , uriPath = pathN
-       , uriQuery = queryN
-       , uriFragment = fragN
+       { parsedAuthority = auth {authHost = CI.foldCase (authHost auth), authPort = port'}
+       , parsedPath = pathN
+       , uriQueryComponent = queryN
+       , uriFragmentComponent = fragN
        }
 
 
@@ -606,11 +656,13 @@ termination.
 -}
 removeDotSegments :: ByteString -> ByteString
 removeDotSegments path
-  | BS.null path = path
+  | not (BS.elem 0x2E path) = path
   | otherwise =
       let absolute = "/" `BS.isPrefixOf` path
           segs = BS.split 0x2F (if absolute then BS.drop 1 path else path)
           go acc [] = reverse acc
+          go acc ["."] = reverse ("" : acc)
+          go acc [".."] = reverse ("" : drop 1 acc)
           go acc (s : ss)
             | s == "." = go acc ss
             | s == ".." = go (drop 1 acc) ss
@@ -628,7 +680,9 @@ unreserved set (those escapes are gratuitous). Other escapes are
 preserved as-is.
 -}
 normalizePercentEncoding :: ByteString -> ByteString
-normalizePercentEncoding bs0 = BS.pack (go (BS.unpack bs0))
+normalizePercentEncoding bytes
+  | BS.elem 0x25 bytes = BS.pack (go (BS.unpack bytes))
+  | otherwise = bytes
   where
     isUnreservedByte w =
       (w >= 0x41 && w <= 0x5A) -- A-Z
@@ -662,8 +716,8 @@ normalizePercentEncoding bs0 = BS.pack (go (BS.unpack bs0))
 -- ---------------------------------------------------------------------------
 
 {- | RFC 3986 §5.2 \"Transform References\" given a base URI and a
-reference (parsed as a URI for convenience; only its non-empty
-fields are consulted, mirroring the algorithm in §5.2.2).
+reference represented as a URI. An absent query on an empty reference
+path inherits the base query. An explicitly empty query replaces it.
 
 This handles the cases an HTTP client cares about: reference
 with its own authority (network-path), reference with an
@@ -679,29 +733,53 @@ resolveReference
 resolveReference base ref =
   let refHost = authHost (uriAuthority ref)
   in if not (BS.null refHost)
-       then ref {uriPath = removeDotSegments (uriPath ref)}
-       else
-         let path' = case uriPath ref of
-               p
-                 | BS.null p -> uriPath base
-                 | "/" `BS.isPrefixOf` p -> removeDotSegments p
-                 | otherwise -> removeDotSegments (mergePath base p)
-             query' =
-               if BS.null (uriPath ref) && BS.null (uriQuery ref)
-                 then uriQuery base
-                 else uriQuery ref
-         in URI
-              { uriScheme = uriScheme base
-              , uriAuthority = uriAuthority base
-              , uriUserinfoBytes = uriUserinfoBytes base
-              , uriPath = path'
-              , uriQuery = query'
-              , uriFragment = uriFragment ref
-              }
+       then ref {parsedPath = removeDotSegments (uriPath ref)}
+       else resolveRelativeReference base (TargetParts (uriPath ref) (uriQueryComponent ref) (uriFragmentComponent ref))
+
+
+resolveRelativeReference :: URI -> TargetParts -> URI
+resolveRelativeReference base (TargetParts path query fragment) =
+  base
+    { parsedPath = resolvedPath
+    , uriQueryComponent = resolvedQuery
+    , uriFragmentComponent = fragment
+    }
   where
-    mergePath b p
-      | BS.null (uriPath b) = "/" <> p
+    resolvedPath
+      | BS.null path = uriPath base
+      | "/" `BS.isPrefixOf` path = removeDotSegments path
+      | otherwise = removeDotSegments merged
+    resolvedQuery = case query of
+      Nothing | BS.null path -> uriQueryComponent base
+      _ -> query
+    basePathBytes = uriPath base
+    merged
+      | BS.null basePathBytes = "/" <> path
       | otherwise =
-          let bp = uriPath b
-              prefix = BS.reverse (BS.dropWhile (/= 0x2F) (BS.reverse bp))
-          in prefix <> p
+          case BS.elemIndexEnd 0x2F basePathBytes of
+            Just i -> BS.take (i + 1) basePathBytes <> path
+            Nothing -> path
+{-# INLINE resolveRelativeReference #-}
+
+
+{- | Resolve a validated URI-reference's wire spelling into an HTTP(S)
+URI. Relative and network-path references require a base. Empty query
+and fragment delimiters survive resolution and rendering.
+-}
+resolveHttpReference :: Maybe URI -> ByteString -> Maybe URI
+resolveHttpReference base wire
+  | "//" `BS.isPrefixOf` wire = do
+      current <- base
+      let scheme = case uriScheme current of
+            SchemeHttp -> "http:"
+            SchemeHttps -> "https:"
+      absolute (scheme <> wire)
+  | ":" `BS.isPrefixOf` afterFirstSegment = absolute wire
+  | otherwise = do
+      current <- base
+      pure (resolveRelativeReference current (splitTargetParts wire))
+  where
+    absolute raw = case parseURI raw of
+      Right target -> Just target{parsedPath = removeDotSegments (uriPath target)}
+      Left _ -> Nothing
+    afterFirstSegment = BS.dropWhile (\byte -> byte /= 0x3a && byte /= 0x2f && byte /= 0x3f && byte /= 0x23) wire

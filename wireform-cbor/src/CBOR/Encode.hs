@@ -2,9 +2,10 @@
 
 {- | CBOR (RFC 8949) binary encoding.
 
-Uses canonical encoding: smallest integer form, definite-length
-arrays and maps, big-endian multi-byte integers.
-Built on top of 'Proto.Encode.Direct.directEncode' for direct buffer writes.
+Uses the smallest integer form, definite-length arrays and maps, and
+big-endian multi-byte values. The ordinary encoder preserves the float
+width and map order supplied by the caller.
+Built on top of 'Wireform.Encode.Direct.directEncode' for direct buffer writes.
 
 @
 import qualified CBOR.Encode as CE
@@ -19,13 +20,13 @@ module CBOR.Encode (
   encodeSequence,
 ) where
 
+import CBOR.Internal (floatToHalf, halfToFloat)
 import CBOR.Value qualified as C
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits ((.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
 import Data.List (sortBy)
-import Data.Ord (comparing)
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Data.Word (Word16, Word32, Word64, Word8, byteSwap16, byteSwap32, byteSwap64)
@@ -33,24 +34,26 @@ import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (pokeByteOff)
-import GHC.Float (castDoubleToWord64, castFloatToWord32)
+import GHC.Float (castDoubleToWord64, castFloatToWord32, castWord32ToFloat, double2Float, float2Double)
 import Wireform.Encode.Direct (directEncode)
 
 
--- | Encode a CBOR 'C.Value' to a strict 'ByteString'.
+-- | Encode a CBOR 'C.Value' to a strict 'ByteString'. Simple codes
+-- 24 through 31 are reserved and raise an error.
 encode :: C.Value -> ByteString
 encode !val =
   let !sz = valueSize val
   in directEncode sz (\p off -> writeValue p off val)
 
 
-{- | Encode in Deterministic CBOR (RFC 8949 Section 4.2):
-map keys sorted by encoded form (shortest first, then lexicographic),
-minimal integer encoding (already done), no indefinite-length (already done).
+{- | Encode with length-first map key ordering (RFC 8949 Section 4.2.3),
+minimal integer widths and the shortest exact floating-point widths.
+All NaNs use the half-precision encoding @0xf97e00@. Use 'encode' when
+the original floating-point width or NaN payload matters.
 -}
 encodeDeterministic :: C.Value -> ByteString
 encodeDeterministic !val =
-  let !sorted = sortMapKeys val
+  let !sorted = normalizeDeterministic val
       !sz = valueSize sorted
   in directEncode sz (\p off -> writeValue p off sorted)
 
@@ -62,14 +65,35 @@ encodeSequence !vals =
   in directEncode sz (\p off -> V.foldM' (\o v -> writeValue p o v) off vals)
 
 
-sortMapKeys :: C.Value -> C.Value
-sortMapKeys = \case
+normalizeDeterministic :: C.Value -> C.Value
+normalizeDeterministic = \case
   C.Map kvs ->
-    let sorted = V.fromList $ sortBy cmpEncodedKey $ V.toList $ V.map (\(k, v) -> (sortMapKeys k, sortMapKeys v)) kvs
+    let sorted = V.fromList $ sortBy cmpEncodedKey $ V.toList $ V.map (\(k, v) -> (normalizeDeterministic k, normalizeDeterministic v)) kvs
     in C.Map sorted
-  C.Array vs -> C.Array (V.map sortMapKeys vs)
-  C.Tag n v -> C.Tag n (sortMapKeys v)
+  C.Array vs -> C.Array (V.map normalizeDeterministic vs)
+  C.Tag n v -> C.Tag n (normalizeDeterministic v)
+  C.Float16 f
+    | isNaN f -> canonicalNaN
+  C.Float32 f -> narrowFloat f
+  C.Float64 d
+    | isNaN d -> canonicalNaN
+    | let f = double2Float d
+    , castDoubleToWord64 (float2Double f) == castDoubleToWord64 d ->
+        narrowFloat f
   other -> other
+
+
+narrowFloat :: Float -> C.Value
+narrowFloat f
+  | isNaN f = canonicalNaN
+  | castFloatToWord32 (halfToFloat (floatToHalf bits)) == bits = C.Float16 f
+  | otherwise = C.Float32 f
+  where
+    bits = castFloatToWord32 f
+
+
+canonicalNaN :: C.Value
+canonicalNaN = C.Float16 (castWord32ToFloat 0x7fc00000)
 
 
 cmpEncodedKey :: (C.Value, C.Value) -> (C.Value, C.Value) -> Ordering
@@ -209,6 +233,7 @@ valueSize = \case
     headerSize tagNum + valueSize content
   C.Simple n
     | n <= 23 -> 1
+    | n < 32 -> error "CBOR.Encode: reserved simple value"
     | otherwise -> 2
 
 
@@ -220,30 +245,3 @@ headerSize !n
   | n <= 0xffffffff = 5
   | otherwise = 9
 {-# INLINE headerSize #-}
-
-
--- | Convert IEEE 754 single-precision bits to half-precision bits.
-floatToHalf :: Word32 -> Word16
-floatToHalf !w =
-  let !sign32 = w `shiftR` 31
-      !expo = (w `shiftR` 23) .&. 0xff
-      !mant = w .&. 0x7fffff
-      !signBit = fromIntegral sign32 `shiftL` 15 :: Word16
-  in if expo == 0xff
-       then signBit .|. 0x7c00 .|. (if mant /= 0 then 0x0200 else 0)
-       else
-         if expo > 142
-           then signBit .|. 0x7c00
-           else
-             if expo < 113
-               then
-                 if expo < 103
-                   then signBit
-                   else
-                     let !m = mant .|. 0x800000
-                         !shift = fromIntegral (125 - expo) :: Int
-                     in signBit .|. fromIntegral ((m `shiftR` shift) .&. 0x03ff)
-               else
-                 let !hexp = fromIntegral (expo - 112) :: Word16
-                     !hmant = fromIntegral ((mant `shiftR` 13) .&. 0x03ff) :: Word16
-                 in signBit .|. (hexp `shiftL` 10) .|. hmant

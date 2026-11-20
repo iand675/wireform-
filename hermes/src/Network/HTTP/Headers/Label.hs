@@ -7,7 +7,8 @@ carries the given label name.
 Label = \"Label\" \":\" label-name
 @
 
-The label name is treated here as an RFC 9110 token.
+The label is URL-escaped UTF-8. The wire spelling and its case are
+retained for comparison. 'labelText' returns the decoded text.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc3253.html#section-8.3>
 
@@ -15,20 +16,29 @@ See also: "Network.HTTP.Headers.DAV", "Network.HTTP.Headers.Depth", "Network.HTT
 -}
 module Network.HTTP.Headers.Label (
   Label (..),
+  labelText,
+  labelFromText,
   labelParser,
   renderLabel,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString as BS
+import Data.CharSet.Posix.Ascii (alnum)
+import Data.Text (Text)
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hLabel)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.QueryParameters (urlEncodeBuilder)
+import Network.HTTP.URL.Decode (urlDecodeMaybe)
+import Wireform.FFI (validateUtf8SWAR)
 
 
--- | The label name selecting a labelled version.
+-- | The URL-escaped, case-sensitive spelling of the label name.
 newtype Label = Label {labelName :: ST.ShortText}
   deriving stock (Eq, Show)
 
@@ -39,11 +49,7 @@ instance KnownHeader Label where
   type Direction Label = 'Request
 
 
-  parseFromHeaders _ headers = case runParser labelParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Label header: " <> show rest
-    Fail -> Left "Failed to parse Label header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Label" labelValue
 
 
   renderToHeaders _ = M.toStrictByteString . renderLabel
@@ -53,11 +59,35 @@ instance KnownHeader Label where
 
 
 labelParser :: ParserT st String Label
-labelParser = do
-  ows
-  name <- rfc9110Token
-  ows
-  pure (Label name)
+labelParser = ows *> labelValue <* ows
+
+
+labelValue :: ParserT st String Label
+labelValue = withByteString escapedLabel $ \() bytes ->
+  if not (BS.elem 37 bytes) || maybe False validateUtf8SWAR (urlDecodeMaybe bytes)
+    then pure (Label (STU.fromByteStringUnsafe bytes))
+    else err "Invalid percent-encoded UTF-8 in Label"
+
+
+-- RFC 2396 uric, plus the percent introducer checked by the decoder.
+escapedLabel :: ParserT st e ()
+escapedLabel = case labelChars of
+  AsciiSet low high -> skipMany (skipSatisfyAscii (asciiMember low high))
+{-# INLINE escapedLabel #-}
+
+
+labelChars :: AsciiSet
+labelChars = asciiSet (alnum <> "-_.!~*'();/?:@&=+$,%")
+
+
+-- | Decode a label name. This may fail for a manually supplied wire spelling.
+labelText :: Label -> Maybe Text
+labelText (Label name) = urlDecodeMaybe (ST.toByteString name) >>= either (const Nothing) Just . TE.decodeUtf8'
+
+
+-- | Construct a label from text using uppercase percent escapes.
+labelFromText :: Text -> Label
+labelFromText = Label . STU.fromByteStringUnsafe . M.toStrictByteString . urlEncodeBuilder
 
 
 renderLabel :: Label -> M.Builder

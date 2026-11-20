@@ -1,0 +1,55 @@
+edition = "2024";
+option features.field_presence = IMPLICIT;
+option features.repeated_field_encoding = EXPANDED;
+option features.enum_type = CLOSED;
+
+enum ClosedEdition {
+  CLOSED_EDITION_UNSPECIFIED = 0;
+}
+
+enum OpenEdition {
+  option features = {enum_type: OPEN};
+  OPEN_EDITION_UNSPECIFIED = 0;
+}
+
+message EditionEnums {
+  ClosedEdition closed = 1 [features.field_presence = EXPLICIT];
+  OpenEdition open = 2 [features.field_presence = EXPLICIT];
+}
+
+message Fields24 {
+  int32 count = 1;
+  int32 explicit_count = 2 [features.field_presence = EXPLICIT];
+  message Inner {
+    int32 inherited = 1;
+    int32 explicit_value = 2 [features = {field_presence: EXPLICIT}];
+  }
+  Inner inner = 3;
+}
+
+message Packing24 {
+  repeated int32 expanded = 16;
+  repeated int32 packed_override = 17 [features.repeated_field_encoding = PACKED];
+  message Inner {
+    repeated int32 packed_override = 18 [features = {repeated_field_encoding: PACKED}];
+  }
+  Inner child = 19;
+}
+
+message FieldEncoding24 {
+  Packing24 delimited = 1 [features = {message_encoding: DELIMITED}];
+  Packing24 standard = 2;
+}
+
+message Required24 {
+  int32 count = 1 [features.field_presence = LEGACY_REQUIRED];
+  bytes payload = 2 [features = {field_presence: LEGACY_REQUIRED}];
+  RequiredChild24 child = 3 [features.field_presence = LEGACY_REQUIRED, features.message_encoding = DELIMITED];
+  ClosedEdition state = 4 [features.field_presence = LEGACY_REQUIRED];
+  int32 ordinary = 5;
+}
+
+message RequiredChild24 {
+  int32 value = 1 [features.field_presence = LEGACY_REQUIRED];
+  string label = 2 [features.field_presence = LEGACY_REQUIRED];
+}

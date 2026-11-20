@@ -1,0 +1,4967 @@
+
+==================== Tidy Core ====================
+
+Result size of Tidy Core
+  = {terms: 7,885, types: 8,338, coercions: 820, joins: 32/125}
+
+$WWrite
+  = \ conrep_a6Ui conrep1_a6Uj ->
+      case conrep_a6Ui of { I# unbx_a6Uk ->
+      case conrep1_a6Uj of conrep3_a6Uj { __DEFAULT ->
+      Write unbx_a6Uk conrep3_a6Uj
+      }
+      }
+
+$WFixedBufferOverflow
+  = \ conrep_a6Qr conrep1_a6Qs ->
+      case conrep_a6Qr of { I# unbx_a6Qt ->
+      case conrep1_a6Qs of { I# unbx1_a6Qu ->
+      FixedBufferOverflow unbx_a6Qt unbx1_a6Qu
+      }
+      }
+
+$WChunkOverflowException
+  = \ conrep_a6PC conrep1_a6PD conrep2_a6PE conrep3_a6PF ->
+      case conrep_a6PC of conrep4_a6PC { __DEFAULT ->
+      case conrep1_a6PD of { MVar unbx_a6PG ->
+      case conrep2_a6PE of { MVar unbx1_a6PH ->
+      case conrep3_a6PF of { I# unbx2_a6PI ->
+      ChunkOverflowException conrep4_a6PC unbx_a6PG unbx1_a6PH unbx2_a6PI
+      }
+      }
+      }
+      }
+
+$WDynamicSink
+  = \ conrep_a6KW ->
+      let { cowrap_unbx_a6KZ = conrep_a6KW `cast` <Co:2> :: ... } in
+      case cowrap_unbx_a6KZ of { STRef unbx_a6L0 ->
+      DynamicSink unbx_a6L0
+      }
+
+$WGrowingBuffer
+  = \ conrep_a6L3 ->
+      let { cowrap_unbx_a6L4 = conrep_a6L3 `cast` <Co:3> :: ... } in
+      case cowrap_unbx_a6L4 of { STRef unbx_a6L5 ->
+      GrowingBuffer unbx_a6L5
+      }
+
+$WHandleSink
+  = \ conrep_a6Lb conrep1_a6Lc conrep2_a6Ld ->
+      case conrep_a6Lb of conrep3_a6Lb { __DEFAULT ->
+      case conrep1_a6Lc of { I# unbx_a6Le ->
+      let { cowrap_unbx_a6Lf = conrep2_a6Ld `cast` <Co:2> :: ... } in
+      case cowrap_unbx_a6Lf of { STRef unbx1_a6Lg ->
+      HandleSink conrep3_a6Lb unbx_a6Le unbx1_a6Lg
+      }
+      }
+      }
+
+$WStreamingSink
+  = \ conrep_a6Ll conrep1_a6Lm ->
+      case conrep_a6Ll of { I# unbx_a6Ln ->
+      let { cowrap_unbx_a6Lo = conrep1_a6Lm `cast` <Co:2> :: ... } in
+      case cowrap_unbx_a6Lo of { STRef unbx1_a6Lp ->
+      StreamingSink unbx_a6Ln unbx1_a6Lp
+      }
+      }
+
+$WRingSink
+  = \ conrep_a6Ls ->
+      let { cowrap_unbx_a6Lt = conrep_a6Ls `cast` <Co:2> :: ... } in
+      case cowrap_unbx_a6Lt of { STRef unbx_a6Lu -> RingSink unbx_a6Lu }
+
+$WStreamQueue
+  = \ conrep_a6Lx
+      conrep1_a6Ly
+      conrep2_a6Lz
+      conrep3_a6LA
+      conrep4_a6LB ->
+      case conrep_a6Lx of { Ptr unbx_a6LC ->
+      case conrep1_a6Ly of conrep6_a6Ly { __DEFAULT ->
+      case conrep2_a6Lz of { I# unbx1_a6LD ->
+      case conrep3_a6LA of { I# unbx2_a6LE ->
+      case conrep4_a6LB of conrep9_a6LB { __DEFAULT ->
+      StreamQueue
+        unbx_a6LC conrep6_a6Ly unbx1_a6LD unbx2_a6LE conrep9_a6LB
+      }
+      }
+      }
+      }
+      }
+
+$WStreamSink
+  = \ conrep_a6LF conrep1_a6LG ->
+      case conrep_a6LF of conrep2_a6LF { __DEFAULT ->
+      case conrep1_a6LG of conrep3_a6LG { __DEFAULT ->
+      StreamSink conrep2_a6LF conrep3_a6LG
+      }
+      }
+
+$WThreadedSink
+  = \ conrep_a6Dl conrep1_a6Dm ->
+      case conrep_a6Dl of { MVar unbx_a6Dn ->
+      case conrep1_a6Dm of { MVar unbx1_a6Do ->
+      ThreadedSink unbx_a6Dn unbx1_a6Do
+      }
+      }
+
+$WBoundedGrowingBuffer
+  = \ conrep_a6Dr conrep1_a6Ds ->
+      case conrep_a6Dr of { ForeignPtr unbx_a6Dt unbx1_a6Du ->
+      case conrep1_a6Ds of { I# unbx2_a6Dv ->
+      BoundedGrowingBuffer unbx_a6Dt unbx1_a6Du unbx2_a6Dv
+      }
+      }
+
+$WError
+  = \ conrep_a6CH ->
+      case conrep_a6CH of conrep1_a6CH { __DEFAULT ->
+      Error conrep1_a6CH
+      }
+
+$WDone
+  = \ conrep_a6CK ->
+      case conrep_a6CK of { Ptr unbx_a6CL -> Done unbx_a6CL }
+
+$WMoreBuffer
+  = \ conrep_a6CO conrep1_a6CP ->
+      case conrep_a6CO of { Ptr unbx_a6CQ ->
+      case conrep1_a6CP of { I# unbx1_a6CR ->
+      MoreBuffer unbx_a6CQ unbx1_a6CR
+      }
+      }
+
+$WInsertByteString
+  = \ conrep_a6CU conrep1_a6CV ->
+      case conrep_a6CU of { Ptr unbx_a6CW ->
+      case conrep1_a6CV of conrep3_a6CV { __DEFAULT ->
+      InsertByteString unbx_a6CW conrep3_a6CV
+      }
+      }
+
+$WRequest
+  = \ conrep_a6BZ conrep1_a6C0 ->
+      case conrep_a6BZ of { Ptr unbx_a6C1 ->
+      case conrep1_a6C0 of { Ptr unbx1_a6C2 ->
+      Request unbx_a6C1 unbx1_a6C2
+      }
+      }
+
+$WQueue
+  = \ conrep_a6Bt conrep1_a6Bu conrep2_a6Bv ->
+      case conrep_a6Bt of conrep3_a6Bt { __DEFAULT ->
+      case conrep1_a6Bu of { I# unbx_a6Bw ->
+      case conrep2_a6Bv of { I# unbx1_a6Bx ->
+      Queue conrep3_a6Bt unbx_a6Bw unbx1_a6Bx
+      }
+      }
+      }
+
+$WRingSinkState
+  = \ conrep_a6zn
+      conrep1_a6zo
+      conrep2_a6zp
+      conrep3_a6zq
+      conrep4_a6zr
+      conrep5_a6zs
+      conrep6_a6zt
+      conrep7_a6zu
+      conrep8_a6zv
+      conrep9_a6zw ->
+      case conrep_a6zn of { W64# unbx_a6zx ->
+      case conrep1_a6zo of { W64# unbx1_a6zy ->
+      case conrep2_a6zp of { Ptr unbx2_a6zz ->
+      case conrep3_a6zq of { I# unbx3_a6zA ->
+      case conrep4_a6zr of { I# unbx4_a6zB ->
+      case conrep5_a6zs of { I# unbx5_a6zC ->
+      case conrep6_a6zt of conrep16_a6zt { __DEFAULT ->
+      case conrep7_a6zu of conrep17_a6zu { __DEFAULT ->
+      case conrep8_a6zv of conrep18_a6zv { __DEFAULT ->
+      case conrep9_a6zw of conrep19_a6zw { __DEFAULT ->
+      RingSinkState
+        unbx_a6zx
+        unbx1_a6zy
+        unbx2_a6zz
+        unbx3_a6zA
+        unbx4_a6zB
+        unbx5_a6zC
+        conrep16_a6zt
+        conrep17_a6zu
+        conrep18_a6zv
+        conrep19_a6zw
+      }
+      }
+      }
+      }
+      }
+      }
+      }
+      }
+      }
+      }
+
+$WSpillIdle
+  = \ conrep_a6aS ->
+      case conrep_a6aS of { SpillBuf unbx_a6aT unbx1_a6aU ->
+      SpillIdle unbx_a6aT unbx1_a6aU
+      }
+
+$WSpillActive
+  = \ conrep_a6aX ->
+      case conrep_a6aX of { SpillBuf unbx_a6aY unbx1_a6aZ ->
+      SpillActive unbx_a6aY unbx1_a6aZ
+      }
+
+$WSpillBuf
+  = \ conrep_a6ao conrep1_a6ap ->
+      case conrep_a6ao of conrep2_a6ao { __DEFAULT ->
+      case conrep1_a6ap of { I# unbx_a6aq ->
+      SpillBuf conrep2_a6ao unbx_a6aq
+      }
+      }
+
+$wringCopyIn
+  = \ rs_shfS src_shfU ww_shfY eta_shg0 ->
+      case <=# ww_shfY 0# of {
+        __DEFAULT ->
+          case rs_shfS of
+          { RingSinkState bx_dchA bx1_dchB bx2_dchC bx3_dchD bx4_dchE
+                          bx5_dchF ds_dc1D ds1_dc1E ds2_dc1F ds3_dc1G ->
+          join {
+            $w$j_shfQ ipv_shfN
+              = case >=# 0# ww_shfY of {
+                  __DEFAULT ->
+                    join {
+                      $j_sgL2 ipv1_sffI
+                        = let {
+                            wh_sgyP
+                              = plusWord64# bx_dchA (int64ToWord64# (intToInt64# ipv1_sffI)) } in
+                          let { wh1_sgyR = W64# wh_sgyP } in
+                          case ((ds1_dc1E wh1_sgyR) `cast` <Co:2> :: ...) ipv_shfN of
+                          { (# ipv2_Xa, ipv3_Xb #) ->
+                          case src_shfU of { Ptr addr_ae5S ->
+                          case copyAddrToAddrNonOverlapping#
+                                 addr_ae5S
+                                 (plusAddr#
+                                    bx2_dchC (andI# (word2Int# (word64ToWord# bx_dchA)) bx3_dchD))
+                                 ipv1_sffI
+                                 ipv2_Xa
+                          of wild2_Xd
+                          { __DEFAULT ->
+                          case ((ds_dc1D wh1_sgyR) `cast` <Co:2> :: ...) wild2_Xd of
+                          { (# ipv4_Xf, ipv5_Xg #) ->
+                          joinrec {
+                            $s$wloop_sk9i sc_sk9h sc1_sk9f sc2_sk9e
+                              = case >=# sc2_sk9e ww_shfY of {
+                                  __DEFAULT ->
+                                    let { x1_Xj = -# ww_shfY sc2_sk9e } in
+                                    join {
+                                      $j1_Xk ipv6_Xl
+                                        = let {
+                                            wh2_Xm
+                                              = plusWord64#
+                                                  sc1_sk9f
+                                                  (int64ToWord64# (intToInt64# ipv6_Xl)) } in
+                                          let { wh3_Xn = W64# wh2_Xm } in
+                                          case ((ds1_dc1E wh3_Xn) `cast` <Co:2> :: ...) sc_sk9h of
+                                          { (# ipv7_Xp, ipv8_Xq #) ->
+                                          case copyAddrToAddrNonOverlapping#
+                                                 (plusAddr# addr_ae5S sc2_sk9e)
+                                                 (plusAddr#
+                                                    bx2_dchC
+                                                    (andI#
+                                                       (word2Int# (word64ToWord# sc1_sk9f))
+                                                       bx3_dchD))
+                                                 ipv6_Xl
+                                                 ipv7_Xp
+                                          of wild3_Xr
+                                          { __DEFAULT ->
+                                          case ((ds_dc1D wh3_Xn) `cast` <Co:2> :: ...) wild3_Xr of
+                                          { (# ipv9_Xt, ipv10_Xu #) ->
+                                          jump $s$wloop_sk9i ipv9_Xt wh2_Xm (+# sc2_sk9e ipv6_Xl)
+                                          }
+                                          }
+                                          } } in
+                                    case <=# x1_Xj bx4_dchE of {
+                                      __DEFAULT -> jump $j1_Xk bx4_dchE;
+                                      1# -> jump $j1_Xk x1_Xj
+                                    };
+                                  1# ->
+                                    (# sc_sk9h,
+                                       RingSinkState
+                                         sc1_sk9f
+                                         sc1_sk9f
+                                         bx2_dchC
+                                         bx3_dchD
+                                         bx4_dchE
+                                         bx5_dchF
+                                         ds_dc1D
+                                         ds1_dc1E
+                                         ds2_dc1F
+                                         ds3_dc1G #)
+                                }; } in
+                          jump $s$wloop_sk9i ipv4_Xf wh_sgyP ipv1_sffI
+                          }
+                          }
+                          }
+                          } } in
+                    case <=# ww_shfY bx4_dchE of {
+                      __DEFAULT -> jump $j_sgL2 bx4_dchE;
+                      1# -> jump $j_sgL2 ww_shfY
+                    };
+                  1# ->
+                    (# ipv_shfN,
+                       RingSinkState
+                         bx_dchA
+                         bx_dchA
+                         bx2_dchC
+                         bx3_dchD
+                         bx4_dchE
+                         bx5_dchF
+                         ds_dc1D
+                         ds1_dc1E
+                         ds2_dc1F
+                         ds3_dc1G #)
+                } } in
+          case gtWord64# bx_dchA bx1_dchB of {
+            __DEFAULT -> jump $w$j_shfQ eta_shg0;
+            1# ->
+              case ((ds_dc1D (W64# bx_dchA)) `cast` <Co:2> :: ...) eta_shg0 of
+              { (# ipv_aegM, ipv1_aegN #) ->
+              jump $w$j_shfQ ipv_aegM
+              }
+          }
+          };
+        1# -> (# eta_shg0, rs_shfS #)
+      }
+
+$wopenRingRegion_rkro
+  = \ rs_shg7 ww_shga eta_shgc ->
+      case rs_shg7 of wild_X3
+      { RingSinkState bx_dchA bx1_dchB bx2_dchC bx3_dchD bx4_dchE
+                      bx5_dchF ds_dc1D ds1_dc1E ds2_dc1F ds3_dc1G ->
+      case (ds2_dc1F `cast` <Co:2> :: ...) eta_shgc of
+      { (# ipv_aecb, ipv1_aecc #) ->
+      case ipv1_aecc of { W64# y#_aff3 ->
+      let {
+        wantHead_sgyH
+          = plusWord64# bx_dchA (int64ToWord64# (intToInt64# ww_shga)) } in
+      case leWord64#
+             (subWord64# wantHead_sgyH y#_aff3)
+             (int64ToWord64# (intToInt64# bx4_dchE))
+      of {
+        __DEFAULT ->
+          case gtWord64# bx_dchA bx1_dchB of {
+            __DEFAULT ->
+              case ((ds1_dc1E (W64# wantHead_sgyH)) `cast` <Co:2> :: ...)
+                     ipv_aecb
+              of
+              { (# ipv2_X6, ipv3_X7 #) ->
+              (# ipv2_X6,
+                 RingSinkState
+                   bx_dchA
+                   bx_dchA
+                   bx2_dchC
+                   bx3_dchD
+                   bx4_dchE
+                   bx5_dchF
+                   ds_dc1D
+                   ds1_dc1E
+                   ds2_dc1F
+                   ds3_dc1G #)
+              };
+            1# ->
+              case ((ds_dc1D (W64# bx_dchA)) `cast` <Co:2> :: ...) ipv_aecb of
+              { (# ipv2_aegM, ipv3_aegN #) ->
+              case ((ds1_dc1E (W64# wantHead_sgyH)) `cast` <Co:2> :: ...)
+                     ipv2_aegM
+              of
+              { (# ipv4_X6, ipv5_X7 #) ->
+              (# ipv4_X6,
+                 RingSinkState
+                   bx_dchA
+                   bx_dchA
+                   bx2_dchC
+                   bx3_dchD
+                   bx4_dchE
+                   bx5_dchF
+                   ds_dc1D
+                   ds1_dc1E
+                   ds2_dc1F
+                   ds3_dc1G #)
+              }
+              }
+          };
+        1# -> (# ipv_aecb, wild_X3 #)
+      }
+      }
+      }
+      }
+
+$fExceptionFixedBufferOverflow_$cbacktraceDesired = \ _ -> True
+
+$fExceptionFixedBufferOverflow4
+  = "FixedBufferOverflow {fixedBufferRequested = "#
+
+$fExceptionFixedBufferOverflow3 = ", fixedBufferAvailable = "#
+
+$fExceptionFixedBufferOverflow2 = "}"#
+
+$w$cshowsPrec
+  = \ ww_shgp ww1_shgt ww2_shgu eta_shgw ->
+      case >=# ww_shgp 11# of {
+        __DEFAULT ->
+          unpackAppendCString#
+            $fExceptionFixedBufferOverflow4
+            ($wshowSignedInt
+               0#
+               ww1_shgt
+               (unpackAppendCString#
+                  $fExceptionFixedBufferOverflow3
+                  ($wshowSignedInt
+                     0#
+                     ww2_shgu
+                     (unpackAppendCString# $fExceptionFixedBufferOverflow2 eta_shgw))));
+        1# ->
+          : $fShowCallStack4
+            (unpackAppendCString#
+               $fExceptionFixedBufferOverflow4
+               ($wshowSignedInt
+                  0#
+                  ww1_shgt
+                  (unpackAppendCString#
+                     $fExceptionFixedBufferOverflow3
+                     ($wshowSignedInt
+                        0#
+                        ww2_shgu
+                        (unpackAppendCString#
+                           $fExceptionFixedBufferOverflow2 (: $fShowCallStack3 eta_shgw))))))
+      }
+
+$fExceptionFixedBufferOverflow_$cshowsPrec
+  = \ a_shgn ds_shgr eta_shgw ->
+      case a_shgn of { I# ww_shgp ->
+      case ds_shgr of { FixedBufferOverflow ww1_shgt ww2_shgu ->
+      $w$cshowsPrec ww_shgp ww1_shgt ww2_shgu eta_shgw
+      }
+      }
+
+$fExceptionFixedBufferOverflow1 = I# 0#
+
+$fExceptionFixedBufferOverflow_$cshow
+  = \ x_acJm ->
+      case x_acJm of { FixedBufferOverflow ww_shgt ww1_shgu ->
+      $w$cshowsPrec 0# ww_shgt ww1_shgu []
+      }
+
+$fShowFixedBufferOverflow1
+  = \ ds_shgr eta_shgw ->
+      case ds_shgr of { FixedBufferOverflow ww_shgt ww1_shgu ->
+      $w$cshowsPrec 0# ww_shgt ww1_shgu eta_shgw
+      }
+
+$fShowFixedBufferOverflow_$cshowList
+  = \ ls_actr s_acts ->
+      showList__ $fShowFixedBufferOverflow1 ls_actr s_acts
+
+$fShowFixedBufferOverflow
+  = C:Show
+      $fExceptionFixedBufferOverflow_$cshowsPrec
+      $fExceptionFixedBufferOverflow_$cshow
+      $fShowFixedBufferOverflow_$cshowList
+
+Rec {
+$wgo1
+  = \ ww_shgN ww1_shgO ds1_shgR ->
+      case ds1_shgR of {
+        [] -> (# ww_shgN, ww1_shgO #);
+        : c_acJc cs_acJd ->
+          case c_acJc of { Write ww2_X2 ww3_X3 ->
+          case $wgo1 ww2_X2 ww3_X3 cs_acJd of { (# ww4_shwc, ww5_shwd #) ->
+          (# +# ww_shgN ww4_shwc, \ s_X5 -> ww5_shwd (ww1_shgO s_X5) #)
+          }
+          }
+      }
+end Rec }
+
+$fSemigroupWrite_go1
+  = \ b_shgL ds1_shgR ->
+      case b_shgL of { Write ww_shgN ww1_shgO ->
+      case $wgo1 ww_shgN ww1_shgO ds1_shgR of
+      { (# ww2_shwc, ww3_shwd #) ->
+      Write ww2_shwc ww3_shwd
+      }
+      }
+
+$fSemigroupWrite_$csconcat
+  = \ ds_acJ2 ->
+      case ds_acJ2 of { :| a1_acJ7 as_acJ8 ->
+      $fSemigroupWrite_go1 a1_acJ7 as_acJ8
+      }
+
+$fMonoidBuilder_$c<>
+  = \ ds_dc3s ds1_dc3t ->
+      case ds_dc3s of { Write bx_dcmo w0_a44m ->
+      case ds1_dc3t of { Write bx1_dcmp w1_a44o ->
+      Write (+# bx_dcmo bx1_dcmp) (\ s_X5 -> w1_a44o (w0_a44m s_X5))
+      }
+      }
+
+lvl_rkrp = IS 2#
+
+lvl1_rkrq = IS 1#
+
+lvl2_rkrr = IS 0#
+
+lvl3_rkrs = "stimes: positive multiplier expected"#
+
+lvl4_rkrt = unpackCString# lvl3_rkrs
+
+lvl5_rkru = errorWithoutStackTrace lvl4_rkrt
+
+$w$cstimes
+  = \ @b_shhS $dIntegral_shhT eta_shhU ww_shhX ww1_shhY ->
+      let { $dReal_sgwL = $p1Integral $dIntegral_shhT } in
+      case <=
+             ($p2Real $dReal_sgwL)
+             eta_shhU
+             (fromInteger ($p1Real $dReal_sgwL) lvl2_rkrr)
+      of {
+        False ->
+          let { $dEq_sgwR = $p2Real $dReal_sgwL } in
+          let { $dEq1_sgwT = $p1Ord $dEq_sgwR } in
+          let { $dNum_sgwP = $p1Real $dReal_sgwL } in
+          let { lvl17_sgB9 = fromInteger $dNum_sgwP lvl_rkrp } in
+          let { lvl18_sgBb = fromInteger $dNum_sgwP lvl2_rkrr } in
+          join {
+            exit_X0 ww2_shhL ww3_shhM y_shhO
+              = let { lvl19_sgBd = fromInteger $dNum_sgwP lvl1_rkrq } in
+                case == $dEq1_sgwT y_shhO lvl19_sgBd of {
+                  False ->
+                    joinrec {
+                      $wg_shhH ww4_shhx ww5_shhy y1_shhA ww6_shhD ww7_shhE
+                        = case ==
+                                 $dEq1_sgwT (rem $dIntegral_shhT y1_shhA lvl17_sgB9) lvl18_sgBb
+                          of {
+                            False ->
+                              case == $dEq1_sgwT y1_shhA lvl19_sgBd of {
+                                False ->
+                                  jump $wg_shhH
+                                    (*# 2# ww4_shhx)
+                                    (\ s_X5 -> ww5_shhy (ww5_shhy s_X5))
+                                    (quot $dIntegral_shhT y1_shhA lvl17_sgB9)
+                                    (+# ww4_shhx ww6_shhD)
+                                    (\ s_X5 -> ww7_shhE (ww5_shhy s_X5));
+                                True ->
+                                  (# +# ww4_shhx ww6_shhD, \ s_X5 -> ww7_shhE (ww5_shhy s_X5) #)
+                              };
+                            True ->
+                              jump $wg_shhH
+                                (*# 2# ww4_shhx)
+                                (\ s_X5 -> ww5_shhy (ww5_shhy s_X5))
+                                (quot $dIntegral_shhT y1_shhA lvl17_sgB9)
+                                ww6_shhD
+                                ww7_shhE
+                          }; } in
+                    jump $wg_shhH
+                      (*# 2# ww2_shhL)
+                      (\ s_X5 -> ww3_shhM (ww3_shhM s_X5))
+                      (quot $dIntegral_shhT y_shhO lvl17_sgB9)
+                      ww2_shhL
+                      ww3_shhM;
+                  True -> (# ww2_shhL, ww3_shhM #)
+                } } in
+          joinrec {
+            $wf_shhQ ww2_shhL ww3_shhM y_shhO
+              = case ==
+                       $dEq1_sgwT (rem $dIntegral_shhT y_shhO lvl17_sgB9) lvl18_sgBb
+                of {
+                  False -> jump exit_X0 ww2_shhL ww3_shhM y_shhO;
+                  True ->
+                    jump $wf_shhQ
+                      (*# 2# ww2_shhL)
+                      (\ s_X5 -> ww3_shhM (ww3_shhM s_X5))
+                      (quot $dIntegral_shhT y_shhO lvl17_sgB9)
+                }; } in
+          jump $wf_shhQ ww_shhX ww1_shhY eta_shhU;
+        True -> case lvl5_rkru of {}
+      }
+
+$fSemigroupWrite_$cstimes
+  = \ @b_shhS $dIntegral_shhT eta_shhU eta1_shhV ->
+      case eta1_shhV of { Write ww_shhX ww1_shhY ->
+      case $w$cstimes $dIntegral_shhT eta_shhU ww_shhX ww1_shhY of
+      { (# ww2_shwf, ww3_shwg #) ->
+      Write ww2_shwf ww3_shwg
+      }
+      }
+
+$fSemigroupWrite
+  = C:Semigroup
+      $fMonoidBuilder_$c<>
+      $fSemigroupWrite_$csconcat
+      $fSemigroupWrite_$cstimes
+
+$fApplicativeBuildM2
+  = \ @a_a9Js @b_a9Jt eta_acFN eta1_acFO eta2_B0 ->
+      let {
+        lvl17_sgBw
+          = (eta1_acFO `cast` <Co:2> :: ...) (\ r_X4 -> eta2_B0 r_X4) } in
+      (eta_acFN `cast` <Co:2> :: ...) (\ _ -> lvl17_sgBw)
+
+$fApplicativeBuildM1
+  = \ @a_a9JL @b_a9JM eta1_acFW eta_B0 eta2_B1 ->
+      (eta1_acFW `cast` <Co:2> :: ...)
+        (\ b2_a70B ->
+           let { lvl17_sgBx = eta2_B1 b2_a70B } in
+           (eta_B0 `cast` <Co:2> :: ...) (\ _ -> lvl17_sgBx))
+
+$fApplicativeBuildM3
+  = \ @a_a9HR @b_a9HS @c_a9HT eta_acFV eta1_acFW eta2_B0 eta3_B1 ->
+      (eta1_acFW `cast` <Co:2> :: ...)
+        (\ b2_a70B ->
+           let { r_sgwJ = eta_acFV b2_a70B } in
+           (eta2_B0 `cast` <Co:2> :: ...) (\ r1_X4 -> eta3_B1 (r_sgwJ r1_X4)))
+
+$fApplicativeBuildM4
+  = \ @a_a9Fs @b_a9Ft m1_adyZ m2_adz0 k_a47H ->
+      (m1_adyZ `cast` <Co:3> :: ...)
+        (\ r_a47I ->
+           (m2_adz0 `cast` <Co:2> :: ...) (\ r1_X4 -> k_a47H (r_a47I r1_X4)))
+
+$fExceptionChunkOverflowException_$cbacktraceDesired = \ _ -> True
+
+$dIP_rkrv = "throwIO"#
+
+$dIP1_rkrw = unpackCString# $dIP_rkrv
+
+loc_rkrx = I# 18#
+
+loc1_rkry = I# 1295#
+
+loc2_rkrz = I# 9#
+
+loc3_rkrA
+  = "/Users/ian/Code/mercury/wireform-/wireform-core/src/Wireform/Builder/FastBuilder.hs"#
+
+loc4_rkrB = unpackCString# loc3_rkrA
+
+$trModule2 = "Wireform.Builder.FastBuilder"#
+
+loc5_rkrC = unpackCString# $trModule2
+
+$trModule4 = "main"#
+
+loc6_rkrD = unpackCString# $trModule4
+
+$dIP2_rkrE
+  = SrcLoc
+      loc6_rkrD
+      loc5_rkrC
+      loc4_rkrB
+      loc1_rkry
+      loc2_rkrz
+      loc1_rkry
+      loc_rkrx
+
+$dIP3_rkrF = PushCallStack $dIP1_rkrw $dIP2_rkrE EmptyCallStack
+
+$tcFixedBufferOverflow2 = "FixedBufferOverflow"#
+
+$tcFixedBufferOverflow1 = TrNameS $tcFixedBufferOverflow2
+
+$fExceptionSuspendBuilderException_$cbacktraceDesired = \ _ -> True
+
+$fExceptionSuspendBuilderException2 = "SuspendBuilderException"#
+
+$tcSuspendBuilderException1
+  = TrNameS $fExceptionSuspendBuilderException2
+
+$tcChunkOverflowException2 = "ChunkOverflowException"#
+
+$tcChunkOverflowException1 = TrNameS $tcChunkOverflowException2
+
+$trModule1 = TrNameS $trModule2
+
+$trModule3 = TrNameS $trModule4
+
+$trModule = Module $trModule3 $trModule1
+
+$tcFixedBufferOverflow
+  = TyCon
+      14440855450739211370#Word64
+      8641908840052550595#Word64
+      $trModule
+      $tcFixedBufferOverflow1
+      0#
+      krep$*
+
+$fExceptionFixedBufferOverflow5 = mkTrCon $tcFixedBufferOverflow []
+
+$fExceptionFixedBufferOverflow_$cfromException
+  = \ eta_acw3 ->
+      case eta_acw3 of
+      { SomeException @e1_acw9 $dException1_acwa $dIP8_acwb e2_acwc ->
+      case sameTypeRep
+             (($p1Exception $dException1_acwa) `cast` <Co:3> :: ...)
+             $fExceptionFixedBufferOverflow5
+      of {
+        False -> Nothing;
+        True ->
+          case unsafeEqualityProof of { UnsafeRefl co_acDD ->
+          Just (e2_acwc `cast` <Co:10> :: ...)
+          }
+      }
+      }
+
+$tcSuspendBuilderException
+  = TyCon
+      10315315667667147781#Word64
+      3956977754764580219#Word64
+      $trModule
+      $tcSuspendBuilderException1
+      0#
+      krep$*
+
+$fExceptionSuspendBuilderException3
+  = mkTrCon $tcSuspendBuilderException []
+
+$fExceptionSuspendBuilderException_$cfromException
+  = \ eta_acw3 ->
+      case eta_acw3 of
+      { SomeException @e1_acw9 $dException1_acwa $dIP8_acwb e2_acwc ->
+      case sameTypeRep
+             (($p1Exception $dException1_acwa) `cast` <Co:3> :: ...)
+             $fExceptionSuspendBuilderException3
+      of {
+        False -> Nothing;
+        True ->
+          case unsafeEqualityProof of { UnsafeRefl co_acDD ->
+          Just (e2_acwc `cast` <Co:10> :: ...)
+          }
+      }
+      }
+
+$tcChunkOverflowException
+  = TyCon
+      4381042181531205539#Word64
+      11967561562427051278#Word64
+      $trModule
+      $tcChunkOverflowException1
+      0#
+      krep$*
+
+$fExceptionChunkOverflowException3
+  = mkTrCon $tcChunkOverflowException []
+
+$fExceptionChunkOverflowException_$cfromException
+  = \ eta_acw3 ->
+      case eta_acw3 of
+      { SomeException @e1_acw9 $dException1_acwa $dIP8_acwb e2_acwc ->
+      case sameTypeRep
+             (($p1Exception $dException1_acwa) `cast` <Co:3> :: ...)
+             $fExceptionChunkOverflowException3
+      of {
+        False -> Nothing;
+        True ->
+          case unsafeEqualityProof of { UnsafeRefl co_acDD ->
+          Just (e2_acwc `cast` <Co:10> :: ...)
+          }
+      }
+      }
+
+$fFunctorBuildM2
+  = \ @a_a9rE @b_a9rF f_a6ZA ds_dc3i b1_a70A ->
+      (ds_dc3i `cast` <Co:2> :: ...)
+        (\ b2_a70B -> b1_a70A (f_a6ZA b2_a70B))
+
+$fFunctorBuildM1
+  = \ @a_a9sn @b_a9so z_a70C ds_dc3k b1_a70E ->
+      let { lvl17_sgBG = b1_a70E z_a70C } in
+      (ds_dc3k `cast` <Co:2> :: ...) (\ _ -> lvl17_sgBG)
+
+$fFunctorBuildM
+  = C:Functor
+      ($fFunctorBuildM2 `cast` <Co:15> :: ...)
+      ($fFunctorBuildM1 `cast` <Co:14> :: ...)
+
+$fApplicativeBuildM_$cpure
+  = (\ @a_a9DV x_a47N k_a47O -> k_a47O x_a47N) `cast` <Co:8> :: ...
+
+$fApplicativeBuildM
+  = C:Applicative
+      $fFunctorBuildM
+      $fApplicativeBuildM_$cpure
+      ($fApplicativeBuildM4 `cast` <Co:16> :: ...)
+      ($fApplicativeBuildM3 `cast` <Co:28> :: ...)
+      ($fApplicativeBuildM2 `cast` <Co:18> :: ...)
+      ($fApplicativeBuildM1 `cast` <Co:15> :: ...)
+
+$fShowSuspendBuilderException1
+  = \ _ s_actz ->
+      unpackAppendCString# $fExceptionSuspendBuilderException2 s_actz
+
+$fShowSuspendBuilderException_$cshowList
+  = \ ls_actr s_acts ->
+      showList__ $fShowSuspendBuilderException1 ls_actr s_acts
+
+$fShowSuspendBuilderException_$cshowsPrec
+  = \ _ _ s_actz ->
+      unpackAppendCString# $fExceptionSuspendBuilderException2 s_actz
+
+$fExceptionSuspendBuilderException1
+  = unpackCString# $fExceptionSuspendBuilderException2
+
+$fExceptionSuspendBuilderException_$cshow
+  = \ _ -> $fExceptionSuspendBuilderException1
+
+$fShowSuspendBuilderException
+  = C:Show
+      $fShowSuspendBuilderException_$cshowsPrec
+      $fExceptionSuspendBuilderException_$cshow
+      $fShowSuspendBuilderException_$cshowList
+
+Rec {
+$fExceptionSuspendBuilderException
+  = C:Exception
+      ($fExceptionSuspendBuilderException3 `cast` <Co:4> :: ...)
+      $fShowSuspendBuilderException
+      $fExceptionSuspendBuilderException_$ctoException
+      $fExceptionSuspendBuilderException_$cfromException
+      $fExceptionSuspendBuilderException_$cshow
+      $fExceptionSuspendBuilderException_$cbacktraceDesired
+
+$fExceptionSuspendBuilderException_$ctoException
+  = \ e1_acEg ->
+      SomeException
+        $fExceptionSuspendBuilderException
+        (emptyExceptionContext `cast` <Co:4> :: ...)
+        e1_acEg
+end Rec }
+
+$fExceptionChunkOverflowException2 = "ChunkOverflowException "#
+
+$fExceptionChunkOverflowException1 = " _ _ "#
+
+$w$cshow
+  = \ ww_shjI ww1_shjJ ww2_shjK ww3_shjO ->
+      unpackAppendCString#
+        $fExceptionChunkOverflowException2
+        (++_$s++
+           $fShowCallStack14
+           (showLitString
+              ($wunpackAppendCharsLazy ww_shjI ww1_shjJ ww2_shjK [])
+              $fShowByteString2)
+           (unpackAppendCString#
+              $fExceptionChunkOverflowException1 (itos ww3_shjO [])))
+
+$fExceptionChunkOverflowException_$cshow
+  = \ ds_shjE ->
+      case ds_shjE of
+      { ChunkOverflowException ww_shjG ww1_shjM ww2_shjN ww3_shjO ->
+      case ww_shjG of { BS ww4_shAa ww5_shAb ww6_shAc ->
+      $w$cshow ww4_shAa ww5_shAb ww6_shAc ww3_shjO
+      }
+      }
+
+$fShowChunkOverflowException1
+  = \ x_acty s_actz ->
+      case x_acty of
+      { ChunkOverflowException ww_shjG ww1_shjM ww2_shjN ww3_shjO ->
+      case ww_shjG of { BS ww4_shAf ww5_shAg ww6_shAh ->
+      ++ ($w$cshow ww4_shAf ww5_shAg ww6_shAh ww3_shjO) s_actz
+      }
+      }
+
+$fShowChunkOverflowException_$cshowList
+  = \ ls_actr s_acts ->
+      showList__ $fShowChunkOverflowException1 ls_actr s_acts
+
+$fShowChunkOverflowException_$cshowsPrec
+  = \ _ x_acty s_actz ->
+      case x_acty of
+      { ChunkOverflowException ww_shjG ww1_shjM ww2_shjN ww3_shjO ->
+      case ww_shjG of { BS ww4_shAk ww5_shAl ww6_shAm ->
+      ++ ($w$cshow ww4_shAk ww5_shAl ww6_shAm ww3_shjO) s_actz
+      }
+      }
+
+$fShowChunkOverflowException
+  = C:Show
+      $fShowChunkOverflowException_$cshowsPrec
+      $fExceptionChunkOverflowException_$cshow
+      $fShowChunkOverflowException_$cshowList
+
+Rec {
+$fExceptionChunkOverflowException
+  = C:Exception
+      ($fExceptionChunkOverflowException3 `cast` <Co:4> :: ...)
+      $fShowChunkOverflowException
+      $fExceptionChunkOverflowException_$ctoException
+      $fExceptionChunkOverflowException_$cfromException
+      $fExceptionChunkOverflowException_$cshow
+      $fExceptionChunkOverflowException_$cbacktraceDesired
+
+$fExceptionChunkOverflowException_$ctoException
+  = \ e1_acEg ->
+      SomeException
+        $fExceptionChunkOverflowException
+        (emptyExceptionContext `cast` <Co:4> :: ...)
+        e1_acEg
+end Rec }
+
+Rec {
+$fExceptionFixedBufferOverflow
+  = C:Exception
+      ($fExceptionFixedBufferOverflow5 `cast` <Co:4> :: ...)
+      $fShowFixedBufferOverflow
+      $fExceptionFixedBufferOverflow_$ctoException
+      $fExceptionFixedBufferOverflow_$cfromException
+      $fExceptionFixedBufferOverflow_$cshow
+      $fExceptionFixedBufferOverflow_$cbacktraceDesired
+
+$fExceptionFixedBufferOverflow_$ctoException
+  = \ e1_acEg ->
+      SomeException
+        $fExceptionFixedBufferOverflow
+        (emptyExceptionContext `cast` <Co:4> :: ...)
+        e1_acEg
+end Rec }
+
+lvl6_rkrG = errorWithoutStackTrace lvl4_rkrt
+
+lvl7_rkrH
+  = \ s_sgDm n_a5xX end_sgDl cur_sgDk ->
+      throwIO1
+        ($dIP3_rkrF `cast` <Co:4> :: ...)
+        $fExceptionFixedBufferOverflow
+        (FixedBufferOverflow n_a5xX (minusAddr# end_sgDl cur_sgDk))
+        s_sgDm
+
+$fIsStringBuilder1
+  = \ n_a5xX eta_B0 eta1_B1 ->
+      case eta1_B1 of { (# cur_shAr, end_shAs, s_shAt #) ->
+      case eta_B0 of {
+        DynamicSink bx_dcdW ->
+          case readMutVar# bx_dcdW s_shAt of { (# ipv_sdnt, ipv1_sdnu #) ->
+          case ipv1_sdnu of {
+            ThreadedSink bx1_dce2 bx2_dce3 ->
+              case putMVar# bx2_dce3 (MoreBuffer cur_shAr n_a5xX) ipv_sdnt
+              of s2#_aeXU
+              { __DEFAULT ->
+              case takeMVar# bx1_dce2 s2#_aeXU of { (# ipv2_Xf, ipv3_Xg #) ->
+              case ipv3_Xg of { Request bx3_dc9l bx4_dc9m ->
+              (# bx3_dc9l, bx4_dc9m, ipv2_Xf #)
+              }
+              }
+              };
+            BoundedGrowingBuffer bx1_dceq bx2_dces bx3_dcet ->
+              let { cap_sgyZ = minusAddr# cur_shAr bx1_dceq } in
+              join {
+                $j_sgLi y_ae4M
+                  = let { newCap_sgz1 = +# cap_sgyZ y_ae4M } in
+                    case <# bx3_dcet newCap_sgz1 of {
+                      __DEFAULT ->
+                        case <# newCap_sgz1 0# of {
+                          __DEFAULT ->
+                            case newMutVar# NoFinalizers ipv_sdnt of
+                            { (# ipv2_aeEW, ipv3_aeEY #) ->
+                            case newPinnedByteArray# newCap_sgz1 ipv2_aeEW of
+                            { (# ipv4_aeF6, ipv5_aeF7 #) ->
+                            let { ipv6_sgLg = mutableByteArrayContents# ipv5_aeF7 } in
+                            case copyAddrToAddrNonOverlapping#
+                                   bx1_dceq ipv6_sgLg cap_sgyZ ipv4_aeF6
+                            of wild3_XB
+                            { __DEFAULT ->
+                            case touch# bx2_dces wild3_XB of s'_aeAp { __DEFAULT ->
+                            let { ipv7_sgLh = MallocPtr ipv5_aeF7 ipv3_aeEY } in
+                            case touch# ipv7_sgLh s'_aeAp of s'1_XC { __DEFAULT ->
+                            case writeMutVar#
+                                   bx_dcdW
+                                   (BoundedGrowingBuffer ipv6_sgLg ipv7_sgLh bx3_dcet)
+                                   s'1_XC
+                            of s2#_ae4d
+                            { __DEFAULT ->
+                            (# plusAddr# ipv6_sgLg cap_sgyZ, plusAddr# ipv6_sgLg newCap_sgz1,
+                               s2#_ae4d #)
+                            }
+                            }
+                            }
+                            }
+                            }
+                            };
+                          1# -> case mallocForeignPtrBytes2 of {}
+                        };
+                      1# ->
+                        case myThreadId# ipv_sdnt of { (# ipv2_ae0n, ipv3_ae0o #) ->
+                        case newMVar# ipv2_ae0n of { (# ipv4_agLa, ipv5_agLb #) ->
+                        case newMVar# ipv4_agLa of { (# ipv6_X6, ipv7_X7 #) ->
+                        case killThread#
+                               ipv3_ae0o
+                               ($fExceptionChunkOverflowException_$ctoException
+                                  (ChunkOverflowException
+                                     (BS bx1_dceq bx2_dces cap_sgyZ) ipv5_agLb ipv7_X7 n_a5xX))
+                               ipv6_X6
+                        of s1_ae2q
+                        { __DEFAULT ->
+                        case writeMutVar# bx_dcdW (ThreadedSink ipv5_agLb ipv7_X7) s1_ae2q
+                        of s2#_ae4d
+                        { __DEFAULT ->
+                        case takeMVar# ipv5_agLb s2#_ae4d of { (# ipv8_Xc, ipv9_Xd #) ->
+                        case ipv9_Xd of { Request bx4_dc9l bx5_dc9m ->
+                        (# bx4_dc9l, bx5_dc9m, ipv8_Xc #)
+                        }
+                        }
+                        }
+                        }
+                        }
+                        }
+                        }
+                    } } in
+              case <=# cap_sgyZ n_a5xX of {
+                __DEFAULT -> jump $j_sgLi cap_sgyZ;
+                1# -> jump $j_sgLi n_a5xX
+              }
+          }
+          };
+        GrowingBuffer bx_dceE ->
+          case readMutVar# bx_dceE s_shAt of { (# ipv_sdnt, ipv1_sdnu #) ->
+          case ipv1_sdnu of { ForeignPtr fo_aedm ds1_aedp ->
+          let { cap_sgz5 = minusAddr# end_shAs fo_aedm } in
+          case <=# cap_sgz5 n_a5xX of {
+            __DEFAULT ->
+              let { newCap_sgz7 = *# 2# cap_sgz5 } in
+              case <# newCap_sgz7 0# of {
+                __DEFAULT ->
+                  case newPinnedByteArray# newCap_sgz7 ipv_sdnt of
+                  { (# ipv2_aeVt, ipv3_aeVu #) ->
+                  let { size_sgz3 = minusAddr# cur_shAr fo_aedm } in
+                  let { ipv4_sgLj = mutableByteArrayContents# ipv3_aeVu } in
+                  case copyAddrToAddrNonOverlapping#
+                         fo_aedm ipv4_sgLj size_sgz3 ipv2_aeVt
+                  of wild3_Xs
+                  { __DEFAULT ->
+                  case touch# ds1_aedp wild3_Xs of s'_aeAp { __DEFAULT ->
+                  let { ipv5_sgLk = PlainPtr ipv3_aeVu } in
+                  case touch# ipv5_sgLk s'_aeAp of s'1_Xt { __DEFAULT ->
+                  case writeMutVar# bx_dceE (ForeignPtr ipv4_sgLj ipv5_sgLk) s'1_Xt
+                  of s2#_ae4d
+                  { __DEFAULT ->
+                  (# plusAddr# ipv4_sgLj size_sgz3, plusAddr# ipv4_sgLj newCap_sgz7,
+                     s2#_ae4d #)
+                  }
+                  }
+                  }
+                  }
+                  };
+                1# -> case mallocPlainForeignPtrBytes2 of {}
+              };
+            1# ->
+              let { newCap_sgz7 = +# cap_sgz5 n_a5xX } in
+              case <# newCap_sgz7 0# of {
+                __DEFAULT ->
+                  case newPinnedByteArray# newCap_sgz7 ipv_sdnt of
+                  { (# ipv2_aeVt, ipv3_aeVu #) ->
+                  let { size_sgz3 = minusAddr# cur_shAr fo_aedm } in
+                  let { ipv4_sgLj = mutableByteArrayContents# ipv3_aeVu } in
+                  case copyAddrToAddrNonOverlapping#
+                         fo_aedm ipv4_sgLj size_sgz3 ipv2_aeVt
+                  of wild3_Xs
+                  { __DEFAULT ->
+                  case touch# ds1_aedp wild3_Xs of s'_aeAp { __DEFAULT ->
+                  let { ipv5_sgLk = PlainPtr ipv3_aeVu } in
+                  case touch# ipv5_sgLk s'_aeAp of s'1_Xt { __DEFAULT ->
+                  case writeMutVar# bx_dceE (ForeignPtr ipv4_sgLj ipv5_sgLk) s'1_Xt
+                  of s2#_ae4d
+                  { __DEFAULT ->
+                  (# plusAddr# ipv4_sgLj size_sgz3, plusAddr# ipv4_sgLj newCap_sgz7,
+                     s2#_ae4d #)
+                  }
+                  }
+                  }
+                  }
+                  };
+                1# -> case mallocPlainForeignPtrBytes2 of {}
+              }
+          }
+          }
+          };
+        HandleSink h_a5y8 bx_dceL bx1_dceM ->
+          case readMutVar# bx1_dceM s_shAt of { (# ipv_aecb, ipv1_aecc #) ->
+          case ipv1_aecc of { Queue ds_davc bx2_dc5f bx3_dc5g ->
+          case ds_davc of wild3_shAv { ForeignPtr fo_shAw ds2_shAx ->
+          let { end1_sgxV = minusAddr# cur_shAr fo_shAw } in
+          join {
+            $w$j_shkS ipv2_shkP
+              = join {
+                  $w$j1_shkN ipv3_shkH ww_shkK
+                    = case readMutVar# bx1_dceM ipv2_shkP of
+                      { (# ipv4_Xf, ipv5_Xg #) ->
+                      case ipv5_Xg of { Queue ds4_dazQ bx4_dc9n bx5_dc9o ->
+                      case ds4_dazQ of wild5_shAz { ForeignPtr fo1_shAA ds5_shAB ->
+                      let { cap_sgzb = minusAddr# cur_shAr fo1_shAA } in
+                      case <=# ww_shkK cap_sgzb of {
+                        __DEFAULT ->
+                          case <# ipv3_shkH 0# of {
+                            __DEFAULT ->
+                              case newMutVar# NoFinalizers ipv4_Xf of
+                              { (# ipv6_aeEW, ipv7_aeEY #) ->
+                              case newPinnedByteArray# ipv3_shkH ipv6_aeEW of
+                              { (# ipv8_aeF6, ipv9_aeF7 #) ->
+                              let { ipv10_sgLp = mutableByteArrayContents# ipv9_aeF7 } in
+                              case writeMutVar#
+                                     bx1_dceM
+                                     (Queue
+                                        (ForeignPtr ipv10_sgLp (MallocPtr ipv9_aeF7 ipv7_aeEY))
+                                        0#
+                                        bx5_dc9o)
+                                     ipv8_aeF6
+                              of s2#_ae4d
+                              { __DEFAULT ->
+                              case <=# ipv3_shkH cap_sgzb of {
+                                __DEFAULT ->
+                                  (# ipv10_sgLp, plusAddr# ipv10_sgLp ipv3_shkH, s2#_ae4d #);
+                                1# -> (# ipv10_sgLp, plusAddr# ipv10_sgLp cap_sgzb, s2#_ae4d #)
+                              }
+                              }
+                              }
+                              };
+                            1# -> case mallocForeignPtrBytes2 of {}
+                          };
+                        1# ->
+                          case writeMutVar# bx1_dceM (Queue wild5_shAz 0# bx5_dc9o) ipv4_Xf
+                          of s2#_ae4d
+                          { __DEFAULT ->
+                          case <=# ipv3_shkH cap_sgzb of {
+                            __DEFAULT ->
+                              (# fo1_shAA, plusAddr# fo1_shAA ipv3_shkH, s2#_ae4d #);
+                            1# -> (# fo1_shAA, plusAddr# fo1_shAA cap_sgzb, s2#_ae4d #)
+                          }
+                          }
+                      }
+                      }
+                      }
+                      } } in
+                case <=# bx_dceL n_a5xX of {
+                  __DEFAULT -> jump $w$j1_shkN bx_dceL bx_dceL;
+                  1# -> jump $w$j1_shkN n_a5xX n_a5xX
+                } } in
+          case ># end1_sgxV bx2_dc5f of {
+            __DEFAULT -> jump $w$j_shkS ipv_aecb;
+            1# ->
+              case -# end1_sgxV bx2_dc5f of ds3_aehO {
+                __DEFAULT ->
+                  case hPutBuf2
+                         h_a5y8
+                         (Ptr (plusAddr# fo_shAw bx2_dc5f))
+                         (I# ds3_aehO)
+                         True
+                         ipv_aecb
+                  of
+                  { (# ipv2_aeqP, ipv3_aeqR #) ->
+                  case touch# ds2_shAx ipv2_aeqP of s'_aeqT { __DEFAULT ->
+                  case writeMutVar#
+                         bx1_dceM
+                         (Queue wild3_shAv end1_sgxV (-# (+# bx3_dc5g end1_sgxV) bx2_dc5f))
+                         s'_aeqT
+                  of s2#_ae4d
+                  { __DEFAULT ->
+                  jump $w$j_shkS s2#_ae4d
+                  }
+                  }
+                  };
+                0# ->
+                  case writeMutVar#
+                         bx1_dceM
+                         (Queue wild3_shAv end1_sgxV (-# (+# bx3_dc5g end1_sgxV) bx2_dc5f))
+                         ipv_aecb
+                  of s2#_ae4d
+                  { __DEFAULT ->
+                  jump $w$j_shkS s2#_ae4d
+                  }
+              }
+          }
+          }
+          }
+          };
+        FixedBuffer ->
+          case lvl7_rkrH s_shAt n_a5xX end_shAs cur_shAr of {};
+        StreamingSink bx_dcf9 bx1_dcfa ->
+          case readMutVar# bx1_dcfa s_shAt of { (# ipv_aecb, ipv1_aecc #) ->
+          case ipv1_aecc of
+          { StreamQueue bx2_dchf ds_dc0K bx3_dchg bx4_dchh ds2_dc0N ->
+          case ds_dc0K of wild3_shAD { ForeignPtr ds3_shAE r_shAF ->
+          case ds2_dc0N of wild4_shAH { StreamSink ds4_shAI ds5_shAJ ->
+          let { len_sgxZ = minusAddr# cur_shAr bx2_dchf } in
+          case ># len_sgxZ 0# of {
+            __DEFAULT ->
+              case readMutVar# bx1_dcfa ipv_aecb of { (# ipv2_Xa, ipv3_Xb #) ->
+              case ipv3_Xb of
+              { StreamQueue bx5_dchl ds7_dc0W bx6_dchm bx7_dchn ds8_dc0Z ->
+              case <=# n_a5xX bx6_dchm of {
+                __DEFAULT ->
+                  case <# n_a5xX 0# of {
+                    __DEFAULT ->
+                      case newMutVar# NoFinalizers ipv2_Xa of
+                      { (# ipv4_aeEW, ipv5_aeEY #) ->
+                      case newPinnedByteArray# n_a5xX ipv4_aeEW of
+                      { (# ipv6_aeF6, ipv7_aeF7 #) ->
+                      let { ipv8_sgLt = mutableByteArrayContents# ipv7_aeF7 } in
+                      case writeMutVar#
+                             bx1_dcfa
+                             (StreamQueue
+                                ipv8_sgLt
+                                (ForeignPtr ipv8_sgLt (MallocPtr ipv7_aeF7 ipv5_aeEY))
+                                n_a5xX
+                                bx7_dchn
+                                ds8_dc0Z)
+                             ipv6_aeF6
+                      of s2#_ae4d
+                      { __DEFAULT ->
+                      (# ipv8_sgLt, plusAddr# ipv8_sgLt n_a5xX, s2#_ae4d #)
+                      }
+                      }
+                      };
+                    1# -> case mallocForeignPtrBytes2 of {}
+                  };
+                1# -> (# bx5_dchl, plusAddr# bx5_dchl bx6_dchm, ipv2_Xa #)
+              }
+              }
+              };
+            1# ->
+              case ((ds4_shAI (Ptr bx2_dchf) (I# len_sgxZ)) `cast` <Co:2> :: ...)
+                     ipv_aecb
+              of
+              { (# ipv2_aegM, ipv3_aegN #) ->
+              case touch# r_shAF ipv2_aegM of s'_aeAp { __DEFAULT ->
+              case writeMutVar#
+                     bx1_dcfa
+                     (StreamQueue
+                        bx2_dchf wild3_shAD bx3_dchg (+# bx4_dchh len_sgxZ) wild4_shAH)
+                     s'_aeAp
+              of s2#_ae4d
+              { __DEFAULT ->
+              case readMutVar# bx1_dcfa s2#_ae4d of { (# ipv4_Xa, ipv5_Xb #) ->
+              case ipv5_Xb of
+              { StreamQueue bx5_dchl ds8_dc0W bx6_dchm bx7_dchn ds9_dc0Z ->
+              case <=# n_a5xX bx6_dchm of {
+                __DEFAULT ->
+                  case <# n_a5xX 0# of {
+                    __DEFAULT ->
+                      case newMutVar# NoFinalizers ipv4_Xa of
+                      { (# ipv6_aeEW, ipv7_aeEY #) ->
+                      case newPinnedByteArray# n_a5xX ipv6_aeEW of
+                      { (# ipv8_aeF6, ipv9_aeF7 #) ->
+                      let { ipv10_sgLt = mutableByteArrayContents# ipv9_aeF7 } in
+                      case writeMutVar#
+                             bx1_dcfa
+                             (StreamQueue
+                                ipv10_sgLt
+                                (ForeignPtr ipv10_sgLt (MallocPtr ipv9_aeF7 ipv7_aeEY))
+                                n_a5xX
+                                bx7_dchn
+                                ds9_dc0Z)
+                             ipv8_aeF6
+                      of s2#1_Xf
+                      { __DEFAULT ->
+                      (# ipv10_sgLt, plusAddr# ipv10_sgLt n_a5xX, s2#1_Xf #)
+                      }
+                      }
+                      };
+                    1# -> case mallocForeignPtrBytes2 of {}
+                  };
+                1# -> (# bx5_dchl, plusAddr# bx5_dchl bx6_dchm, ipv4_Xa #)
+              }
+              }
+              }
+              }
+              }
+              }
+          }
+          }
+          }
+          }
+          };
+        RingSink bx_dcfP ->
+          case readMutVar# bx_dcfP s_shAt of { (# ipv_aecb, ipv1_aecc #) ->
+          case ipv1_aecc of wild2_Xa
+          { RingSinkState bx1_dcis bx2_dcit bx3_dciu bx4_dciv bx5_dciw
+                          bx6_dcix ds_dc3e ds2_dc3f ds3_dc3g ds4_dc3h ->
+          join {
+            $j_sgLF ipv2_sdnt ipv3_sdnu
+              = case ipv3_sdnu of wild3_Xb
+                { RingSinkState bx7_dchY bx8_dchZ bx9_dci0 bx10_dci1 bx11_dci2
+                                bx12_dci3 ds5_dc2l ds6_dc2m ds7_dc2n ds8_dc2o ->
+                case ># n_a5xX bx11_dci2 of {
+                  __DEFAULT ->
+                    join {
+                      $w$j_shl0 y1_shkU ww_shkX
+                        = case <=# bx11_dci2 y1_shkU of {
+                            __DEFAULT ->
+                              case $wopenRingRegion_rkro wild3_Xb ww_shkX ipv2_sdnt of
+                              { (# ipv4_Xi, ipv5_Xj #) ->
+                              case writeMutVar# bx_dcfP ipv5_Xj ipv4_Xi of s2#_ae4d
+                              { __DEFAULT ->
+                              case ipv5_Xj of
+                              { RingSinkState bx13_dchM bx14_dchN bx15_dchO bx16_dchP bx17_dchQ
+                                              bx18_dchR ds10_dc1Z ds11_dc20 ds12_dc21 ds13_dc22 ->
+                              let {
+                                ipv6_sfsf
+                                  = plusAddr#
+                                      bx15_dchO
+                                      (andI# (word2Int# (word64ToWord# bx13_dchM)) bx16_dchP) } in
+                              (# ipv6_sfsf, plusAddr# ipv6_sfsf y1_shkU, s2#_ae4d #)
+                              }
+                              }
+                              };
+                            1# ->
+                              case $wopenRingRegion_rkro wild3_Xb bx11_dci2 ipv2_sdnt of
+                              { (# ipv4_Xi, ipv5_Xj #) ->
+                              case writeMutVar# bx_dcfP ipv5_Xj ipv4_Xi of s2#_ae4d
+                              { __DEFAULT ->
+                              case ipv5_Xj of
+                              { RingSinkState bx13_dchM bx14_dchN bx15_dchO bx16_dchP bx17_dchQ
+                                              bx18_dchR ds10_dc1Z ds11_dc20 ds12_dc21 ds13_dc22 ->
+                              let {
+                                ipv6_sfsf
+                                  = plusAddr#
+                                      bx15_dchO
+                                      (andI# (word2Int# (word64ToWord# bx13_dchM)) bx16_dchP) } in
+                              (# ipv6_sfsf, plusAddr# ipv6_sfsf bx11_dci2, s2#_ae4d #)
+                              }
+                              }
+                              }
+                          } } in
+                    case <=# n_a5xX bx12_dci3 of {
+                      __DEFAULT -> jump $w$j_shl0 n_a5xX n_a5xX;
+                      1# -> jump $w$j_shl0 bx12_dci3 bx12_dci3
+                    };
+                  1# ->
+                    case ds8_dc2o of {
+                      __DEFAULT ->
+                        case <# n_a5xX 0# of {
+                          __DEFAULT ->
+                            case newPinnedByteArray# n_a5xX ipv2_sdnt of
+                            { (# ipv4_aeVt, ipv5_aeVu #) ->
+                            let { conrep_sh9E = mutableByteArrayContents# ipv5_aeVu } in
+                            case writeMutVar#
+                                   bx_dcfP
+                                   (RingSinkState
+                                      bx7_dchY
+                                      bx8_dchZ
+                                      bx9_dci0
+                                      bx10_dci1
+                                      bx11_dci2
+                                      bx12_dci3
+                                      ds5_dc2l
+                                      ds6_dc2m
+                                      ds7_dc2n
+                                      (SpillActive
+                                         (ForeignPtr conrep_sh9E (PlainPtr ipv5_aeVu)) n_a5xX))
+                                   ipv4_aeVt
+                            of s2#_ae4d
+                            { __DEFAULT ->
+                            (# conrep_sh9E, plusAddr# conrep_sh9E n_a5xX, s2#_ae4d #)
+                            }
+                            };
+                          1# -> case mallocPlainForeignPtrBytes2 of {}
+                        };
+                      SpillIdle bx13_dcd6 bx14_dcd7 ->
+                        case bx13_dcd6 of wild5_shAL { ForeignPtr fo_shAM ds9_shAN ->
+                        case >=# bx14_dcd7 n_a5xX of {
+                          __DEFAULT ->
+                            case <# n_a5xX 0# of {
+                              __DEFAULT ->
+                                case newPinnedByteArray# n_a5xX ipv2_sdnt of
+                                { (# ipv4_aeVt, ipv5_aeVu #) ->
+                                let { conrep_sh9G = mutableByteArrayContents# ipv5_aeVu } in
+                                case writeMutVar#
+                                       bx_dcfP
+                                       (RingSinkState
+                                          bx7_dchY
+                                          bx8_dchZ
+                                          bx9_dci0
+                                          bx10_dci1
+                                          bx11_dci2
+                                          bx12_dci3
+                                          ds5_dc2l
+                                          ds6_dc2m
+                                          ds7_dc2n
+                                          (SpillActive
+                                             (ForeignPtr conrep_sh9G (PlainPtr ipv5_aeVu)) n_a5xX))
+                                       ipv4_aeVt
+                                of s2#_ae4d
+                                { __DEFAULT ->
+                                (# conrep_sh9G, plusAddr# conrep_sh9G n_a5xX, s2#_ae4d #)
+                                }
+                                };
+                              1# -> case mallocPlainForeignPtrBytes2 of {}
+                            };
+                          1# ->
+                            case writeMutVar#
+                                   bx_dcfP
+                                   (RingSinkState
+                                      bx7_dchY
+                                      bx8_dchZ
+                                      bx9_dci0
+                                      bx10_dci1
+                                      bx11_dci2
+                                      bx12_dci3
+                                      ds5_dc2l
+                                      ds6_dc2m
+                                      ds7_dc2n
+                                      (SpillActive wild5_shAL bx14_dcd7))
+                                   ipv2_sdnt
+                            of s2#_ae4d
+                            { __DEFAULT ->
+                            (# fo_shAM, plusAddr# fo_shAM bx14_dcd7, s2#_ae4d #)
+                            }
+                        }
+                        }
+                    }
+                }
+                } } in
+          case ds4_dc3h of wild3_Xb {
+            __DEFAULT ->
+              jump $j_sgLF
+                ipv_aecb
+                (RingSinkState
+                   (plusWord64#
+                      bx1_dcis
+                      (int64ToWord64#
+                         (intToInt64#
+                            (minusAddr#
+                               cur_shAr
+                               (plusAddr#
+                                  bx3_dciu
+                                  (andI# (word2Int# (word64ToWord# bx1_dcis)) bx4_dciv))))))
+                   bx2_dcit
+                   bx3_dciu
+                   bx4_dciv
+                   bx5_dciw
+                   bx6_dcix
+                   ds_dc3e
+                   ds2_dc3f
+                   ds3_dc3g
+                   wild3_Xb);
+            SpillActive bx7_dcdl bx8_dcdm ->
+              case bx7_dcdl of wild4_shAP { ForeignPtr fo_shAQ ds5_shAR ->
+              case $wringCopyIn
+                     wild2_Xa (Ptr fo_shAQ) (minusAddr# cur_shAr fo_shAQ) ipv_aecb
+              of
+              { (# ipv2_Xd, ipv3_Xe #) ->
+              case touch# ds5_shAR ipv2_Xd of s'_aeAp { __DEFAULT ->
+              case ipv3_Xe of
+              { RingSinkState bx9_dcdo bx10_dcdp bx11_dcdq bx12_dcdr bx13_dcds
+                              bx14_dcdt rsPublishHead1_B7 rsEnsureRoom1_B8 rsLoadTail1_B9
+                              ds7_daBr ->
+              jump $j_sgLF
+                s'_aeAp
+                (RingSinkState
+                   bx9_dcdo
+                   bx10_dcdp
+                   bx11_dcdq
+                   bx12_dcdr
+                   bx13_dcds
+                   bx14_dcdt
+                   rsPublishHead1_B7
+                   rsEnsureRoom1_B8
+                   rsLoadTail1_B9
+                   (SpillIdle wild4_shAP bx8_dcdm))
+              }
+              }
+              }
+              }
+          }
+          }
+          }
+      }
+      }
+
+getBytes_ = $fIsStringBuilder1 `cast` <Co:5> :: ...
+
+$fMonoidBuilder1
+  = \ ds_dc0j eta_B0 eta1_B1 ->
+      case eta1_B1 of wild_shAT { (# cur_shAU, end_shAV, s_shAW #) ->
+      case ds_dc0j of { Write bx_dch8 w_a5qG ->
+      case <# (minusAddr# end_shAV cur_shAU) bx_dch8 of {
+        __DEFAULT -> w_a5qG wild_shAT;
+        1# ->
+          case $fIsStringBuilder1 bx_dch8 eta_B0 wild_shAT of bs_a48I
+          { (# ipv_sh0K, ipv1_sh0L, ipv2_sh0M #) ->
+          w_a5qG bs_a48I
+          }
+      }
+      }
+      }
+
+write = $fMonoidBuilder1 `cast` <Co:5> :: ...
+
+Rec {
+appendBuilder
+  = (\ ds_dc0x ds1_dc0y v_B2 v1_X3 ->
+       (ds1_dc0y `cast` <Co:1> :: ...)
+         v_B2 ((ds_dc0x `cast` <Co:1> :: ...) v_B2 v1_X3))
+    `cast` <Co:8> :: ...
+end Rec }
+
+$fSemigroupBuilder_$cstimes
+  = \ @b_a9Ov $dIntegral_a9Ow eta_acHo eta1_acHp ->
+      let { $dReal_sgzp = $p1Integral $dIntegral_a9Ow } in
+      case <=
+             ($p2Real $dReal_sgzp)
+             eta_acHo
+             (fromInteger ($p1Real $dReal_sgzp) lvl2_rkrr)
+      of {
+        False ->
+          let { $dEq_sgzv = $p2Real $dReal_sgzp } in
+          let { $dEq1_sgzx = $p1Ord $dEq_sgzv } in
+          let { $dNum_sgzt = $p1Real $dReal_sgzp } in
+          let { lvl17_sgEh = fromInteger $dNum_sgzt lvl_rkrp } in
+          let { lvl18_sgEj = fromInteger $dNum_sgzt lvl2_rkrr } in
+          join {
+            exit_X0 x_acHy y_acHz
+              = let { lvl19_sgEl = fromInteger $dNum_sgzt lvl1_rkrq } in
+                case == $dEq1_sgzx y_acHz lvl19_sgEl of {
+                  False ->
+                    joinrec {
+                      g_sgzJ x1_acHK y1_acHL z_acHM
+                        = case ==
+                                 $dEq1_sgzx (rem $dIntegral_a9Ow y1_acHL lvl17_sgEh) lvl18_sgEj
+                          of {
+                            False ->
+                              case == $dEq1_sgzx y1_acHL lvl19_sgEl of {
+                                False ->
+                                  jump g_sgzJ
+                                    (appendBuilder x1_acHK x1_acHK)
+                                    (quot $dIntegral_a9Ow y1_acHL lvl17_sgEh)
+                                    (appendBuilder x1_acHK z_acHM);
+                                True -> appendBuilder x1_acHK z_acHM
+                              };
+                            True ->
+                              jump g_sgzJ
+                                (appendBuilder x1_acHK x1_acHK)
+                                (quot $dIntegral_a9Ow y1_acHL lvl17_sgEh)
+                                z_acHM
+                          }; } in
+                    jump g_sgzJ
+                      (appendBuilder x_acHy x_acHy)
+                      (quot $dIntegral_a9Ow y_acHz lvl17_sgEh)
+                      x_acHy;
+                  True -> x_acHy
+                } } in
+          joinrec {
+            f_sgzz x_acHy y_acHz
+              = case ==
+                       $dEq1_sgzx (rem $dIntegral_a9Ow y_acHz lvl17_sgEh) lvl18_sgEj
+                of {
+                  False -> jump exit_X0 x_acHy y_acHz;
+                  True ->
+                    jump f_sgzz
+                      (appendBuilder x_acHy x_acHy)
+                      (quot $dIntegral_a9Ow y_acHz lvl17_sgEh)
+                }; } in
+          jump f_sgzz eta1_acHp eta_acHo;
+        True -> lvl6_rkrG
+      }
+
+Rec {
+$fSemigroupBuilder2
+  = \ b_acJ5 ds1_acJ6 eta_B0 eta1_B1 ->
+      case ds1_acJ6 of {
+        [] -> (b_acJ5 `cast` <Co:1> :: ...) eta_B0 eta1_B1;
+        : c_acJc cs_acJd ->
+          $fSemigroupBuilder2
+            c_acJc
+            cs_acJd
+            eta_B0
+            ((b_acJ5 `cast` <Co:1> :: ...) eta_B0 eta1_B1)
+      }
+end Rec }
+
+$fSemigroupBuilder1
+  = \ ds_acJ2 eta_B0 eta1_B1 ->
+      case ds_acJ2 of { :| a1_acJ7 as_acJ8 ->
+      $fSemigroupBuilder2 a1_acJ7 as_acJ8 eta_B0 eta1_B1
+      }
+
+$fSemigroupBuilder
+  = C:Semigroup
+      appendBuilder
+      ($fSemigroupBuilder1 `cast` <Co:6> :: ...)
+      $fSemigroupBuilder_$cstimes
+
+$fMonoidWrite1 = \ s_a44h -> s_a44h
+
+$fMonoidWrite_$cmempty = Write 0# $fMonoidWrite1
+
+$fEqFixedBufferOverflow_$c==
+  = \ ds_dc3n ds1_dc3o ->
+      case ds_dc3n of { FixedBufferOverflow bx_dcjb bx1_dcjc ->
+      case ds1_dc3o of { FixedBufferOverflow bx2_dcje bx3_dcjg ->
+      case ==# bx_dcjb bx2_dcje of {
+        __DEFAULT -> False;
+        1# -> tagToEnum# (==# bx1_dcjc bx3_dcjg)
+      }
+      }
+      }
+
+$fEqFixedBufferOverflow_$c/=
+  = \ eta_B0 eta1_B1 ->
+      case eta_B0 of { FixedBufferOverflow bx_dcjb bx1_dcjc ->
+      case eta1_B1 of { FixedBufferOverflow bx2_dcje bx3_dcjg ->
+      case ==# bx_dcjb bx2_dcje of {
+        __DEFAULT -> True;
+        1# ->
+          case ==# bx1_dcjc bx3_dcjg of {
+            __DEFAULT -> True;
+            1# -> False
+          }
+      }
+      }
+      }
+
+$fEqFixedBufferOverflow
+  = C:Eq $fEqFixedBufferOverflow_$c== $fEqFixedBufferOverflow_$c/=
+
+rsSpill
+  = \ ds_dc37 ->
+      case ds_dc37 of
+      { RingSinkState bx_dcis bx1_dcit bx2_dciu bx3_dciv bx4_dciw
+                      bx5_dcix ds1_dc3e ds2_dc3f ds3_dc3g ds4_dc3h ->
+      ds4_dc3h
+      }
+
+rsLoadTail
+  = \ ds_dc2W ->
+      case ds_dc2W of
+      { RingSinkState bx_dcim bx1_dcin bx2_dcio bx3_dcip bx4_dciq
+                      bx5_dcir ds1_dc33 ds2_dc34 ds3_dc35 ds4_dc36 ->
+      ds3_dc35
+      }
+
+rsEnsureRoom
+  = \ ds_dc2L ->
+      case ds_dc2L of
+      { RingSinkState bx_dcig bx1_dcih bx2_dcii bx3_dcij bx4_dcik
+                      bx5_dcil ds1_dc2S ds2_dc2T ds3_dc2U ds4_dc2V ->
+      ds2_dc2T
+      }
+
+rsPublishHead
+  = \ ds_dc2A ->
+      case ds_dc2A of
+      { RingSinkState bx_dcia bx1_dcib bx2_dcic bx3_dcid bx4_dcie
+                      bx5_dcif ds1_dc2H ds2_dc2I ds3_dc2J ds4_dc2K ->
+      ds1_dc2H
+      }
+
+rsChunkSize
+  = \ ds_dc2p ->
+      case ds_dc2p of
+      { RingSinkState bx_dci4 bx1_dci5 bx2_dci6 bx3_dci7 bx4_dci8
+                      bx5_dci9 ds1_dc2w ds2_dc2x ds3_dc2y ds4_dc2z ->
+      I# bx5_dci9
+      }
+
+rsRingSize
+  = \ ds_dc2e ->
+      case ds_dc2e of
+      { RingSinkState bx_dchY bx1_dchZ bx2_dci0 bx3_dci1 bx4_dci2
+                      bx5_dci3 ds1_dc2l ds2_dc2m ds3_dc2n ds4_dc2o ->
+      I# bx4_dci2
+      }
+
+rsMask
+  = \ ds_dc23 ->
+      case ds_dc23 of
+      { RingSinkState bx_dchS bx1_dchT bx2_dchU bx3_dchV bx4_dchW
+                      bx5_dchX ds1_dc2a ds2_dc2b ds3_dc2c ds4_dc2d ->
+      I# bx3_dchV
+      }
+
+rsBase
+  = \ ds_dc1S ->
+      case ds_dc1S of
+      { RingSinkState bx_dchM bx1_dchN bx2_dchO bx3_dchP bx4_dchQ
+                      bx5_dchR ds1_dc1Z ds2_dc20 ds3_dc21 ds4_dc22 ->
+      Ptr bx2_dchO
+      }
+
+rsPublished
+  = \ ds_dc1H ->
+      case ds_dc1H of
+      { RingSinkState bx_dchG bx1_dchH bx2_dchI bx3_dchJ bx4_dchK
+                      bx5_dchL ds1_dc1O ds2_dc1P ds3_dc1Q ds4_dc1R ->
+      W64# bx1_dchH
+      }
+
+rsHead
+  = \ ds_dc1w ->
+      case ds_dc1w of
+      { RingSinkState bx_dchA bx1_dchB bx2_dchC bx3_dchD bx4_dchE
+                      bx5_dchF ds1_dc1D ds2_dc1E ds3_dc1F ds4_dc1G ->
+      W64# bx_dchA
+      }
+
+queueTotal
+  = \ ds_dc1s ->
+      case ds_dc1s of { Queue ds1_dc1t bx_dchy bx1_dchz -> I# bx1_dchz }
+
+queueStart
+  = \ ds_dc1o ->
+      case ds_dc1o of { Queue ds1_dc1p bx_dchw bx1_dchx -> I# bx_dchw }
+
+queueBuffer
+  = \ ds_dc1k ->
+      case ds_dc1k of { Queue ds1_dc1l bx_dchu bx1_dchv -> ds1_dc1l }
+
+unBuilder1 = \ ds_dc1i -> ds_dc1i
+
+unBuilder = unBuilder1 `cast` <Co:4> :: ...
+
+ssFinish
+  = \ ds_dc1f ->
+      case ds_dc1f of { StreamSink ds1_dc1g ds2_dc1h -> ds2_dc1h }
+
+ssFeedRaw
+  = \ ds_dc1c ->
+      case ds_dc1c of { StreamSink ds1_dc1d ds2_dc1e -> ds1_dc1d }
+
+sqSink
+  = \ ds_dc16 ->
+      case ds_dc16 of
+      { StreamQueue bx_dchr ds1_dc18 bx1_dchs bx2_dcht ds2_dc1b ->
+      ds2_dc1b
+      }
+
+sqTotal
+  = \ ds_dc10 ->
+      case ds_dc10 of
+      { StreamQueue bx_dcho ds1_dc12 bx1_dchp bx2_dchq ds2_dc15 ->
+      I# bx2_dchq
+      }
+
+sqCap
+  = \ ds_dc0U ->
+      case ds_dc0U of
+      { StreamQueue bx_dchl ds1_dc0W bx1_dchm bx2_dchn ds2_dc0Z ->
+      I# bx1_dchm
+      }
+
+sqFptr
+  = \ ds_dc0O ->
+      case ds_dc0O of
+      { StreamQueue bx_dchi ds1_dc0Q bx1_dchj bx2_dchk ds2_dc0T ->
+      ds1_dc0Q
+      }
+
+sqBase
+  = \ ds_dc0I ->
+      case ds_dc0I of
+      { StreamQueue bx_dchf ds1_dc0K bx1_dchg bx2_dchh ds2_dc0N ->
+      Ptr bx_dchf
+      }
+
+fixedBufferAvailable
+  = \ ds_dc0F ->
+      case ds_dc0F of { FixedBufferOverflow bx_dchd bx1_dche ->
+      I# bx1_dche
+      }
+
+fixedBufferRequested
+  = \ ds_dc0C ->
+      case ds_dc0C of { FixedBufferOverflow bx_dchb bx1_dchc ->
+      I# bx_dchb
+      }
+
+runBuildM1 = \ @a_a6R8 ds_dc0A -> ds_dc0A
+
+runBuildM = runBuildM1 `cast` <Co:8> :: ...
+
+$fMonadBuildM_$c>>=
+  = (\ @a_a9AH @b_a9AI ds_dc3D f_a47G k_a47H ->
+       (ds_dc3D `cast` <Co:2> :: ...)
+         (\ r_a47I -> ((f_a47G r_a47I) `cast` <Co:2> :: ...) k_a47H))
+    `cast` <Co:16> :: ...
+
+getSink1
+  = \ k_a4TB dex_a4TF ds_daA1 ->
+      ((k_a4TB dex_a4TF) `cast` <Co:1> :: ...) dex_a4TF ds_daA1
+
+getSink = getSink1 `cast` <Co:10> :: ...
+
+getCur1
+  = \ k_a4TV dex_a4TX ds_dazD ->
+      case ds_dazD of wild_shBf { (# cur_shBg, end_shBh, s_shBi #) ->
+      ((k_a4TV (Ptr cur_shBg)) `cast` <Co:1> :: ...) dex_a4TX wild_shBf
+      }
+
+getCur = getCur1 `cast` <Co:12> :: ...
+
+getEnd1
+  = \ k_a4U7 dex_a4U8 ds_dazz ->
+      case ds_dazz of wild_shBk { (# cur_shBl, end_shBm, s_shBn #) ->
+      ((k_a4U7 (Ptr end_shBm)) `cast` <Co:1> :: ...) dex_a4U8 wild_shBk
+      }
+
+getEnd = getEnd1 `cast` <Co:12> :: ...
+
+setCur1
+  = \ ds_daz9 eta_B0 eta1_B1 eta2_B2 ->
+      case eta2_B2 of { (# ds1_shBq, end_shBr, s_shBs #) ->
+      case ds_daz9 of { Ptr p_a4Ue ->
+      ((eta_B0 ()) `cast` <Co:1> :: ...)
+        eta1_B1 (# p_a4Ue, end_shBr, s_shBs #)
+      }
+      }
+
+setCur = setCur1 `cast` <Co:14> :: ...
+
+setEnd1
+  = \ ds_daz3 eta_B0 eta1_B1 eta2_B2 ->
+      case eta2_B2 of { (# cur_shBv, ds1_shBw, s_shBx #) ->
+      case ds_daz3 of { Ptr p_a4Uq ->
+      ((eta_B0 ()) `cast` <Co:1> :: ...)
+        eta1_B1 (# cur_shBv, p_a4Uq, s_shBx #)
+      }
+      }
+
+setEnd = setEnd1 `cast` <Co:14> :: ...
+
+writeBoundedPrim
+  = \ @a_a84T prim_a4UZ x_a4V0 ->
+      case prim_a4UZ of { BP bx_adnB ds1_adnC ->
+      Write
+        bx_adnB
+        (\ ds_X1 ->
+           case ds_X1 of { (# cur_shBA, end_shBB, s_shBC #) ->
+           case ((ds1_adnC x_a4V0 (Ptr cur_shBA)) `cast` <Co:3> :: ...) s_shBC
+           of
+           { (# ipv_sdqk, ipv1_sdqq #) ->
+           case ipv1_sdqq of { Ptr cur'_a4Vu ->
+           (# cur'_a4Vu, end_shBB, ipv_sdqk #)
+           }
+           }
+           })
+      }
+
+runBuilder1
+  = \ ds_daxt sink_a4Vz ds1_daxu ds2_daxv eta_B0 ->
+      case ds1_daxu of { Ptr cur_a4VA ->
+      case ds2_daxv of { Ptr end_a4VC ->
+      case (ds_daxt `cast` <Co:1> :: ...)
+             sink_a4Vz (# cur_a4VA, end_a4VC, eta_B0 #)
+      of
+      { (# ipv_sdsk, ipv1_sdsm, ipv2_sdsn #) ->
+      (# ipv2_sdsn, Ptr ipv_sdsk #)
+      }
+      }
+      }
+
+runBuilder = runBuilder1 `cast` <Co:18> :: ...
+
+rebuild1
+  = \ ds_davf v_B2 v1_X3 -> (ds_davf `cast` <Co:1> :: ...) v_B2 v1_X3
+
+rebuild = rebuild1 `cast` <Co:5> :: ...
+
+$krep_rkrI = KindRepTyConApp $tc'AddrRep []
+
+$krep1_rkrJ = KindRepTyConApp $tcAddr# []
+
+$krep2_rkrK = KindRepTyConApp $tcWord64 []
+
+$krep3_rkrL = KindRepTyConApp $tcSomeException []
+
+$krep4_rkrM = KindRepTyConApp $tcHandle []
+
+$krep5_rkrN = KindRepTyConApp $tcWord8 []
+
+$krep6_rkrO = KindRepTyConApp $tcByteString []
+
+$krep7_rkrP = KindRepTyConApp $tcUnit []
+
+$krep8_rkrQ = KindRepTyConApp $tcRealWorld []
+
+$krep9_rkrR = KindRepTyConApp $tcRuntimeRep []
+
+$krep10_rkrS = KindRepTyConApp $tcInt []
+
+$krep11_rkrT = : $krep2_rkrK []
+
+$krep12_rkrU = KindRepTyConApp $tcIO $krep11_rkrT
+
+$krep13_rkrV = : $krep7_rkrP []
+
+$krep14_rkrW = KindRepTyConApp $tcIO $krep13_rkrV
+
+$krep15_rkrX = : $krep5_rkrN []
+
+$krep16_rkrY = KindRepTyConApp $tcPtr $krep15_rkrX
+
+$krep17_rkrZ = KindRepTyConApp $tcForeignPtr $krep15_rkrX
+
+$krep18_rks0 = : $krep17_rkrZ []
+
+$krep19_rks1 = KindRepTyConApp $tcIORef $krep18_rks0
+
+$krep20_rks2 = KindRepTyConApp $tcMVar $krep13_rkrV
+
+$krep21_rks3 = KindRepFun $krep10_rkrS $krep14_rkrW
+
+$krep22_rks4 = KindRepFun $krep2_rkrK $krep14_rkrW
+
+$krep23_rks5 = KindRepFun $krep16_rkrY $krep21_rks3
+
+$krep24_rks6 = KindRepVar 0#
+
+$krep25_rks7 = : $krep8_rkrQ []
+
+$krep26_rks8 = KindRepTyConApp $tcState# $krep25_rks7
+
+$krep27_rks9 = : $krep9_rkrR []
+
+$krep28_rksa = KindRepTyConApp $tc'[] $krep27_rks9
+
+$krep29_rksb = : $krep28_rksa []
+
+$krep30_rksc = KindRepTyConApp $tc'TupleRep $krep29_rksb
+
+$krep31_rksd = : $krep26_rks8 []
+
+$krep32_rkse = : $krep1_rkrJ $krep31_rksd
+
+$krep33_rksf = : $krep1_rkrJ $krep32_rkse
+
+$krep34_rksg = : $krep30_rksc $krep33_rksf
+
+$krep35_rksh = : $krep_rkrI $krep34_rksg
+
+$krep36_rksi = : $krep_rkrI $krep35_rksh
+
+$krep37_rksj = KindRepTyConApp $tcTuple3# $krep36_rksi
+
+$krep38_rksk = KindRepFun $krep37_rksj $krep37_rksj
+
+$tcSpillBuf2 = "SpillBuf"#
+
+$tcSpillBuf1 = TrNameS $tcSpillBuf2
+
+$tcSpillBuf
+  = TyCon
+      3306209513174582004#Word64
+      15154130673841209548#Word64
+      $trModule
+      $tcSpillBuf1
+      0#
+      krep$*
+
+$krep39_rksl = KindRepTyConApp $tcSpillBuf []
+
+$krep40_rksm = KindRepFun $krep10_rkrS $krep39_rksl
+
+$tc'SpillBuf1 = KindRepFun $krep17_rkrZ $krep40_rksm
+
+$tc'SpillBuf3 = "'SpillBuf"#
+
+$tc'SpillBuf2 = TrNameS $tc'SpillBuf3
+
+$tc'SpillBuf
+  = TyCon
+      3741385918304786761#Word64
+      186010420576498366#Word64
+      $trModule
+      $tc'SpillBuf2
+      0#
+      $tc'SpillBuf1
+
+$tcRingSpill2 = "RingSpill"#
+
+$tcRingSpill1 = TrNameS $tcRingSpill2
+
+$tcRingSpill
+  = TyCon
+      1790586847497565161#Word64
+      10762223396394428957#Word64
+      $trModule
+      $tcRingSpill1
+      0#
+      krep$*
+
+$tc'NoSpill1 = KindRepTyConApp $tcRingSpill []
+
+$tc'NoSpill3 = "'NoSpill"#
+
+$tc'NoSpill2 = TrNameS $tc'NoSpill3
+
+$tc'NoSpill
+  = TyCon
+      6689586956169192277#Word64
+      17455053755864498330#Word64
+      $trModule
+      $tc'NoSpill2
+      0#
+      $tc'NoSpill1
+
+$tc'SpillActive1 = KindRepFun $krep39_rksl $tc'NoSpill1
+
+$tc'SpillIdle2 = "'SpillIdle"#
+
+$tc'SpillIdle1 = TrNameS $tc'SpillIdle2
+
+$tc'SpillIdle
+  = TyCon
+      4259051435502700579#Word64
+      2433409564660220911#Word64
+      $trModule
+      $tc'SpillIdle1
+      0#
+      $tc'SpillActive1
+
+$tc'SpillActive3 = "'SpillActive"#
+
+$tc'SpillActive2 = TrNameS $tc'SpillActive3
+
+$tc'SpillActive
+  = TyCon
+      15088132740216614740#Word64
+      15088502687826879072#Word64
+      $trModule
+      $tc'SpillActive2
+      0#
+      $tc'SpillActive1
+
+$tcRingSinkState2 = "RingSinkState"#
+
+$tcRingSinkState1 = TrNameS $tcRingSinkState2
+
+$tcRingSinkState
+  = TyCon
+      16429259830518046617#Word64
+      2929036066375305809#Word64
+      $trModule
+      $tcRingSinkState1
+      0#
+      krep$*
+
+$krep41_rksn = KindRepTyConApp $tcRingSinkState []
+
+$krep42_rkso = KindRepFun $tc'NoSpill1 $krep41_rksn
+
+$krep43_rksp = KindRepFun $krep12_rkrU $krep42_rkso
+
+$krep44_rksq = KindRepFun $krep22_rks4 $krep43_rksp
+
+$krep45_rksr = KindRepFun $krep22_rks4 $krep44_rksq
+
+$krep46_rkss = KindRepFun $krep10_rkrS $krep45_rksr
+
+$krep47_rkst = KindRepFun $krep10_rkrS $krep46_rkss
+
+$krep48_rksu = KindRepFun $krep10_rkrS $krep47_rkst
+
+$krep49_rksv = KindRepFun $krep16_rkrY $krep48_rksu
+
+$krep50_rksw = KindRepFun $krep2_rkrK $krep49_rksv
+
+$tc'RingSinkState1 = KindRepFun $krep2_rkrK $krep50_rksw
+
+$tc'RingSinkState3 = "'RingSinkState"#
+
+$tc'RingSinkState2 = TrNameS $tc'RingSinkState3
+
+$tc'RingSinkState
+  = TyCon
+      14075962594631714938#Word64
+      17123088608695564420#Word64
+      $trModule
+      $tc'RingSinkState2
+      0#
+      $tc'RingSinkState1
+
+$krep51_rksx = : $krep41_rksn []
+
+$krep52_rksy = KindRepTyConApp $tcIORef $krep51_rksx
+
+$tcQueue2 = "Queue"#
+
+$tcQueue1 = TrNameS $tcQueue2
+
+$tcQueue
+  = TyCon
+      18009893325098452999#Word64
+      8512937870673444106#Word64
+      $trModule
+      $tcQueue1
+      0#
+      krep$*
+
+$krep53_rksz = KindRepTyConApp $tcQueue []
+
+$krep54_rksA = KindRepFun $krep10_rkrS $krep53_rksz
+
+$krep55_rksB = KindRepFun $krep10_rkrS $krep54_rksA
+
+$tc'Queue1 = KindRepFun $krep17_rkrZ $krep55_rksB
+
+$tc'Queue3 = "'Queue"#
+
+$tc'Queue2 = TrNameS $tc'Queue3
+
+$tc'Queue
+  = TyCon
+      6620710979104971299#Word64
+      7525470315094520701#Word64
+      $trModule
+      $tc'Queue2
+      0#
+      $tc'Queue1
+
+$krep56_rksC = : $krep53_rksz []
+
+$krep57_rksD = KindRepTyConApp $tcIORef $krep56_rksC
+
+$tcRequest2 = "Request"#
+
+$tcRequest1 = TrNameS $tcRequest2
+
+$tcRequest
+  = TyCon
+      11419354510395972653#Word64
+      14398819896375852395#Word64
+      $trModule
+      $tcRequest1
+      0#
+      krep$*
+
+$krep58_rksE = KindRepTyConApp $tcRequest []
+
+$krep59_rksF = KindRepFun $krep16_rkrY $krep58_rksE
+
+$tc'Request1 = KindRepFun $krep16_rkrY $krep59_rksF
+
+$tc'Request3 = "'Request"#
+
+$tc'Request2 = TrNameS $tc'Request3
+
+$tc'Request
+  = TyCon
+      8254699793145448591#Word64
+      512910474001171578#Word64
+      $trModule
+      $tc'Request2
+      0#
+      $tc'Request1
+
+$krep60_rksG = : $krep58_rksE []
+
+$krep61_rksH = KindRepTyConApp $tcMVar $krep60_rksG
+
+$tcResponse2 = "Response"#
+
+$tcResponse1 = TrNameS $tcResponse2
+
+$tcResponse
+  = TyCon
+      15967257312737159986#Word64
+      14117764711603341421#Word64
+      $trModule
+      $tcResponse1
+      0#
+      krep$*
+
+$krep62_rksI = KindRepTyConApp $tcResponse []
+
+$tc'Done1 = KindRepFun $krep16_rkrY $krep62_rksI
+
+$tc'Done3 = "'Done"#
+
+$tc'Done2 = TrNameS $tc'Done3
+
+$tc'Done
+  = TyCon
+      15380992373082002123#Word64
+      6639749640560349851#Word64
+      $trModule
+      $tc'Done2
+      0#
+      $tc'Done1
+
+$tc'Error1 = KindRepFun $krep3_rkrL $krep62_rksI
+
+$tc'Error3 = "'Error"#
+
+$tc'Error2 = TrNameS $tc'Error3
+
+$tc'Error
+  = TyCon
+      15617951383528843032#Word64
+      995384694403289743#Word64
+      $trModule
+      $tc'Error2
+      0#
+      $tc'Error1
+
+$krep63_rksJ = KindRepFun $krep6_rkrO $krep62_rksI
+
+$tc'InsertByteString1 = KindRepFun $krep16_rkrY $krep63_rksJ
+
+$tc'InsertByteString3 = "'InsertByteString"#
+
+$tc'InsertByteString2 = TrNameS $tc'InsertByteString3
+
+$tc'InsertByteString
+  = TyCon
+      12384275844617556389#Word64
+      1358664878013484782#Word64
+      $trModule
+      $tc'InsertByteString2
+      0#
+      $tc'InsertByteString1
+
+$krep64_rksK = KindRepFun $krep10_rkrS $krep62_rksI
+
+$tc'MoreBuffer1 = KindRepFun $krep16_rkrY $krep64_rksK
+
+$tc'MoreBuffer3 = "'MoreBuffer"#
+
+$tc'MoreBuffer2 = TrNameS $tc'MoreBuffer3
+
+$tc'MoreBuffer
+  = TyCon
+      4281025659559877644#Word64
+      10699071148764096270#Word64
+      $trModule
+      $tc'MoreBuffer2
+      0#
+      $tc'MoreBuffer1
+
+$krep65_rksL = : $krep62_rksI []
+
+$krep66_rksM = KindRepTyConApp $tcMVar $krep65_rksL
+
+$tcDynamicSink2 = "DynamicSink"#
+
+$tcDynamicSink1 = TrNameS $tcDynamicSink2
+
+$tcDynamicSink
+  = TyCon
+      10622056960422246512#Word64
+      12162661076030143127#Word64
+      $trModule
+      $tcDynamicSink1
+      0#
+      krep$*
+
+$krep67_rksN = KindRepTyConApp $tcDynamicSink []
+
+$krep68_rksO = KindRepFun $krep66_rksM $krep67_rksN
+
+$tc'ThreadedSink1 = KindRepFun $krep61_rksH $krep68_rksO
+
+$tc'ThreadedSink3 = "'ThreadedSink"#
+
+$tc'ThreadedSink2 = TrNameS $tc'ThreadedSink3
+
+$tc'ThreadedSink
+  = TyCon
+      11131161734021466465#Word64
+      6318157521756665639#Word64
+      $trModule
+      $tc'ThreadedSink2
+      0#
+      $tc'ThreadedSink1
+
+$krep69_rksP = KindRepFun $krep10_rkrS $krep67_rksN
+
+$tc'BoundedGrowingBuffer1 = KindRepFun $krep17_rkrZ $krep69_rksP
+
+$tc'BoundedGrowingBuffer3 = "'BoundedGrowingBuffer"#
+
+$tc'BoundedGrowingBuffer2 = TrNameS $tc'BoundedGrowingBuffer3
+
+$tc'BoundedGrowingBuffer
+  = TyCon
+      13103574132312066278#Word64
+      13050344172868536928#Word64
+      $trModule
+      $tc'BoundedGrowingBuffer2
+      0#
+      $tc'BoundedGrowingBuffer1
+
+$krep70_rksQ = : $krep67_rksN []
+
+$krep71_rksR = KindRepTyConApp $tcIORef $krep70_rksQ
+
+$tcBuilder2 = "Builder"#
+
+$tcBuilder1 = TrNameS $tcBuilder2
+
+$tcBuilder
+  = TyCon
+      6278252217372361734#Word64
+      8646732760949327173#Word64
+      $trModule
+      $tcBuilder1
+      0#
+      krep$*
+
+$krep72_rksS = KindRepTyConApp $tcBuilder []
+
+$krep73_rksT = KindRepFun $krep24_rks6 $krep72_rksS
+
+$krep74_rksU = KindRepFun $krep73_rksT $krep72_rksS
+
+$krep75_rksV = : $krep72_rksS []
+
+$krep76_rksW = KindRepTyConApp $tcIO $krep75_rksV
+
+$tcStreamSink2 = "StreamSink"#
+
+$tcStreamSink1 = TrNameS $tcStreamSink2
+
+$tcStreamSink
+  = TyCon
+      4643087174034566489#Word64
+      6387515716874006294#Word64
+      $trModule
+      $tcStreamSink1
+      0#
+      krep$*
+
+$krep77_rksX = KindRepTyConApp $tcStreamSink []
+
+$krep78_rksY = KindRepFun $krep76_rksW $krep77_rksX
+
+$tc'StreamSink1 = KindRepFun $krep23_rks5 $krep78_rksY
+
+$tc'StreamSink3 = "'StreamSink"#
+
+$tc'StreamSink2 = TrNameS $tc'StreamSink3
+
+$tc'StreamSink
+  = TyCon
+      12468018396951116364#Word64
+      10901426018664325613#Word64
+      $trModule
+      $tc'StreamSink2
+      0#
+      $tc'StreamSink1
+
+$tcStreamQueue2 = "StreamQueue"#
+
+$tcStreamQueue1 = TrNameS $tcStreamQueue2
+
+$tcStreamQueue
+  = TyCon
+      8490657242709844603#Word64
+      13237559515350088753#Word64
+      $trModule
+      $tcStreamQueue1
+      0#
+      krep$*
+
+$krep79_rksZ = KindRepTyConApp $tcStreamQueue []
+
+$krep80_rkt0 = KindRepFun $krep77_rksX $krep79_rksZ
+
+$krep81_rkt1 = KindRepFun $krep10_rkrS $krep80_rkt0
+
+$krep82_rkt2 = KindRepFun $krep10_rkrS $krep81_rkt1
+
+$krep83_rkt3 = KindRepFun $krep17_rkrZ $krep82_rkt2
+
+$tc'StreamQueue1 = KindRepFun $krep16_rkrY $krep83_rkt3
+
+$tc'StreamQueue3 = "'StreamQueue"#
+
+$tc'StreamQueue2 = TrNameS $tc'StreamQueue3
+
+$tc'StreamQueue
+  = TyCon
+      12066081506252515007#Word64
+      12478493710952180191#Word64
+      $trModule
+      $tc'StreamQueue2
+      0#
+      $tc'StreamQueue1
+
+$krep84_rkt4 = : $krep79_rksZ []
+
+$krep85_rkt5 = KindRepTyConApp $tcIORef $krep84_rkt4
+
+$tcDataSink2 = "DataSink"#
+
+$tcDataSink1 = TrNameS $tcDataSink2
+
+$tcDataSink
+  = TyCon
+      15704349517173441791#Word64
+      18197275054449470759#Word64
+      $trModule
+      $tcDataSink1
+      0#
+      krep$*
+
+$tc'FixedBuffer1 = KindRepTyConApp $tcDataSink []
+
+$tc'FixedBuffer3 = "'FixedBuffer"#
+
+$tc'FixedBuffer2 = TrNameS $tc'FixedBuffer3
+
+$tc'FixedBuffer
+  = TyCon
+      14293037812742436459#Word64
+      18159170274354503960#Word64
+      $trModule
+      $tc'FixedBuffer2
+      0#
+      $tc'FixedBuffer1
+
+$tc'GrowingBuffer1 = KindRepFun $krep19_rks1 $tc'FixedBuffer1
+
+$tc'GrowingBuffer3 = "'GrowingBuffer"#
+
+$tc'GrowingBuffer2 = TrNameS $tc'GrowingBuffer3
+
+$tc'GrowingBuffer
+  = TyCon
+      1223535896607100415#Word64
+      6727107309588376367#Word64
+      $trModule
+      $tc'GrowingBuffer2
+      0#
+      $tc'GrowingBuffer1
+
+$tc'DynamicSink1 = KindRepFun $krep71_rksR $tc'FixedBuffer1
+
+$tc'DynamicSink3 = "'DynamicSink"#
+
+$tc'DynamicSink2 = TrNameS $tc'DynamicSink3
+
+$tc'DynamicSink
+  = TyCon
+      6288741560816811056#Word64
+      1451298390611305967#Word64
+      $trModule
+      $tc'DynamicSink2
+      0#
+      $tc'DynamicSink1
+
+$krep86_rkt6 = KindRepFun $krep57_rksD $tc'FixedBuffer1
+
+$krep87_rkt7 = KindRepFun $krep10_rkrS $krep86_rkt6
+
+$tc'HandleSink1 = KindRepFun $krep4_rkrM $krep87_rkt7
+
+$tc'HandleSink3 = "'HandleSink"#
+
+$tc'HandleSink2 = TrNameS $tc'HandleSink3
+
+$tc'HandleSink
+  = TyCon
+      9688383730883356156#Word64
+      10848219072212500113#Word64
+      $trModule
+      $tc'HandleSink2
+      0#
+      $tc'HandleSink1
+
+$krep88_rkt8 = KindRepFun $krep85_rkt5 $tc'FixedBuffer1
+
+$tc'StreamingSink1 = KindRepFun $krep10_rkrS $krep88_rkt8
+
+$tc'StreamingSink3 = "'StreamingSink"#
+
+$tc'StreamingSink2 = TrNameS $tc'StreamingSink3
+
+$tc'StreamingSink
+  = TyCon
+      8904960795302872878#Word64
+      657565520095433486#Word64
+      $trModule
+      $tc'StreamingSink2
+      0#
+      $tc'StreamingSink1
+
+$tc'RingSink1 = KindRepFun $krep52_rksy $tc'FixedBuffer1
+
+$tc'RingSink3 = "'RingSink"#
+
+$tc'RingSink2 = TrNameS $tc'RingSink3
+
+$tc'RingSink
+  = TyCon
+      955273369094093759#Word64
+      8246566382715786629#Word64
+      $trModule
+      $tc'RingSink2
+      0#
+      $tc'RingSink1
+
+$krep89_rkt9 = KindRepFun $tc'FixedBuffer1 $krep38_rksk
+
+$tc'Builder1 = KindRepFun $krep89_rkt9 $krep72_rksS
+
+$tc'Builder3 = "'Builder"#
+
+$tc'Builder2 = TrNameS $tc'Builder3
+
+$tc'Builder
+  = TyCon
+      10882694875542094504#Word64
+      6580418767247174731#Word64
+      $trModule
+      $tc'Builder2
+      0#
+      $tc'Builder1
+
+$krep90_rkta = KindRepTyConApp $tcChunkOverflowException []
+
+$krep91_rktb = KindRepFun $krep10_rkrS $krep90_rkta
+
+$krep92_rktc = KindRepFun $krep66_rksM $krep91_rktb
+
+$krep93_rktd = KindRepFun $krep61_rksH $krep92_rktc
+
+$tc'ChunkOverflowException1 = KindRepFun $krep6_rkrO $krep93_rktd
+
+$tc'ChunkOverflowException3 = "'ChunkOverflowException"#
+
+$tc'ChunkOverflowException2 = TrNameS $tc'ChunkOverflowException3
+
+$tc'ChunkOverflowException
+  = TyCon
+      1353697949530675271#Word64
+      14703770806725171161#Word64
+      $trModule
+      $tc'ChunkOverflowException2
+      0#
+      $tc'ChunkOverflowException1
+
+$krep94_rkte = KindRepTyConApp $tcSuspendBuilderException []
+
+$tc'SuspendBuilderException1 = KindRepFun $krep20_rks2 $krep94_rkte
+
+$tc'SuspendBuilderException3 = "'SuspendBuilderException"#
+
+$tc'SuspendBuilderException2 = TrNameS $tc'SuspendBuilderException3
+
+$tc'SuspendBuilderException
+  = TyCon
+      16630322411366132646#Word64
+      3182728974582065552#Word64
+      $trModule
+      $tc'SuspendBuilderException2
+      0#
+      $tc'SuspendBuilderException1
+
+$krep95_rktf = KindRepTyConApp $tcFixedBufferOverflow []
+
+$krep96_rktg = KindRepFun $krep10_rkrS $krep95_rktf
+
+$tc'FixedBufferOverflow1 = KindRepFun $krep10_rkrS $krep96_rktg
+
+$tc'FixedBufferOverflow3 = "'FixedBufferOverflow"#
+
+$tc'FixedBufferOverflow2 = TrNameS $tc'FixedBufferOverflow3
+
+$tc'FixedBufferOverflow
+  = TyCon
+      1789570550371650089#Word64
+      4749052444187843589#Word64
+      $trModule
+      $tc'FixedBufferOverflow2
+      0#
+      $tc'FixedBufferOverflow1
+
+$tcBuildM2 = "BuildM"#
+
+$tcBuildM1 = TrNameS $tcBuildM2
+
+$tcBuildM
+  = TyCon
+      8484136438492691518#Word64
+      10604247701273133313#Word64
+      $trModule
+      $tcBuildM1
+      0#
+      krep$*Arr*
+
+$krep97_rkth = : $krep24_rks6 []
+
+$krep98_rkti = KindRepTyConApp $tcBuildM $krep97_rkth
+
+$tc'BuildM1 = KindRepFun $krep74_rksU $krep98_rkti
+
+$tc'BuildM3 = "'BuildM"#
+
+$tc'BuildM2 = TrNameS $tc'BuildM3
+
+$tc'BuildM
+  = TyCon
+      10116999861856399727#Word64
+      3659655102438353008#Word64
+      $trModule
+      $tc'BuildM2
+      1#
+      $tc'BuildM1
+
+$tcWrite2 = "Write"#
+
+$tcWrite1 = TrNameS $tcWrite2
+
+$tcWrite
+  = TyCon
+      13689441429470362611#Word64
+      5326955730267596369#Word64
+      $trModule
+      $tcWrite1
+      0#
+      krep$*
+
+$krep99_rktj = KindRepTyConApp $tcWrite []
+
+$krep100_rktk = KindRepFun $krep38_rksk $krep99_rktj
+
+$tc'Write1 = KindRepFun $krep10_rkrS $krep100_rktk
+
+$tc'Write3 = "'Write"#
+
+$tc'Write2 = TrNameS $tc'Write3
+
+$tc'Write
+  = TyCon
+      14618708207953443879#Word64
+      14204141467284864133#Word64
+      $trModule
+      $tc'Write2
+      0#
+      $tc'Write1
+
+loc7_rktl = I# 1194#
+
+$fShowResponse6 = I# 11#
+
+loc8_rktm = I# 20#
+
+$dIP4_rktn
+  = SrcLoc
+      loc6_rkrD
+      loc5_rkrC
+      loc4_rkrB
+      loc7_rktl
+      $fShowResponse6
+      loc7_rktl
+      loc8_rktm
+
+$dIP5_rkto = PushCallStack $dIP1_rkrw $dIP4_rktn EmptyCallStack
+
+$fMonadBuildM1
+  = \ @a_a9Ba @b_a9Bb eta_B0 eta1_B1 k_a47H ->
+      let { lvl17_sgFI = (eta1_B1 `cast` <Co:2> :: ...) k_a47H } in
+      (eta_B0 `cast` <Co:2> :: ...) (\ _ -> lvl17_sgFI)
+
+$fMonadBuildM
+  = C:Monad
+      $fApplicativeBuildM
+      $fMonadBuildM_$c>>=
+      ($fMonadBuildM1 `cast` <Co:15> :: ...)
+      $fApplicativeBuildM_$cpure
+
+Rec {
+$wgo2_rktp
+  = \ ds_shnO ->
+      case ds_shnO of {
+        [] -> (# 0#, $fMonoidWrite1 #);
+        : y_ah0g ys_ah0h ->
+          case y_ah0g of { Write bx_dcmo w0_a44m ->
+          case $wgo2_rktp ys_ah0h of { (# ww_shwi, ww1_shwj #) ->
+          (# +# bx_dcmo ww_shwi, \ s_X5 -> ww1_shwj (w0_a44m s_X5) #)
+          }
+          }
+      }
+end Rec }
+
+$fMonoidWrite2_rktq
+  = \ eta_shnT ->
+      case $wgo2_rktp eta_shnT of { (# ww_shwl, ww1_shwm #) ->
+      Write ww_shwl ww1_shwm
+      }
+
+$fMonoidWrite
+  = C:Monoid
+      $fSemigroupWrite
+      $fMonoidWrite_$cmempty
+      $fMonoidBuilder_$c<>
+      $fMonoidWrite2_rktq
+
+maximalCopySize = I# 8160#
+
+$fShowResponse5 = "Error "#
+
+$fShowResponse4 = "Done "#
+
+$fShowResponse2 = "InsertByteString "#
+
+$fShowResponse3 = "MoreBuffer "#
+
+$w$cshowsPrec1
+  = \ ww_sho3 ds_sho6 ->
+      case ds_sho6 of {
+        Error b1_a70O ->
+          case b1_a70O of
+          { SomeException @e_shBM $dException_shBN $dIP8_shBO e1_shBP ->
+          let {
+            g_sgxt
+              = showsPrec
+                  ($p2Exception $dException_shBN) $fShowResponse6 e1_shBP } in
+          case >=# ww_sho3 11# of {
+            __DEFAULT ->
+              \ x_X4 -> unpackAppendCString# $fShowResponse5 (g_sgxt x_X4);
+            1# ->
+              \ x_ae79 ->
+                : $fShowCallStack4
+                  (unpackAppendCString#
+                     $fShowResponse5 (g_sgxt (: $fShowCallStack3 x_ae79)))
+          }
+          };
+        Done bx_dcmb ->
+          case >=# ww_sho3 11# of {
+            __DEFAULT ->
+              \ x_ae7g ->
+                unpackAppendCString#
+                  $fShowResponse4 ($w$cshowsPrec bx_dcmb x_ae7g);
+            1# ->
+              \ x_ae79 ->
+                : $fShowCallStack4
+                  (unpackAppendCString#
+                     $fShowResponse4
+                     ($w$cshowsPrec bx_dcmb (: $fShowCallStack3 x_ae79)))
+          };
+        MoreBuffer bx_dcmg bx1_dcmh ->
+          case >=# ww_sho3 11# of {
+            __DEFAULT ->
+              \ x_X9 ->
+                unpackAppendCString#
+                  $fShowResponse3
+                  ($w$cshowsPrec
+                     bx_dcmg (: showSpace1 ($wshowSignedInt 11# bx1_dcmh x_X9)));
+            1# ->
+              \ x_ae79 ->
+                : $fShowCallStack4
+                  (unpackAppendCString#
+                     $fShowResponse3
+                     ($w$cshowsPrec
+                        bx_dcmg
+                        (: showSpace1
+                           ($wshowSignedInt 11# bx1_dcmh (: $fShowCallStack3 x_ae79)))))
+          };
+        InsertByteString bx_dcmi b2_a70W ->
+          case b2_a70W of { BS ww1_shBU ww2_shBV ww3_shBW ->
+          let {
+            lvl17_sgGm
+              = $wunpackAppendCharsLazy ww1_shBU ww2_shBV ww3_shBW [] } in
+          case >=# ww_sho3 11# of {
+            __DEFAULT ->
+              \ x_X7 ->
+                unpackAppendCString#
+                  $fShowResponse2
+                  ($w$cshowsPrec
+                     bx_dcmi
+                     (: showSpace1
+                        (: $fShowCallStack14
+                           (showLitString lvl17_sgGm (: $fShowCallStack14 x_X7)))));
+            1# ->
+              \ x_ae79 ->
+                : $fShowCallStack4
+                  (unpackAppendCString#
+                     $fShowResponse2
+                     ($w$cshowsPrec
+                        bx_dcmi
+                        (: showSpace1
+                           (: $fShowCallStack14
+                              (showLitString
+                                 lvl17_sgGm (: $fShowCallStack14 (: $fShowCallStack3 x_ae79)))))))
+          }
+          }
+      }
+
+$fShowResponse_$cshowsPrec
+  = \ a_shnZ ds_sho6 ->
+      case a_shnZ of { I# ww_sho3 -> $w$cshowsPrec1 ww_sho3 ds_sho6 }
+
+$fShowResponse1
+  = \ ds_sho6 eta_B0 -> $w$cshowsPrec1 0# ds_sho6 eta_B0
+
+$fShowResponse_$cshowList
+  = \ ls_actr s_acts -> showList__ $fShowResponse1 ls_actr s_acts
+
+$fShowResponse_$cshow = \ x_acJm -> $w$cshowsPrec1 0# x_acJm []
+
+$fShowResponse
+  = C:Show
+      $fShowResponse_$cshowsPrec
+      $fShowResponse_$cshow
+      $fShowResponse_$cshowList
+
+lvl8_rktr = \ e1_aeKc eta1_aeKd -> (# eta1_aeKd, Left e1_aeKc #)
+
+loc9_rkts = I# 786#
+
+loc10_rktt = I# 21#
+
+loc11_rktu = I# 30#
+
+$dIP6_rktv
+  = SrcLoc
+      loc6_rkrD
+      loc5_rkrC
+      loc4_rkrB
+      loc9_rkts
+      loc10_rktt
+      loc9_rkts
+      loc11_rktu
+
+$dIP7_rktw = PushCallStack $dIP1_rkrw $dIP6_rktv EmptyCallStack
+
+lvl9_rktx
+  = \ ex_a5jG ->
+      throwIO1
+        ($dIP7_rktw `cast` <Co:4> :: ...) $fExceptionSomeException ex_a5jG
+
+lvl10_rkty = \ e1_aeKc eta1_aeKd -> (# eta1_aeKd, Left e1_aeKc #)
+
+lvl11_rktz
+  = "Pattern match failure in 'do' block at /Users/ian/Code/mercury/wireform-/wireform-core/src/Wireform/Builder/FastBuilder.hs:728:11-42"#
+
+lvl12_rktA = unpackCString# lvl11_rktz
+
+lvl13_rktB = failIO1 lvl12_rktA
+
+lvl14_rktC = lazy Empty
+
+$wtoLazyByteStringWith
+  = \ ww_shqc maxSize_shqf builder_shqh ->
+      case maxSize_shqf of maxSize1_X3 { I# ipv_seD6 ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case <# ww_shqc 0# of {
+             __DEFAULT ->
+               case newMutVar# NoFinalizers s'_aeDu of
+               { (# ipv1_aeEW, ipv2_aeEY #) ->
+               case newPinnedByteArray# ww_shqc ipv1_aeEW of
+               { (# ipv3_aeF6, ipv4_aeF7 #) ->
+               let { ipv5_sgOi = mutableByteArrayContents# ipv4_aeF7 } in
+               case newMutVar#
+                      (BoundedGrowingBuffer
+                         ipv5_sgOi (MallocPtr ipv4_aeF7 ipv2_aeEY) ipv_seD6)
+                      ipv3_aeF6
+               of
+               { (# ipv6_aeGf, ipv7_aeGg #) ->
+               let {
+                 finalPtr_sgy3
+                   = runRW#
+                       (\ s1_aeGX ->
+                          case (builder_shqh `cast` <Co:1> :: ...)
+                                 (DynamicSink ipv7_aeGg)
+                                 (# ipv5_sgOi, plusAddr# ipv5_sgOi ww_shqc, s1_aeGX #)
+                          of
+                          { (# ipv8_sdsk, ipv9_sdsm, ipv10_sdsn #) ->
+                          lazy (Ptr ipv8_sdsk)
+                          }) } in
+               join {
+                 exit_X9 thunk_a4W2 @e1_acw9 e2_acwc
+                   = case unsafeEqualityProof of { UnsafeRefl co_acDD ->
+                     case e2_acwc `cast` <Co:10> :: ... of
+                     { ChunkOverflowException chunk_a592 bx_dc5p bx1_dc5q bx2_dc5r ->
+                     case chunk_a592 of wild1_shBZ { BS bx3_shC0 bx4_shC1 bx5_shC2 ->
+                     lazy
+                       (let {
+                          rest_sgyB
+                            = join {
+                                $w$j_shq4 initialBufSize_shq2
+                                  = case initialBufSize_shq2 of { I# ipv8_sgVy ->
+                                    let {
+                                      lvl17_sgGw
+                                        = \ s1_aeJX ->
+                                            case takeMVar# bx1_dc5q s1_aeJX of
+                                            { (# ipv9_aeK4, ipv10_aeK5 #) ->
+                                            (# ipv9_aeK4, Right ipv10_aeK5 #)
+                                            } } in
+                                    letrec {
+                                      $wwait_shpq
+                                        = \ ww1_shpj eta_shpm ->
+                                            case catch# lvl17_sgGw lvl8_rktr eta_shpm of
+                                            { (# ipv9_Xi, ipv10_Xj #) ->
+                                            case ipv10_Xj of {
+                                              Left exn_a5mV ->
+                                                case newMVar# ipv9_Xi of
+                                                { (# ipv11_agLa, ipv12_agLb #) ->
+                                                case killThread#
+                                                       ww1_shpj
+                                                       ($fExceptionSuspendBuilderException_$ctoException
+                                                          ((MVar ipv12_agLb) `cast` <Co:2> :: ...))
+                                                       ipv11_agLa
+                                                of s1_ae2q
+                                                { __DEFAULT ->
+                                                case myThreadId# s1_ae2q of
+                                                { (# ipv13_ae0n, ipv14_ae0o #) ->
+                                                case killThread#
+                                                       ipv14_ae0o
+                                                       (case exn_a5mV of
+                                                        { SomeException @e_aeSG $dException_aeSI
+                                                                        $dIP8_aeSP e4_aeSQ ->
+                                                        SomeException
+                                                          $dException_aeSI
+                                                          (emptyExceptionContext
+                                                           `cast` <Co:4> :: ...)
+                                                          e4_aeSQ
+                                                        })
+                                                       ipv13_ae0n
+                                                of s2_Xp
+                                                { __DEFAULT ->
+                                                case putMVar# ipv12_agLb () s2_Xp of s2#_aeXU
+                                                { __DEFAULT ->
+                                                $wwait_shpq ww1_shpj s2#_aeXU
+                                                }
+                                                }
+                                                }
+                                                }
+                                                };
+                                              Right resp_a5mU -> (# ipv9_Xi, resp_a5mU #)
+                                            }
+                                            }; } in
+                                    let {
+                                      lvl18_shC5
+                                        = \ eta_af0N ->
+                                            catch#
+                                              (\ s1_shpw ->
+                                                 joinrec {
+                                                   $wloop_shpD s2_Xg
+                                                     = case catch#
+                                                              (\ s3_aeJX ->
+                                                                 case unmaskAsyncExceptions#
+                                                                        (\ s4_aeLx ->
+                                                                           seq# thunk_a4W2 s4_aeLx)
+                                                                        s3_aeJX
+                                                                 of
+                                                                 { (# ipv9_aeK4, ipv10_aeK5 #) ->
+                                                                 (# ipv9_aeK4, Right ipv10_aeK5 #)
+                                                                 })
+                                                              lvl10_rkty
+                                                              s2_Xg
+                                                       of
+                                                       { (# ipv9_Xm, ipv10_Xn #) ->
+                                                       case ipv10_Xn of {
+                                                         Left ex_a5n6 ->
+                                                           case ex_a5n6 of wild4_Xp
+                                                           { SomeException @e4_Xq $dException1_Xr
+                                                                           $dIP8_Xs e5_Xt ->
+                                                           case sameTypeRep
+                                                                  (($p1Exception $dException1_Xr)
+                                                                   `cast` <Co:3> :: ...)
+                                                                  $fExceptionSuspendBuilderException3
+                                                           of {
+                                                             False ->
+                                                               case putMVar#
+                                                                      bx1_dc5q
+                                                                      (Error wild4_Xp)
+                                                                      ipv9_Xm
+                                                               of ww1_shpz
+                                                               { __DEFAULT ->
+                                                               (# ww1_shpz, () #)
+                                                               };
+                                                             True ->
+                                                               case unsafeEqualityProof of
+                                                               { UnsafeRefl co1_Xw ->
+                                                               case e5_Xt `cast` <Co:12> :: ... of
+                                                               { MVar mvar#_ae01 ->
+                                                               case takeMVar# mvar#_ae01 ipv9_Xm of
+                                                               { (# ipv11_aegM, ipv12_aegN #) ->
+                                                               jump $wloop_shpD ipv11_aegM
+                                                               }
+                                                               }
+                                                               }
+                                                           }
+                                                           };
+                                                         Right p_a5n5 ->
+                                                           case putMVar#
+                                                                  bx1_dc5q ($WDone p_a5n5) ipv9_Xm
+                                                           of ww1_shpz
+                                                           { __DEFAULT ->
+                                                           (# ww1_shpz, () #)
+                                                           }
+                                                       }
+                                                       }; } in
+                                                 jump $wloop_shpD s1_shpw)
+                                              childHandler1
+                                              eta_af0N } in
+                                    letrec {
+                                      $s$wwriter_skf8
+                                        = \ sc_skeX ww1_shpI ww2_shpM eta_shpO ->
+                                            case putMVar#
+                                                   bx_dc5p
+                                                   (Request ww1_shpI (plusAddr# ww1_shpI ww2_shpM))
+                                                   eta_shpO
+                                            of s2#_aeXU
+                                            { __DEFAULT ->
+                                            case sc_skeX of wild3_Xm { ThreadId ww3_shpj ->
+                                            case $wwait_shpq ww3_shpj s2#_aeXU of
+                                            { (# ipv9_Xo, ipv10_Xp #) ->
+                                            case ipv10_Xp of {
+                                              Error ex_a5jG -> case lvl9_rktx ex_a5jG ipv9_Xo of {};
+                                              Done bx6_dc5l ->
+                                                (# ipv9_Xo, minusAddr# bx6_dc5l ww1_shpI, Done #);
+                                              MoreBuffer bx6_dc5m bx7_dc5n ->
+                                                (# ipv9_Xo, minusAddr# bx6_dc5m ww1_shpI,
+                                                   More
+                                                     bx7_dc5n
+                                                     ((\ eta1_B0 eta2_B1 eta3_B2 ->
+                                                         case eta1_B0 of { Ptr ww4_Xu ->
+                                                         case eta2_B1 of { I# ww5_Xv ->
+                                                         case $s$wwriter_skf8
+                                                                wild3_Xm ww4_Xu ww5_Xv eta3_B2
+                                                         of
+                                                         { (# ww6_shpR, ww7_shwp, ww8_shpW #) ->
+                                                         (# ww6_shpR, (I# ww7_shwp, ww8_shpW) #)
+                                                         }
+                                                         }
+                                                         })
+                                                      `cast` <Co:12> :: ...) #);
+                                              InsertByteString bx6_dc5o str_a5mQ ->
+                                                (# ipv9_Xo, minusAddr# bx6_dc5o ww1_shpI,
+                                                   Chunk
+                                                     str_a5mQ
+                                                     ((\ eta1_B0 eta2_B1 eta3_B2 ->
+                                                         case eta1_B0 of { Ptr ww4_Xu ->
+                                                         case eta2_B1 of { I# ww5_Xv ->
+                                                         case $s$wwriter_skf8
+                                                                wild3_Xm ww4_Xu ww5_Xv eta3_B2
+                                                         of
+                                                         { (# ww6_shpR, ww7_shwp, ww8_shpW #) ->
+                                                         (# ww6_shpR, (I# ww7_shwp, ww8_shpW) #)
+                                                         }
+                                                         }
+                                                         })
+                                                      `cast` <Co:12> :: ...) #)
+                                            }
+                                            }
+                                            }
+                                            }; } in
+                                    let {
+                                      $s$wwriter1_skeI
+                                        = \ ww1_shpI ww2_shpM eta_shpO ->
+                                            case putMVar#
+                                                   bx_dc5p
+                                                   (Request ww1_shpI (plusAddr# ww1_shpI ww2_shpM))
+                                                   eta_shpO
+                                            of s2#_aeXU
+                                            { __DEFAULT ->
+                                            case fork# lvl18_shC5 s2#_aeXU of
+                                            { (# ipv9_af0U, ipv10_af0V #) ->
+                                            let { wild3_Xm = ThreadId ipv10_af0V } in
+                                            case $wwait_shpq ipv10_af0V ipv9_af0U of
+                                            { (# ipv11_Xo, ipv12_Xp #) ->
+                                            case ipv12_Xp of {
+                                              Error ex_a5jG ->
+                                                case lvl9_rktx ex_a5jG ipv11_Xo of {};
+                                              Done bx6_dc5l ->
+                                                (# ipv11_Xo, minusAddr# bx6_dc5l ww1_shpI, Done #);
+                                              MoreBuffer bx6_dc5m bx7_dc5n ->
+                                                (# ipv11_Xo, minusAddr# bx6_dc5m ww1_shpI,
+                                                   More
+                                                     bx7_dc5n
+                                                     ((\ eta1_B0 eta2_B1 eta3_B2 ->
+                                                         case eta1_B0 of { Ptr ww3_Xu ->
+                                                         case eta2_B1 of { I# ww4_Xv ->
+                                                         case $s$wwriter_skf8
+                                                                wild3_Xm ww3_Xu ww4_Xv eta3_B2
+                                                         of
+                                                         { (# ww5_shpR, ww6_shwp, ww7_shpW #) ->
+                                                         (# ww5_shpR, (I# ww6_shwp, ww7_shpW) #)
+                                                         }
+                                                         }
+                                                         })
+                                                      `cast` <Co:12> :: ...) #);
+                                              InsertByteString bx6_dc5o str_a5mQ ->
+                                                (# ipv11_Xo, minusAddr# bx6_dc5o ww1_shpI,
+                                                   Chunk
+                                                     str_a5mQ
+                                                     ((\ eta1_B0 eta2_B1 eta3_B2 ->
+                                                         case eta1_B0 of { Ptr ww3_Xu ->
+                                                         case eta2_B1 of { I# ww4_Xv ->
+                                                         case $s$wwriter_skf8
+                                                                wild3_Xm ww3_Xu ww4_Xv eta3_B2
+                                                         of
+                                                         { (# ww5_shpR, ww6_shwp, ww7_shpW #) ->
+                                                         (# ww5_shpR, (I# ww6_shwp, ww7_shpW) #)
+                                                         }
+                                                         }
+                                                         })
+                                                      `cast` <Co:12> :: ...) #)
+                                            }
+                                            }
+                                            }
+                                            } } in
+                                    letrec {
+                                      $sgo_ske3
+                                        = \ sc_ske0 w_a5nc ->
+                                            runRW#
+                                              (\ s1_Xh ->
+                                                 case noDuplicate# s1_Xh of s'1_Xi { __DEFAULT ->
+                                                 case <# sc_ske0 0# of {
+                                                   __DEFAULT ->
+                                                     case newPinnedByteArray# sc_ske0 s'1_Xi of
+                                                     { (# ipv9_aeVt, ipv10_aeVu #) ->
+                                                     let {
+                                                       ipv11_sgOg
+                                                         = mutableByteArrayContents# ipv10_aeVu } in
+                                                     let { ipv12_sgOh = PlainPtr ipv10_aeVu } in
+                                                     case keepAlive#
+                                                            ipv12_sgOh
+                                                            ipv9_aeVt
+                                                            ((w_a5nc (Ptr ipv11_sgOg) (I# sc_ske0))
+                                                             `cast` <Co:4> :: ...)
+                                                     of
+                                                     { (# ipv13_Xm, ipv14_Xn #) ->
+                                                     case ipv14_Xn of { (written_a5nh, next_a5ni) ->
+                                                     lazy
+                                                       (case written_a5nh of { I# x_agUz ->
+                                                        let {
+                                                          rest1_sgyz
+                                                            = case next_a5ni of {
+                                                                Done -> [];
+                                                                More bx6_dc5k w'_a5nl ->
+                                                                  case <=# bx6_dc5k ipv_seD6 of {
+                                                                    __DEFAULT ->
+                                                                      $sgo_ske3 bx6_dc5k w'_a5nl;
+                                                                    1# -> $sgo_ske3 ipv_seD6 w'_a5nl
+                                                                  };
+                                                                Chunk chunk1_a5nm w'_a5nn ->
+                                                                  : chunk1_a5nm
+                                                                    ($sgo_ske3 ipv_seD6 w'_a5nn)
+                                                              } } in
+                                                        case x_agUz of wild5_Xp {
+                                                          __DEFAULT ->
+                                                            : (BS ipv11_sgOg ipv12_sgOh wild5_Xp)
+                                                              rest1_sgyz;
+                                                          0# -> rest1_sgyz
+                                                        }
+                                                        })
+                                                     }
+                                                     }
+                                                     };
+                                                   1# -> case mallocPlainForeignPtrBytes2 of {}
+                                                 }
+                                                 }); } in
+                                    $sgo_ske3
+                                      ipv8_sgVy
+                                      ((\ buf0_a5jn sz0_a5jo eta_B0 ->
+                                          case getMaskingState# eta_B0 of
+                                          { (# ipv9_aeY2, ipv10_aeY3 #) ->
+                                          case ipv10_aeY3 of {
+                                            __DEFAULT ->
+                                              case buf0_a5jn of { Ptr ww1_shpI ->
+                                              case sz0_a5jo of { I# ww2_shpM ->
+                                              case $s$wwriter1_skeI ww1_shpI ww2_shpM ipv9_aeY2 of
+                                              { (# ww3_shpR, ww4_shwp, ww5_shpW #) ->
+                                              (# ww3_shpR, (I# ww4_shwp, ww5_shpW) #)
+                                              }
+                                              }
+                                              };
+                                            0# ->
+                                              maskAsyncExceptions#
+                                                (\ eta1_shpO ->
+                                                   case buf0_a5jn of { Ptr ww1_shpI ->
+                                                   case sz0_a5jo of { I# ww2_shpM ->
+                                                   case $s$wwriter1_skeI ww1_shpI ww2_shpM eta1_shpO
+                                                   of
+                                                   { (# ww3_shpR, ww4_shwp, ww5_shpW #) ->
+                                                   (# ww3_shpR, (I# ww4_shwp, ww5_shpW) #)
+                                                   }
+                                                   }
+                                                   })
+                                                ipv9_aeY2
+                                          }
+                                          })
+                                       `cast` <Co:12> :: ...)
+                                    } } in
+                              case <=# ipv_seD6 bx2_dc5r of {
+                                __DEFAULT -> jump $w$j_shq4 maxSize1_X3;
+                                1# -> jump $w$j_shq4 (I# bx2_dc5r)
+                              } } in
+                        case <=# bx5_shC2 0# of {
+                          __DEFAULT -> fromChunks (: wild1_shBZ rest_sgyB);
+                          1# -> fromChunks rest_sgyB
+                        })
+                     }
+                     }
+                     } } in
+               join {
+                 exit1_Xa ipv8_X6 p_a58x
+                   = case readMutVar# ipv7_aeGg ipv8_X6 of
+                     { (# ipv9_Xc, ipv10_Xd #) ->
+                     case ipv10_Xd of {
+                       ThreadedSink ipv11_sf23 ipv12_sf24 ->
+                         case lvl13_rktB ipv9_Xc of {};
+                       BoundedGrowingBuffer bx_dc6c bx1_dc6e bx2_dc6f ->
+                         case p_a58x of { Ptr a1_adPc ->
+                         case minusAddr# a1_adPc bx_dc6c of ds4_af2n {
+                           __DEFAULT -> lazy (Chunk bx_dc6c bx1_dc6e ds4_af2n Empty);
+                           0# -> lvl14_rktC
+                         }
+                         }
+                     }
+                     } } in
+               joinrec {
+                 loop_sgy5 thunk_a4W2 s1_aec9
+                   = case catch#
+                            (\ s2_aeJX ->
+                               case seq# thunk_a4W2 s2_aeJX of { (# ipv8_aeK4, ipv9_aeK5 #) ->
+                               (# ipv8_aeK4, Right ipv9_aeK5 #)
+                               })
+                            lvl10_rkty
+                            s1_aec9
+                     of
+                     { (# ipv8_X6, ipv9_X7 #) ->
+                     case ipv9_X7 of {
+                       Left ex_a58D ->
+                         case ex_a58D of
+                         { SomeException @e1_acw9 $dException1_acwa $dIP8_acwb e2_acwc ->
+                         case sameTypeRep
+                                (($p1Exception $dException1_acwa) `cast` <Co:3> :: ...)
+                                $fExceptionChunkOverflowException3
+                         of {
+                           False ->
+                             case myThreadId# ipv8_X6 of { (# ipv10_ae0n, ipv11_ae0o #) ->
+                             case killThread#
+                                    ipv11_ae0o
+                                    (SomeException
+                                       $dException1_acwa
+                                       (emptyExceptionContext `cast` <Co:4> :: ...)
+                                       e2_acwc)
+                                    ipv10_ae0n
+                             of s2_ae2q
+                             { __DEFAULT ->
+                             jump loop_sgy5 thunk_a4W2 s2_ae2q
+                             }
+                             };
+                           True -> jump exit_X9 thunk_a4W2 e2_acwc
+                         }
+                         };
+                       Right p_a58x -> jump exit1_Xa ipv8_X6 p_a58x
+                     }
+                     }; } in
+               jump loop_sgy5 finalPtr_sgy3 ipv6_aeGf
+               }
+               }
+               };
+             1# -> case mallocForeignPtrBytes2 of {}
+           }
+           })
+      }
+
+toLazyByteStringWith
+  = \ initialSize_shqa maxSize_shqf builder_shqh ->
+      case initialSize_shqa of { I# ww_shqc ->
+      $wtoLazyByteStringWith ww_shqc maxSize_shqf builder_shqh
+      }
+
+toLazyByteString1 = I# 32768#
+
+toLazyByteString
+  = \ builder_shqh ->
+      $wtoLazyByteStringWith 100# toLazyByteString1 builder_shqh
+
+toStrictByteStringWith
+  = \ cap_a5o0 builder_a5o2 ->
+      case cap_a5o0 of { I# ipv_sf2F ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case <# ipv_sf2F 0# of {
+             __DEFAULT ->
+               case newPinnedByteArray# ipv_sf2F s'_aeDu of
+               { (# ipv1_aeVt, ipv2_aeVu #) ->
+               let { ipv3_sgOs = mutableByteArrayContents# ipv2_aeVu } in
+               case newMutVar#
+                      (ForeignPtr ipv3_sgOs (PlainPtr ipv2_aeVu)) ipv1_aeVt
+               of
+               { (# ipv4_aeGf, ipv5_aeGg #) ->
+               case (builder_a5o2 `cast` <Co:1> :: ...)
+                      (GrowingBuffer ipv5_aeGg)
+                      (# ipv3_sgOs, plusAddr# ipv3_sgOs ipv_sf2F, ipv4_aeGf #)
+               of
+               { (# ipv6_sdsk, ipv7_sdsm, ipv8_sdsn #) ->
+               case readMutVar# ipv5_aeGg ipv8_sdsn of
+               { (# ipv9_X6, ipv10_X7 #) ->
+               case ipv10_X7 of { ForeignPtr fo_X9 ds4_Xa ->
+               lazy (BS fo_X9 ds4_Xa (minusAddr# ipv6_sdsk fo_X9))
+               }
+               }
+               }
+               }
+               };
+             1# -> case mallocPlainForeignPtrBytes2 of {}
+           }
+           })
+      }
+
+toStrictByteString1_rktD = I# 128#
+
+toStrictByteString
+  = toStrictByteStringWith toStrictByteString1_rktD
+
+toStrictByteStringExact
+  = \ sz_a5pH builder_a5pI ->
+      case sz_a5pH of { I# ipv_sf3C ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case <# ipv_sf3C 0# of {
+             __DEFAULT ->
+               case newPinnedByteArray# ipv_sf3C s'_aeDu of
+               { (# ipv1_aeVt, ipv2_aeVu #) ->
+               let { ipv3_sgOx = mutableByteArrayContents# ipv2_aeVu } in
+               case (builder_a5pI `cast` <Co:1> :: ...)
+                      FixedBuffer
+                      (# ipv3_sgOx, plusAddr# ipv3_sgOx ipv_sf3C, ipv1_aeVt #)
+               of
+               { (# ipv4_sdsk, ipv5_sdsm, ipv6_sdsn #) ->
+               lazy (BS ipv3_sgOx (PlainPtr ipv2_aeVu) ipv_sf3C)
+               }
+               };
+             1# -> case mallocPlainForeignPtrBytes2 of {}
+           }
+           })
+      }
+
+$whPutBuilderWith
+  = \ h_shqp ww_shqu ww1_shqy builder_shqA eta_shqB ->
+      case h_shqp of h1_X0 { __DEFAULT ->
+      case <# ww_shqu 0# of {
+        __DEFAULT ->
+          case newMutVar# NoFinalizers eta_shqB of
+          { (# ipv_aeEW, ipv1_aeEY #) ->
+          case newPinnedByteArray# ww_shqu ipv_aeEW of
+          { (# ipv2_aeF6, ipv3_aeF7 #) ->
+          let { ipv4_sgOB = mutableByteArrayContents# ipv3_aeF7 } in
+          case newMutVar#
+                 (Queue
+                    (ForeignPtr ipv4_sgOB (MallocPtr ipv3_aeF7 ipv1_aeEY)) 0# 0#)
+                 ipv2_aeF6
+          of
+          { (# ipv5_aeGf, ipv6_aeGg #) ->
+          case (builder_shqA `cast` <Co:1> :: ...)
+                 (HandleSink h1_X0 ww1_shqy ipv6_aeGg)
+                 (# ipv4_sgOB, plusAddr# ipv4_sgOB ww_shqu, ipv5_aeGf #)
+          of
+          { (# ipv7_sdsk, ipv8_sdsm, ipv9_sdsn #) ->
+          case readMutVar# ipv6_aeGg ipv9_sdsn of
+          { (# ipv10_aecb, ipv11_aecc #) ->
+          case ipv11_aecc of { Queue ds5_davc bx_dc5f bx1_dc5g ->
+          case ds5_davc of wild1_shC7 { ForeignPtr fo_shC8 ds6_shC9 ->
+          let { end_sgxV = minusAddr# ipv7_sdsk fo_shC8 } in
+          case ># end_sgxV bx_dc5f of {
+            __DEFAULT ->
+              case readMutVar# ipv6_aeGg ipv10_aecb of
+              { (# ipv12_X8, ipv13_X9 #) ->
+              case ipv13_X9 of { Queue ds8_dayt bx2_dc9j bx3_dc9k ->
+              (# ipv12_X8, bx3_dc9k #)
+              }
+              };
+            1# ->
+              case -# end_sgxV bx_dc5f of ds7_aehO {
+                __DEFAULT ->
+                  case hPutBuf2
+                         h1_X0
+                         (Ptr (plusAddr# fo_shC8 bx_dc5f))
+                         (I# ds7_aehO)
+                         True
+                         ipv10_aecb
+                  of
+                  { (# ipv12_aeqP, ipv13_aeqR #) ->
+                  case touch# ds6_shC9 ipv12_aeqP of s'_aeqT { __DEFAULT ->
+                  case writeMutVar#
+                         ipv6_aeGg
+                         (Queue wild1_shC7 end_sgxV (-# (+# bx1_dc5g end_sgxV) bx_dc5f))
+                         s'_aeqT
+                  of s2#_ae4d
+                  { __DEFAULT ->
+                  case readMutVar# ipv6_aeGg s2#_ae4d of
+                  { (# ipv14_X8, ipv15_X9 #) ->
+                  case ipv15_X9 of { Queue ds10_dayt bx2_dc9j bx3_dc9k ->
+                  (# ipv14_X8, bx3_dc9k #)
+                  }
+                  }
+                  }
+                  }
+                  };
+                0# ->
+                  case writeMutVar#
+                         ipv6_aeGg
+                         (Queue wild1_shC7 end_sgxV (-# (+# bx1_dc5g end_sgxV) bx_dc5f))
+                         ipv10_aecb
+                  of s2#_ae4d
+                  { __DEFAULT ->
+                  case readMutVar# ipv6_aeGg s2#_ae4d of
+                  { (# ipv12_X8, ipv13_X9 #) ->
+                  case ipv13_X9 of { Queue ds9_dayt bx2_dc9j bx3_dc9k ->
+                  (# ipv12_X8, bx3_dc9k #)
+                  }
+                  }
+                  }
+              }
+          }
+          }
+          }
+          }
+          }
+          }
+          }
+          };
+        1# -> case mallocForeignPtrBytes2 of {}
+      }
+      }
+
+hPutBuilder1
+  = \ h_shqp initialCap_shqr nextCap_shqw builder_shqA eta_shqB ->
+      case initialCap_shqr of { I# ww_shqu ->
+      case nextCap_shqw of { I# ww1_shqy ->
+      case $whPutBuilderWith
+             h_shqp ww_shqu ww1_shqy builder_shqA eta_shqB
+      of
+      { (# ww2_shqF, ww3_shwr #) ->
+      (# ww2_shqF, I# ww3_shwr #)
+      }
+      }
+      }
+
+hPutBuilderWith = hPutBuilder1 `cast` <Co:15> :: ...
+
+hPutBuilderLen3 = I# 100#
+
+hPutBuilderLen2 = I# 4096#
+
+hPutBuilderLen1
+  = \ h_a5qb eta_B0 eta1_B1 ->
+      case h_a5qb of h1_X0 { __DEFAULT ->
+      case $whPutBuilderWith h1_X0 100# 4096# eta_B0 eta1_B1 of
+      { (# ww_shqF, ww1_shwr #) ->
+      (# ww_shqF, I# ww1_shwr #)
+      }
+      }
+
+hPutBuilderLen = hPutBuilderLen1 `cast` <Co:9> :: ...
+
+hPutBuilder
+  = (\ h_a5pT builder_a5pU eta_B0 ->
+       case h_a5pT of h1_X0 { __DEFAULT ->
+       case $whPutBuilderWith h1_X0 100# 4096# builder_a5pU eta_B0 of
+       { (# ww_shqF, ww1_shwr #) ->
+       (# ww_shqF, () #)
+       }
+       })
+    `cast` <Co:9> :: ...
+
+$wrunBuilderStreaming
+  = \ sink_shqZ ww_shr2 builder_shr4 eta_shr5 ->
+      case sink_shqZ of sink1_X0 { StreamSink ipv_sf4p ipv1_sf4q ->
+      case <# ww_shr2 0# of {
+        __DEFAULT ->
+          case newMutVar# NoFinalizers eta_shr5 of
+          { (# ipv2_aeEW, ipv3_aeEY #) ->
+          case newPinnedByteArray# ww_shr2 ipv2_aeEW of
+          { (# ipv4_aeF6, ipv5_aeF7 #) ->
+          let { ipv6_sgOJ = mutableByteArrayContents# ipv5_aeF7 } in
+          case newMutVar#
+                 (StreamQueue
+                    ipv6_sgOJ
+                    (ForeignPtr ipv6_sgOJ (MallocPtr ipv5_aeF7 ipv3_aeEY))
+                    ww_shr2
+                    0#
+                    sink1_X0)
+                 ipv4_aeF6
+          of
+          { (# ipv7_aeGf, ipv8_aeGg #) ->
+          case (builder_shr4 `cast` <Co:1> :: ...)
+                 (StreamingSink ww_shr2 ipv8_aeGg)
+                 (# ipv6_sgOJ, plusAddr# ipv6_sgOJ ww_shr2, ipv7_aeGf #)
+          of
+          { (# ipv9_sdsk, ipv10_sdsm, ipv11_sdsn #) ->
+          case readMutVar# ipv8_aeGg ipv11_sdsn of
+          { (# ipv12_aecb, ipv13_aecc #) ->
+          case ipv13_aecc of
+          { StreamQueue bx_dchf ds5_dc0K bx1_dchg bx2_dchh ds6_dc0N ->
+          case ds5_dc0K of wild1_shCb { ForeignPtr ds7_shCc r_shCd ->
+          case ds6_dc0N of wild2_shCf { StreamSink ds8_shCg ds9_shCh ->
+          let { len_sgxZ = minusAddr# ipv9_sdsk bx_dchf } in
+          case ># len_sgxZ 0# of {
+            __DEFAULT -> (ipv1_sf4q `cast` <Co:2> :: ...) ipv12_aecb;
+            1# ->
+              case ((ds8_shCg (Ptr bx_dchf) (I# len_sgxZ)) `cast` <Co:2> :: ...)
+                     ipv12_aecb
+              of
+              { (# ipv14_aegM, ipv15_aegN #) ->
+              case touch# r_shCd ipv14_aegM of s'_aeAp { __DEFAULT ->
+              case writeMutVar#
+                     ipv8_aeGg
+                     (StreamQueue
+                        bx_dchf wild1_shCb bx1_dchg (+# bx2_dchh len_sgxZ) wild2_shCf)
+                     s'_aeAp
+              of s2#_ae4d
+              { __DEFAULT ->
+              (ipv1_sf4q `cast` <Co:2> :: ...) s2#_ae4d
+              }
+              }
+              }
+          }
+          }
+          }
+          }
+          }
+          }
+          }
+          }
+          };
+        1# -> case mallocForeignPtrBytes2 of {}
+      }
+      }
+
+runBuilderStreaming1
+  = \ sink_shqZ bufSize_shr0 builder_shr4 eta_shr5 ->
+      case bufSize_shr0 of { I# ww_shr2 ->
+      $wrunBuilderStreaming sink_shqZ ww_shr2 builder_shr4 eta_shr5
+      }
+
+runBuilderStreaming = runBuilderStreaming1 `cast` <Co:12> :: ...
+
+lvl15_rktE = \ _ _ eta1_B1 -> eta1_B1
+
+mkBuilder
+  = \ ds_daA3 ->
+      (ds_daA3 `cast` <Co:2> :: ...) (lvl15_rktE `cast` <Co:5> :: ...)
+
+$fMonoidBuilder2_rktF = \ _ bs_a48I -> bs_a48I
+
+getBytes1
+  = \ ds_dbSL eta_B0 eta1_B1 ->
+      case ds_dbSL of { I# n_a5xW ->
+      $fIsStringBuilder1 n_a5xW eta_B0 eta1_B1
+      }
+
+getBytes = getBytes1 `cast` <Co:5> :: ...
+
+Rec {
+go1_rktG
+  = \ ds_ah0d eta_X2 eta1_X3 ->
+      case ds_ah0d of {
+        [] -> eta1_X3;
+        : y_ah0g ys_ah0h ->
+          go1_rktG
+            ys_ah0h eta_X2 ((y_ah0g `cast` <Co:1> :: ...) eta_X2 eta1_X3)
+      }
+end Rec }
+
+$fMonoidBuilder3_rktH
+  = \ eta_ah0b eta1_B0 eta2_B1 -> go1_rktG eta_ah0b eta1_B0 eta2_B1
+
+$fMonoidBuilder
+  = C:Monoid
+      $fSemigroupBuilder
+      ($fMonoidBuilder2_rktF `cast` <Co:2> :: ...)
+      appendBuilder
+      ($fMonoidBuilder3_rktH `cast` <Co:6> :: ...)
+
+useBuilder
+  = (\ b_a4Ts k_a4Tt v_B2 v1_X3 ->
+       ((k_a4Tt ()) `cast` <Co:1> :: ...)
+         v_B2 ((b_a4Ts `cast` <Co:1> :: ...) v_B2 v1_X3))
+    `cast` <Co:13> :: ...
+
+ensureBytes
+  = (\ n_a5xU eta_B0 eta1_B1 ->
+       case eta1_B1 of wild_shCv { (# cur_shCw, end_shCx, s_shCy #) ->
+       case n_a5xU of { I# ipv_sfkF ->
+       case <# (minusAddr# end_shCx cur_shCw) ipv_sfkF of {
+         __DEFAULT -> wild_shCv;
+         1# -> $fIsStringBuilder1 ipv_sfkF eta_B0 wild_shCv
+       }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+primBounded
+  = (\ @a_a9jl prim_a5qE x_ae7g eta_B0 eta1_B1 ->
+       case eta1_B1 of wild_shCA { (# cur_shCB, end_shCC, s_shCD #) ->
+       case prim_a5qE of { BP bx_adnB ds1_adnC ->
+       case <# (minusAddr# end_shCC cur_shCB) bx_adnB of {
+         __DEFAULT ->
+           case ((ds1_adnC x_ae7g (Ptr cur_shCB)) `cast` <Co:3> :: ...) s_shCD
+           of
+           { (# ipv_sdqk, ipv1_sdqq #) ->
+           case ipv1_sdqq of { Ptr cur'_a4Vu ->
+           (# cur'_a4Vu, end_shCC, ipv_sdqk #)
+           }
+           };
+         1# ->
+           case $fIsStringBuilder1 bx_adnB eta_B0 wild_shCA of
+           { (# ipv_sgVu, ipv1_sgVv, ipv2_sgVw #) ->
+           case ((ds1_adnC x_ae7g (Ptr ipv_sgVu)) `cast` <Co:3> :: ...)
+                  ipv2_sgVw
+           of
+           { (# ipv3_sdqk, ipv4_sdqq #) ->
+           case ipv4_sdqq of { Ptr cur'_a4Vu ->
+           (# cur'_a4Vu, ipv1_sgVv, ipv3_sdqk #)
+           }
+           }
+           }
+       }
+       }
+       })
+    `cast` <Co:11> :: ...
+
+primFixed
+  = (\ @a_a9kb prim_a5qH eta_B0 eta1_B1 eta2_B2 ->
+       case eta2_B2 of wild_shCF { (# cur_shCG, end_shCH, s_shCI #) ->
+       case prim_a5qH of { FP bx_afvq io_afvr ->
+       case <# (minusAddr# end_shCH cur_shCG) bx_afvq of {
+         __DEFAULT ->
+           case ((io_afvr eta_B0 (Ptr cur_shCG)) `cast` <Co:2> :: ...) s_shCI
+           of
+           { (# ipv_afvx, ipv1_afvy #) ->
+           (# plusAddr# cur_shCG bx_afvq, end_shCH, ipv_afvx #)
+           };
+         1# ->
+           case $fIsStringBuilder1 bx_afvq eta1_B1 wild_shCF of
+           { (# ipv_sgVu, ipv1_sgVv, ipv2_sgVw #) ->
+           case ((io_afvr eta_B0 (Ptr ipv_sgVu)) `cast` <Co:2> :: ...)
+                  ipv2_sgVw
+           of
+           { (# ipv3_afvx, ipv4_afvy #) ->
+           (# plusAddr# ipv_sgVu bx_afvq, ipv1_sgVv, ipv3_afvx #)
+           }
+           }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+withStreamTransform1
+  = \ sink_a5ql bufSize_a5qm innerBuilder_a5qn eta_B0 eta1_B1 ->
+      case eta1_B1 of { (# cur_shCL, end_shCM, s_shCN #) ->
+      case sink_a5ql of sink1_X0 { StreamSink ipv_sfvJ ipv1_sfvM ->
+      case bufSize_a5qm of { I# ipv2_sfvQ ->
+      case $wrunBuilderStreaming
+             sink1_X0 ipv2_sfvQ innerBuilder_a5qn s_shCN
+      of
+      { (# ipv3_sdnt, ipv4_sdnu #) ->
+      (ipv4_sdnu `cast` <Co:1> :: ...)
+        eta_B0 (# cur_shCL, end_shCM, ipv3_sdnt #)
+      }
+      }
+      }
+      }
+
+withStreamTransform = withStreamTransform1 `cast` <Co:11> :: ...
+
+byteStringCopyNoCheck1
+  = \ bstr_a5qU _ eta1_B1 ->
+      case eta1_B1 of { (# cur_shCQ, end_shCR, s_shCS #) ->
+      case bstr_a5qU of { BS ipv_sfwm ipv1_sfwn ipv2_sfwo ->
+      case keepAlive#
+             ipv1_sfwn
+             s_shCS
+             (\ s1_af56 ->
+                (# copyAddrToAddrNonOverlapping#
+                     ipv_sfwm cur_shCQ ipv2_sfwo s1_af56,
+                   () #))
+      of
+      { (# ipv3_sdnt, ipv4_sdnu #) ->
+      (# plusAddr# cur_shCQ ipv2_sfwo, end_shCR, ipv3_sdnt #)
+      }
+      }
+      }
+
+byteStringCopyNoCheck = byteStringCopyNoCheck1 `cast` <Co:5> :: ...
+
+lvl16_rktI
+  = \ s_sgJg bstr_a5r2 r_sgA9 ->
+      throwIO1
+        ($dIP5_rkto `cast` <Co:4> :: ...)
+        $fExceptionFixedBufferOverflow
+        (case bstr_a5r2 of { BS bx_afws bx1_afwt bx2_afwu ->
+         case r_sgA9 of { I# unbx_a6Qu ->
+         FixedBufferOverflow bx2_afwu unbx_a6Qu
+         }
+         })
+        s_sgJg
+
+byteString1
+  = \ bstr_a5r2 eta_B0 eta1_B1 ->
+      case eta1_B1 of { (# cur_shCV, end_shCW, s_shCX #) ->
+      case eta_B0 of {
+        DynamicSink bx_dcdA ->
+          case readMutVar# bx_dcdA s_shCX of { (# ipv_sdnt, ipv1_sdnu #) ->
+          case ipv1_sdnu of {
+            ThreadedSink bx1_dcdB bx2_dcdC ->
+              case putMVar#
+                     bx2_dcdC
+                     (case bstr_a5r2 of conrep_a6CV
+                      { BS ipv2_sh9P ipv3_sh9Q ipv4_sh9R ->
+                      InsertByteString cur_shCV conrep_a6CV
+                      })
+                     ipv_sdnt
+              of s2#_aeXU
+              { __DEFAULT ->
+              case takeMVar# bx1_dcdB s2#_aeXU of { (# ipv2_Xf, ipv3_Xg #) ->
+              case ipv3_Xg of { Request bx3_dc9l bx4_dc9m ->
+              (# bx3_dc9l, bx4_dc9m, ipv2_Xf #)
+              }
+              }
+              };
+            BoundedGrowingBuffer bx1_dcdD bx2_dcdE bx3_dcdF ->
+              case bstr_a5r2 of { BS bx4_afws bx5_afwt bx6_afwu ->
+              case <# (minusAddr# end_shCW cur_shCV) bx6_afwu of {
+                __DEFAULT ->
+                  case keepAlive#
+                         bx5_afwt
+                         ipv_sdnt
+                         (\ s1_af56 ->
+                            (# copyAddrToAddrNonOverlapping#
+                                 bx4_afws cur_shCV bx6_afwu s1_af56,
+                               () #))
+                  of
+                  { (# ipv2_Xi, ipv3_Xj #) ->
+                  (# plusAddr# cur_shCV bx6_afwu, end_shCW, ipv2_Xi #)
+                  };
+                1# ->
+                  let { cap_sgzV = minusAddr# cur_shCV bx1_dcdD } in
+                  join {
+                    $j_sgRH y_ae4M
+                      = let { newCap_sgzX = +# cap_sgzV y_ae4M } in
+                        case <# bx3_dcdF newCap_sgzX of {
+                          __DEFAULT ->
+                            case <# newCap_sgzX 0# of {
+                              __DEFAULT ->
+                                case newMutVar# NoFinalizers ipv_sdnt of
+                                { (# ipv2_aeEW, ipv3_aeEY #) ->
+                                case newPinnedByteArray# newCap_sgzX ipv2_aeEW of
+                                { (# ipv4_aeF6, ipv5_aeF7 #) ->
+                                let { ipv6_sgQR = mutableByteArrayContents# ipv5_aeF7 } in
+                                case copyAddrToAddrNonOverlapping#
+                                       bx1_dcdD ipv6_sgQR cap_sgzV ipv4_aeF6
+                                of wild4_XD
+                                { __DEFAULT ->
+                                case touch# bx2_dcdE wild4_XD of s'_aeAp { __DEFAULT ->
+                                let { ipv7_sgQT = MallocPtr ipv5_aeF7 ipv3_aeEY } in
+                                case touch# ipv7_sgQT s'_aeAp of s'1_XE { __DEFAULT ->
+                                case writeMutVar#
+                                       bx_dcdA
+                                       (BoundedGrowingBuffer ipv6_sgQR ipv7_sgQT bx3_dcdF)
+                                       s'1_XE
+                                of s2#_ae4d
+                                { __DEFAULT ->
+                                let { cur1_sgIa = plusAddr# ipv6_sgQR cap_sgzV } in
+                                case keepAlive#
+                                       bx5_afwt
+                                       s2#_ae4d
+                                       (\ s1_af56 ->
+                                          (# copyAddrToAddrNonOverlapping#
+                                               bx4_afws cur1_sgIa bx6_afwu s1_af56,
+                                             () #))
+                                of
+                                { (# ipv8_XF, ipv9_Xj #) ->
+                                (# plusAddr# cur1_sgIa bx6_afwu, plusAddr# ipv6_sgQR newCap_sgzX,
+                                   ipv8_XF #)
+                                }
+                                }
+                                }
+                                }
+                                }
+                                }
+                                };
+                              1# -> case mallocForeignPtrBytes2 of {}
+                            };
+                          1# ->
+                            case myThreadId# ipv_sdnt of { (# ipv2_ae0n, ipv3_ae0o #) ->
+                            case newMVar# ipv2_ae0n of { (# ipv4_agLa, ipv5_agLb #) ->
+                            case newMVar# ipv4_agLa of { (# ipv6_X6, ipv7_X7 #) ->
+                            case killThread#
+                                   ipv3_ae0o
+                                   ($fExceptionChunkOverflowException_$ctoException
+                                      (ChunkOverflowException
+                                         (BS bx1_dcdD bx2_dcdE cap_sgzV)
+                                         ipv5_agLb
+                                         ipv7_X7
+                                         bx6_afwu))
+                                   ipv6_X6
+                            of s1_ae2q
+                            { __DEFAULT ->
+                            case writeMutVar# bx_dcdA (ThreadedSink ipv5_agLb ipv7_X7) s1_ae2q
+                            of s2#_ae4d
+                            { __DEFAULT ->
+                            case takeMVar# ipv5_agLb s2#_ae4d of { (# ipv8_Xc, ipv9_Xd #) ->
+                            case ipv9_Xd of { Request bx7_dc9l bx8_dc9m ->
+                            case keepAlive#
+                                   bx5_afwt
+                                   ipv8_Xc
+                                   (\ s2_af56 ->
+                                      (# copyAddrToAddrNonOverlapping#
+                                           bx4_afws bx7_dc9l bx6_afwu s2_af56,
+                                         () #))
+                            of
+                            { (# ipv10_Xm, ipv11_Xj #) ->
+                            (# plusAddr# bx7_dc9l bx6_afwu, bx8_dc9m, ipv10_Xm #)
+                            }
+                            }
+                            }
+                            }
+                            }
+                            }
+                            }
+                            }
+                        } } in
+                  case <=# cap_sgzV bx6_afwu of {
+                    __DEFAULT -> jump $j_sgRH cap_sgzV;
+                    1# -> jump $j_sgRH bx6_afwu
+                  }
+              }
+              }
+          }
+          };
+        GrowingBuffer bx_dcdG ->
+          case bstr_a5r2 of { BS bx1_afws bx2_afwt bx3_afwu ->
+          case <# (minusAddr# end_shCW cur_shCV) bx3_afwu of {
+            __DEFAULT ->
+              case keepAlive#
+                     bx2_afwt
+                     s_shCX
+                     (\ s1_af56 ->
+                        (# copyAddrToAddrNonOverlapping#
+                             bx1_afws cur_shCV bx3_afwu s1_af56,
+                           () #))
+              of
+              { (# ipv_sdnt, ipv1_sdnu #) ->
+              (# plusAddr# cur_shCV bx3_afwu, end_shCW, ipv_sdnt #)
+              };
+            1# ->
+              case readMutVar# bx_dcdG s_shCX of { (# ipv_sdnt, ipv1_sdnu #) ->
+              case ipv1_sdnu of { ForeignPtr fo_aedm ds1_aedp ->
+              let { cap_sgA3 = minusAddr# end_shCW fo_aedm } in
+              join {
+                $j_sgRN y_ae4M
+                  = let { newCap_sgA5 = +# cap_sgA3 y_ae4M } in
+                    case <# newCap_sgA5 0# of {
+                      __DEFAULT ->
+                        case newPinnedByteArray# newCap_sgA5 ipv_sdnt of
+                        { (# ipv2_aeVt, ipv3_aeVu #) ->
+                        let { size_sgA1 = minusAddr# cur_shCV fo_aedm } in
+                        let { ipv4_sgRL = mutableByteArrayContents# ipv3_aeVu } in
+                        case copyAddrToAddrNonOverlapping#
+                               fo_aedm ipv4_sgRL size_sgA1 ipv2_aeVt
+                        of wild4_Xt
+                        { __DEFAULT ->
+                        case touch# ds1_aedp wild4_Xt of s'_aeAp { __DEFAULT ->
+                        let { ipv5_sgRM = PlainPtr ipv3_aeVu } in
+                        case touch# ipv5_sgRM s'_aeAp of s'1_Xu { __DEFAULT ->
+                        case writeMutVar# bx_dcdG (ForeignPtr ipv4_sgRL ipv5_sgRM) s'1_Xu
+                        of s2#_ae4d
+                        { __DEFAULT ->
+                        let { cur1_sgIB = plusAddr# ipv4_sgRL size_sgA1 } in
+                        case keepAlive#
+                               bx2_afwt
+                               s2#_ae4d
+                               (\ s1_af56 ->
+                                  (# copyAddrToAddrNonOverlapping#
+                                       bx1_afws cur1_sgIB bx3_afwu s1_af56,
+                                     () #))
+                        of
+                        { (# ipv6_Xw, ipv7_Xx #) ->
+                        (# plusAddr# cur1_sgIB bx3_afwu, plusAddr# ipv4_sgRL newCap_sgA5,
+                           ipv6_Xw #)
+                        }
+                        }
+                        }
+                        }
+                        }
+                        };
+                      1# -> case mallocPlainForeignPtrBytes2 of {}
+                    } } in
+              case <=# cap_sgA3 bx3_afwu of {
+                __DEFAULT -> jump $j_sgRN cap_sgA3;
+                1# -> jump $j_sgRN bx3_afwu
+              }
+              }
+              }
+          }
+          };
+        HandleSink h_a5rZ bx_dcdH bx1_dcdI ->
+          case readMutVar# bx1_dcdI s_shCX of { (# ipv_aecb, ipv1_aecc #) ->
+          case ipv1_aecc of { Queue ds_davc bx2_dc5f bx3_dc5g ->
+          case ds_davc of wild3_shCZ { ForeignPtr fo_shD0 ds2_shD1 ->
+          let { end1_sgxV = minusAddr# cur_shCV fo_shD0 } in
+          join {
+            $w$j_shtA ipv2_shtx
+              = case bstr_a5r2 of { BS bx4_aehH bx5_aehI bx6_aehL ->
+                case bx6_aehL of ds3_aehO {
+                  __DEFAULT ->
+                    case hPutBuf2 h_a5rZ (Ptr bx4_aehH) (I# ds3_aehO) True ipv2_shtx of
+                    { (# ipv3_aeqP, ipv4_aeqR #) ->
+                    case touch# bx5_aehI ipv3_aeqP of s'_aeqT { __DEFAULT ->
+                    case readMutVar# bx1_dcdI s'_aeqT of
+                    { (# ipv5_afEb, ipv6_afEc #) ->
+                    case ipv6_afEc of { Queue queueBuffer1_Xd bx7_dcdJ bx8_dcdK ->
+                    case writeMutVar#
+                           bx1_dcdI
+                           (Queue queueBuffer1_Xd bx7_dcdJ (+# bx8_dcdK ds3_aehO))
+                           ipv5_afEb
+                    of s2#_afEf
+                    { __DEFAULT ->
+                    (# cur_shCV, end_shCW, s2#_afEf #)
+                    }
+                    }
+                    }
+                    }
+                    };
+                  0# ->
+                    case readMutVar# bx1_dcdI ipv2_shtx of
+                    { (# ipv3_afEb, ipv4_afEc #) ->
+                    case ipv4_afEc of wild5_Xc
+                    { Queue queueBuffer1_Xd bx7_dcdJ bx8_dcdK ->
+                    case writeMutVar# bx1_dcdI wild5_Xc ipv3_afEb of s2#_afEf
+                    { __DEFAULT ->
+                    (# cur_shCV, end_shCW, s2#_afEf #)
+                    }
+                    }
+                    }
+                }
+                } } in
+          case ># end1_sgxV bx2_dc5f of {
+            __DEFAULT -> jump $w$j_shtA ipv_aecb;
+            1# ->
+              case -# end1_sgxV bx2_dc5f of ds3_aehO {
+                __DEFAULT ->
+                  case hPutBuf2
+                         h_a5rZ
+                         (Ptr (plusAddr# fo_shD0 bx2_dc5f))
+                         (I# ds3_aehO)
+                         True
+                         ipv_aecb
+                  of
+                  { (# ipv2_aeqP, ipv3_aeqR #) ->
+                  case touch# ds2_shD1 ipv2_aeqP of s'_aeqT { __DEFAULT ->
+                  case writeMutVar#
+                         bx1_dcdI
+                         (Queue wild3_shCZ end1_sgxV (-# (+# bx3_dc5g end1_sgxV) bx2_dc5f))
+                         s'_aeqT
+                  of s2#_ae4d
+                  { __DEFAULT ->
+                  jump $w$j_shtA s2#_ae4d
+                  }
+                  }
+                  };
+                0# ->
+                  case writeMutVar#
+                         bx1_dcdI
+                         (Queue wild3_shCZ end1_sgxV (-# (+# bx3_dc5g end1_sgxV) bx2_dc5f))
+                         ipv_aecb
+                  of s2#_ae4d
+                  { __DEFAULT ->
+                  jump $w$j_shtA s2#_ae4d
+                  }
+              }
+          }
+          }
+          }
+          };
+        FixedBuffer ->
+          case bstr_a5r2 of wild2_afwr { BS bx_afws bx1_afwt bx2_afwu ->
+          let { r_sgA7 = minusAddr# end_shCW cur_shCV } in
+          case <# r_sgA7 bx2_afwu of {
+            __DEFAULT ->
+              case keepAlive#
+                     bx1_afwt
+                     s_shCX
+                     (\ s1_af56 ->
+                        (# copyAddrToAddrNonOverlapping# bx_afws cur_shCV bx2_afwu s1_af56,
+                           () #))
+              of
+              { (# ipv_sdnt, ipv1_sdnu #) ->
+              (# plusAddr# cur_shCV bx2_afwu, end_shCW, ipv_sdnt #)
+              };
+            1# -> case lvl16_rktI s_shCX wild2_afwr (I# r_sgA7) of {}
+          }
+          };
+        StreamingSink bx_dcdL bx1_dcdM ->
+          case readMutVar# bx1_dcdM s_shCX of { (# ipv_aecb, ipv1_aecc #) ->
+          case ipv1_aecc of
+          { StreamQueue bx2_dchf ds_dc0K bx3_dchg bx4_dchh ds2_dc0N ->
+          case ds_dc0K of wild3_shD4 { ForeignPtr ds3_shD5 r_shD6 ->
+          case ds2_dc0N of wild4_shD8 { StreamSink ds4_shD9 ds5_shDa ->
+          let { len_sgxZ = minusAddr# cur_shCV bx2_dchf } in
+          join {
+            $w$j_shtH ipv2_shtE
+              = case bstr_a5r2 of { BS bx5_afHu bx6_afHx bx7_afHA ->
+                case keepAlive#
+                       bx6_afHx
+                       ipv2_shtE
+                       (\ s1_aec9 ->
+                          case readMutVar# bx1_dcdM s1_aec9 of { (# ipv3_X7, ipv4_X8 #) ->
+                          case ipv4_X8 of
+                          { StreamQueue bx8_dchr ds7_dc18 bx9_dchs bx10_dcht ds8_dc1b ->
+                          case ds8_dc1b of wild7_shDc { StreamSink ds9_shDd ds10_shDe ->
+                          case ((ds9_shDd (Ptr bx5_afHu) (I# bx7_afHA)) `cast` <Co:2> :: ...)
+                                 ipv3_X7
+                          of
+                          { (# ipv5_aegM, ipv6_aegN #) ->
+                          case writeMutVar#
+                                 bx1_dcdM
+                                 (StreamQueue
+                                    bx8_dchr ds7_dc18 bx9_dchs (+# bx10_dcht bx7_afHA) wild7_shDc)
+                                 ipv5_aegM
+                          of s2#_ae4d
+                          { __DEFAULT ->
+                          (# s2#_ae4d, () #)
+                          }
+                          }
+                          }
+                          }
+                          })
+                of
+                { (# ipv3_Xa, ipv4_Xb #) ->
+                case readMutVar# bx1_dcdM ipv3_Xa of { (# ipv5_Xd, ipv6_Xe #) ->
+                case ipv6_Xe of
+                { StreamQueue bx8_Xg ds8_Xh bx9_Xi bx10_Xj ds9_Xk ->
+                (# bx8_Xg, end_shCW, ipv5_Xd #)
+                }
+                }
+                }
+                } } in
+          case ># len_sgxZ 0# of {
+            __DEFAULT -> jump $w$j_shtH ipv_aecb;
+            1# ->
+              case ((ds4_shD9 (Ptr bx2_dchf) (I# len_sgxZ)) `cast` <Co:2> :: ...)
+                     ipv_aecb
+              of
+              { (# ipv2_aegM, ipv3_aegN #) ->
+              case touch# r_shD6 ipv2_aegM of s'_aeAp { __DEFAULT ->
+              case writeMutVar#
+                     bx1_dcdM
+                     (StreamQueue
+                        bx2_dchf wild3_shD4 bx3_dchg (+# bx4_dchh len_sgxZ) wild4_shD8)
+                     s'_aeAp
+              of s2#_ae4d
+              { __DEFAULT ->
+              jump $w$j_shtH s2#_ae4d
+              }
+              }
+              }
+          }
+          }
+          }
+          }
+          };
+        RingSink bx_dcdQ ->
+          case readMutVar# bx_dcdQ s_shCX of { (# ipv_sdnt, ipv1_sdnu #) ->
+          case ipv1_sdnu of wild2_Xa
+          { RingSinkState bx1_dchY bx2_dchZ bx3_dci0 bx4_dci1 bx5_dci2
+                          bx6_dci3 ds1_dc2l ds2_dc2m ds3_dc2n ds4_dc2o ->
+          join {
+            $w$j_shtX ipv2_shtP ww_shtU
+              = join {
+                  $j_sgSL ipv3_aecb ipv4_aecc
+                    = case bstr_a5r2 of { BS bx7_afwG bx8_afwH bx9_afwI ->
+                      case keepAlive#
+                             bx8_afwH
+                             ipv3_aecb
+                             (\ eta2_shg0 ->
+                                $wringCopyIn ipv4_aecc (Ptr bx7_afwG) bx9_afwI eta2_shg0)
+                      of
+                      { (# ipv5_Xg, ipv6_Xh #) ->
+                      case $wopenRingRegion_rkro ipv6_Xh ww_shtU ipv5_Xg of
+                      { (# ipv7_Xj, ipv8_Xk #) ->
+                      case writeMutVar# bx_dcdQ ipv8_Xk ipv7_Xj of s2#_ae4d
+                      { __DEFAULT ->
+                      case ipv8_Xk of
+                      { RingSinkState bx10_dchM bx11_dchN bx12_dchO bx13_dchP bx14_dchQ
+                                      bx15_dchR ds7_dc1Z ds8_dc20 ds9_dc21 ds10_dc22 ->
+                      let {
+                        p_sgAd
+                          = plusAddr#
+                              bx12_dchO
+                              (andI# (word2Int# (word64ToWord# bx10_dchM)) bx13_dchP) } in
+                      (# p_sgAd, plusAddr# p_sgAd ipv2_shtP, s2#_ae4d #)
+                      }
+                      }
+                      }
+                      }
+                      } } in
+                case ds4_dc2o of wild3_Xf {
+                  __DEFAULT ->
+                    jump $j_sgSL
+                      ipv_sdnt
+                      (RingSinkState
+                         (plusWord64#
+                            bx1_dchY
+                            (int64ToWord64#
+                               (intToInt64#
+                                  (minusAddr#
+                                     cur_shCV
+                                     (plusAddr#
+                                        bx3_dci0
+                                        (andI# (word2Int# (word64ToWord# bx1_dchY)) bx4_dci1))))))
+                         bx2_dchZ
+                         bx3_dci0
+                         bx4_dci1
+                         bx5_dci2
+                         bx6_dci3
+                         ds1_dc2l
+                         ds2_dc2m
+                         ds3_dc2n
+                         wild3_Xf);
+                  SpillActive bx7_dcdl bx8_dcdm ->
+                    case bx7_dcdl of wild4_shDg { ForeignPtr fo_shDh ds5_shDi ->
+                    case $wringCopyIn
+                           wild2_Xa (Ptr fo_shDh) (minusAddr# cur_shCV fo_shDh) ipv_sdnt
+                    of
+                    { (# ipv3_aecb, ipv4_aecc #) ->
+                    case touch# ds5_shDi ipv3_aecb of s'_aeAp { __DEFAULT ->
+                    jump $j_sgSL
+                      s'_aeAp
+                      (case ipv4_aecc of
+                       { RingSinkState bx9_dcdo bx10_dcdp bx11_dcdq bx12_dcdr bx13_dcds
+                                       bx14_dcdt rsPublishHead1_B7 rsEnsureRoom1_B8 rsLoadTail1_B9
+                                       ds7_daBr ->
+                       RingSinkState
+                         bx9_dcdo
+                         bx10_dcdp
+                         bx11_dcdq
+                         bx12_dcdr
+                         bx13_dcds
+                         bx14_dcdt
+                         rsPublishHead1_B7
+                         rsEnsureRoom1_B8
+                         rsLoadTail1_B9
+                         (SpillIdle wild4_shDg bx8_dcdm)
+                       })
+                    }
+                    }
+                    }
+                } } in
+          case <=# bx5_dci2 bx6_dci3 of {
+            __DEFAULT -> jump $w$j_shtX bx6_dci3 bx6_dci3;
+            1# -> jump $w$j_shtX bx5_dci2 bx5_dci2
+          }
+          }
+          }
+      }
+      }
+
+byteStringInsert_ = byteString1 `cast` <Co:5> :: ...
+
+byteStringInsert1
+  = \ bstr_a5r1 eta_B0 eta1_B1 ->
+      case bstr_a5r1 of bstr1_X0 { BS ipv_sfTi ipv1_sfTo ipv2_sfTr ->
+      byteString1 bstr1_X0 eta_B0 eta1_B1
+      }
+
+byteStringInsert = byteStringInsert1 `cast` <Co:5> :: ...
+
+byteString2
+  = \ bstr_a5qQ eta_B0 eta1_B1 ->
+      case eta1_B1 of wild_shDk { (# cur_shDl, end_shDm, s_shDn #) ->
+      case eta_B0 of wild1_X4 {
+        __DEFAULT ->
+          case bstr_a5qQ of { BS bx_afws bx1_afwt bx2_afwu ->
+          case $fIsStringBuilder1 bx2_afwu wild1_X4 wild_shDk of
+          { (# ipv_sh2c, ipv1_sh2d, ipv2_sh2e #) ->
+          case keepAlive#
+                 bx1_afwt
+                 ipv2_sh2e
+                 (\ s1_af56 ->
+                    (# copyAddrToAddrNonOverlapping# bx_afws ipv_sh2c bx2_afwu s1_af56,
+                       () #))
+          of
+          { (# ipv3_sdnt, ipv4_sdnu #) ->
+          (# plusAddr# ipv_sh2c bx2_afwu, ipv1_sh2d, ipv3_sdnt #)
+          }
+          }
+          };
+        RingSink bx_dch7 ->
+          case readMutVar# bx_dch7 s_shDn of { (# ipv_sdnt, ipv1_sdnu #) ->
+          case bstr_a5qQ of wild2_afwr { BS bx1_afws bx2_afwt bx3_afwu ->
+          case ipv1_sdnu of
+          { RingSinkState bx4_dchY bx5_dchZ bx6_dci0 bx7_dci1 bx8_dci2
+                          bx9_dci3 ds1_dc2l ds2_dc2m ds3_dc2n ds4_dc2o ->
+          case ># bx3_afwu bx8_dci2 of {
+            __DEFAULT ->
+              case $fIsStringBuilder1
+                     bx3_afwu wild1_X4 (# cur_shDl, end_shDm, ipv_sdnt #)
+              of
+              { (# ipv2_sh2g, ipv3_sh2h, ipv4_sh2i #) ->
+              case keepAlive#
+                     bx2_afwt
+                     ipv4_sh2i
+                     (\ s1_af56 ->
+                        (# copyAddrToAddrNonOverlapping#
+                             bx1_afws ipv2_sh2g bx3_afwu s1_af56,
+                           () #))
+              of
+              { (# ipv5_Xe, ipv6_Xf #) ->
+              (# plusAddr# ipv2_sh2g bx3_afwu, ipv3_sh2h, ipv5_Xe #)
+              }
+              };
+            1# ->
+              byteString1 wild2_afwr wild1_X4 (# cur_shDl, end_shDm, ipv_sdnt #)
+          }
+          }
+          }
+          }
+      }
+      }
+
+byteStringCopySlow_ = byteString2 `cast` <Co:5> :: ...
+
+byteStringCopy
+  = (\ bstr_a5qO eta_B0 eta1_B1 ->
+       case eta1_B1 of wild_shDp { (# cur_shDq, end_shDr, s_shDs #) ->
+       case bstr_a5qO of bstr1_X0 { BS ipv_sfWZ ipv1_sfX2 ipv2_sfX3 ->
+       case >=# (minusAddr# end_shDr cur_shDq) ipv2_sfX3 of {
+         __DEFAULT -> byteString2 bstr1_X0 eta_B0 wild_shDp;
+         1# ->
+           case keepAlive#
+                  ipv1_sfX2
+                  s_shDs
+                  (\ s1_af56 ->
+                     (# copyAddrToAddrNonOverlapping#
+                          ipv_sfWZ cur_shDq ipv2_sfX3 s1_af56,
+                        () #))
+           of
+           { (# ipv3_sdnt, ipv4_sdnu #) ->
+           (# plusAddr# cur_shDq ipv2_sfX3, end_shDr, ipv3_sdnt #)
+           }
+       }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+byteStringThreshold1
+  = \ th_a5qM bstr_a5qN v_B2 v1_X3 ->
+      case v1_X3 of wild_shDu { (# cur_shDv, end_shDw, s_shDx #) ->
+      case bstr_a5qN of wild1_afwr { BS bx_afws bx1_afwt bx2_afwu ->
+      case th_a5qM of { I# y_agMi ->
+      case >=# bx2_afwu y_agMi of {
+        __DEFAULT ->
+          case >=# (minusAddr# end_shDw cur_shDv) bx2_afwu of {
+            __DEFAULT -> byteString2 wild1_afwr v_B2 wild_shDu;
+            1# ->
+              case keepAlive#
+                     bx1_afwt
+                     s_shDx
+                     (\ s1_af56 ->
+                        (# copyAddrToAddrNonOverlapping# bx_afws cur_shDv bx2_afwu s1_af56,
+                           () #))
+              of
+              { (# ipv_sdnt, ipv1_sdnu #) ->
+              (# plusAddr# cur_shDv bx2_afwu, end_shDw, ipv_sdnt #)
+              }
+          };
+        1# -> byteString1 wild1_afwr v_B2 wild_shDu
+      }
+      }
+      }
+      }
+
+byteStringThreshold = byteStringThreshold1 `cast` <Co:8> :: ...
+
+byteString
+  = (\ bstr_a5qN v_B2 v1_X3 ->
+       case v1_X3 of wild_shDz { (# cur_shDA, end_shDB, s_shDC #) ->
+       case bstr_a5qN of wild1_afwr { BS bx_afws bx1_afwt bx2_afwu ->
+       case >=# bx2_afwu 8160# of {
+         __DEFAULT ->
+           case >=# (minusAddr# end_shDB cur_shDA) bx2_afwu of {
+             __DEFAULT -> byteString2 wild1_afwr v_B2 wild_shDz;
+             1# ->
+               case keepAlive#
+                      bx1_afwt
+                      s_shDC
+                      (\ s1_af56 ->
+                         (# copyAddrToAddrNonOverlapping# bx_afws cur_shDA bx2_afwu s1_af56,
+                            () #))
+               of
+               { (# ipv_sdnt, ipv1_sdnu #) ->
+               (# plusAddr# cur_shDA bx2_afwu, end_shDB, ipv_sdnt #)
+               }
+           };
+         1# -> byteString1 wild1_afwr v_B2 wild_shDz
+       }
+       }
+       })
+    `cast` <Co:5> :: ...
+
+primMapListBounded
+  = (\ @a_a9l7 eta_B0 eta1_X3 eta2_X4 eta3_B1 ->
+       case eta3_B1 of wild_shDE { (# cur_shDF, end_shDG, s_shDH #) ->
+       case eta1_X3 of {
+         [] -> wild_shDE;
+         : y_ah0g ys_ah0h ->
+           case eta_B0 of { BP bx_adnB ds1_adnC ->
+           case <# (minusAddr# end_shDG cur_shDF) bx_adnB of {
+             __DEFAULT ->
+               case ((ds1_adnC y_ah0g (Ptr cur_shDF)) `cast` <Co:3> :: ...) s_shDH
+               of
+               { (# ipv_sdqk, ipv1_sdqq #) ->
+               case ipv1_sdqq of { Ptr cur'_a4Vu ->
+               joinrec {
+                 $sgo1_skiL sc_skiI sc1_skiJ sc2_skiK sc3_skiH sc4_skiG
+                   = case sc4_skiG of {
+                       [] -> (# sc_skiI, sc1_skiJ, sc2_skiK #);
+                       : y1_Xd ys1_Xe ->
+                         case <# (minusAddr# sc1_skiJ sc_skiI) bx_adnB of {
+                           __DEFAULT ->
+                             case ((ds1_adnC y1_Xd (Ptr sc_skiI)) `cast` <Co:3> :: ...) sc2_skiK
+                             of
+                             { (# ipv2_Xh, ipv3_Xi #) ->
+                             case ipv3_Xi of { Ptr cur'1_Xk ->
+                             jump $sgo1_skiL cur'1_Xk sc1_skiJ ipv2_Xh sc3_skiH ys1_Xe
+                             }
+                             };
+                           1# ->
+                             case $fIsStringBuilder1
+                                    bx_adnB sc3_skiH (# sc_skiI, sc1_skiJ, sc2_skiK #)
+                             of
+                             { (# ipv2_sgVu, ipv3_sgVv, ipv4_sgVw #) ->
+                             case ((ds1_adnC y1_Xd (Ptr ipv2_sgVu)) `cast` <Co:3> :: ...)
+                                    ipv4_sgVw
+                             of
+                             { (# ipv5_Xh, ipv6_Xi #) ->
+                             case ipv6_Xi of { Ptr cur'1_Xk ->
+                             jump $sgo1_skiL cur'1_Xk ipv3_sgVv ipv5_Xh sc3_skiH ys1_Xe
+                             }
+                             }
+                             }
+                         }
+                     }; } in
+               jump $sgo1_skiL cur'_a4Vu end_shDG ipv_sdqk eta2_X4 ys_ah0h
+               }
+               };
+             1# ->
+               case $fIsStringBuilder1 bx_adnB eta2_X4 wild_shDE of
+               { (# ipv_sgVu, ipv1_sgVv, ipv2_sgVw #) ->
+               case ((ds1_adnC y_ah0g (Ptr ipv_sgVu)) `cast` <Co:3> :: ...)
+                      ipv2_sgVw
+               of
+               { (# ipv3_sdqk, ipv4_sdqq #) ->
+               case ipv4_sdqq of { Ptr cur'_a4Vu ->
+               joinrec {
+                 $sgo1_skj5 sc_skj2 sc1_skj3 sc2_skj4 sc3_skj1 sc4_skj0
+                   = case sc4_skj0 of {
+                       [] -> (# sc_skj2, sc1_skj3, sc2_skj4 #);
+                       : y1_Xd ys1_Xe ->
+                         case <# (minusAddr# sc1_skj3 sc_skj2) bx_adnB of {
+                           __DEFAULT ->
+                             case ((ds1_adnC y1_Xd (Ptr sc_skj2)) `cast` <Co:3> :: ...) sc2_skj4
+                             of
+                             { (# ipv5_Xh, ipv6_Xi #) ->
+                             case ipv6_Xi of { Ptr cur'1_Xk ->
+                             jump $sgo1_skj5 cur'1_Xk sc1_skj3 ipv5_Xh sc3_skj1 ys1_Xe
+                             }
+                             };
+                           1# ->
+                             case $fIsStringBuilder1
+                                    bx_adnB sc3_skj1 (# sc_skj2, sc1_skj3, sc2_skj4 #)
+                             of
+                             { (# ipv5_Xh, ipv6_Xi, ipv7_Xj #) ->
+                             case ((ds1_adnC y1_Xd (Ptr ipv5_Xh)) `cast` <Co:3> :: ...) ipv7_Xj
+                             of
+                             { (# ipv8_Xl, ipv9_Xm #) ->
+                             case ipv9_Xm of { Ptr cur'1_Xo ->
+                             jump $sgo1_skj5 cur'1_Xo ipv6_Xi ipv8_Xl sc3_skj1 ys1_Xe
+                             }
+                             }
+                             }
+                         }
+                     }; } in
+               jump $sgo1_skj5 cur'_a4Vu ipv1_sgVv ipv3_sdqk eta2_X4 ys_ah0h
+               }
+               }
+               }
+           }
+           }
+       }
+       })
+    `cast` <Co:14> :: ...
+
+primMapListFixed
+  = (\ @a_a9n4 prim_a5qL eta_B0 eta1_B1 eta2_B2 ->
+       case eta2_B2 of wild_shDJ { (# cur_shDK, end_shDL, s_shDM #) ->
+       case eta_B0 of {
+         [] -> wild_shDJ;
+         : y_ah0g ys_ah0h ->
+           case prim_a5qL of { FP bx_afvq io_afvr ->
+           case <# (minusAddr# end_shDL cur_shDK) bx_afvq of {
+             __DEFAULT ->
+               case ((io_afvr y_ah0g (Ptr cur_shDK)) `cast` <Co:2> :: ...) s_shDM
+               of
+               { (# ipv_afvx, ipv1_afvy #) ->
+               joinrec {
+                 $sgo1_skjL sc_skjI sc1_skjJ sc2_skjK sc3_skjH sc4_skjG
+                   = case sc4_skjG of {
+                       [] -> (# sc_skjI, sc1_skjJ, sc2_skjK #);
+                       : y1_Xa ys1_Xb ->
+                         case <# (minusAddr# sc1_skjJ sc_skjI) bx_afvq of {
+                           __DEFAULT ->
+                             case ((io_afvr y1_Xa (Ptr sc_skjI)) `cast` <Co:2> :: ...) sc2_skjK
+                             of
+                             { (# ipv2_Xe, ipv3_Xf #) ->
+                             jump $sgo1_skjL
+                               (plusAddr# sc_skjI bx_afvq) sc1_skjJ ipv2_Xe sc3_skjH ys1_Xb
+                             };
+                           1# ->
+                             case $fIsStringBuilder1
+                                    bx_afvq sc3_skjH (# sc_skjI, sc1_skjJ, sc2_skjK #)
+                             of
+                             { (# ipv2_sgVu, ipv3_sgVv, ipv4_sgVw #) ->
+                             case ((io_afvr y1_Xa (Ptr ipv2_sgVu)) `cast` <Co:2> :: ...)
+                                    ipv4_sgVw
+                             of
+                             { (# ipv5_Xe, ipv6_Xf #) ->
+                             jump $sgo1_skjL
+                               (plusAddr# ipv2_sgVu bx_afvq) ipv3_sgVv ipv5_Xe sc3_skjH ys1_Xb
+                             }
+                             }
+                         }
+                     }; } in
+               jump $sgo1_skjL
+                 (plusAddr# cur_shDK bx_afvq) end_shDL ipv_afvx eta1_B1 ys_ah0h
+               };
+             1# ->
+               case $fIsStringBuilder1 bx_afvq eta1_B1 wild_shDJ of
+               { (# ipv_sgVu, ipv1_sgVv, ipv2_sgVw #) ->
+               case ((io_afvr y_ah0g (Ptr ipv_sgVu)) `cast` <Co:2> :: ...)
+                      ipv2_sgVw
+               of
+               { (# ipv3_afvx, ipv4_afvy #) ->
+               joinrec {
+                 $sgo1_skk2 sc_skjY sc1_skjZ sc2_skk0 sc3_skjX sc4_skjW
+                   = case sc4_skjW of {
+                       [] -> (# sc_skjY, sc1_skjZ, sc2_skk0 #);
+                       : y1_Xa ys1_Xb ->
+                         case <# (minusAddr# sc1_skjZ sc_skjY) bx_afvq of {
+                           __DEFAULT ->
+                             case ((io_afvr y1_Xa (Ptr sc_skjY)) `cast` <Co:2> :: ...) sc2_skk0
+                             of
+                             { (# ipv5_Xe, ipv6_Xf #) ->
+                             jump $sgo1_skk2
+                               (plusAddr# sc_skjY bx_afvq) sc1_skjZ ipv5_Xe sc3_skjX ys1_Xb
+                             };
+                           1# ->
+                             case $fIsStringBuilder1
+                                    bx_afvq sc3_skjX (# sc_skjY, sc1_skjZ, sc2_skk0 #)
+                             of
+                             { (# ipv5_Xe, ipv6_Xf, ipv7_Xg #) ->
+                             case ((io_afvr y1_Xa (Ptr ipv5_Xe)) `cast` <Co:2> :: ...) ipv7_Xg
+                             of
+                             { (# ipv8_Xi, ipv9_Xj #) ->
+                             jump $sgo1_skk2
+                               (plusAddr# ipv5_Xe bx_afvq) ipv6_Xf ipv8_Xi sc3_skjX ys1_Xb
+                             }
+                             }
+                         }
+                     }; } in
+               jump $sgo1_skk2
+                 (plusAddr# ipv_sgVu bx_afvq) ipv1_sgVv ipv3_afvx eta1_B1 ys_ah0h
+               }
+               }
+           }
+           }
+       }
+       })
+    `cast` <Co:14> :: ...
+
+$wunsafeCStringLen
+  = \ ww_shv8 ww1_shv9 eta_shvb eta1_shvc ->
+      case eta1_shvc of wild_shDO { (# cur_shDP, end_shDQ, s_shDR #) ->
+      case ww1_shv9 of { I# ipv_sfkI ->
+      case <# (minusAddr# end_shDQ cur_shDP) ipv_sfkI of {
+        __DEFAULT ->
+          case ww_shv8 `cast` <Co:8> :: ... of { Ptr src#_af5b ->
+          case copyAddrToAddrNonOverlapping#
+                 src#_af5b cur_shDP ipv_sfkI s_shDR
+          of wild2_X5
+          { __DEFAULT ->
+          (# plusAddr# cur_shDP ipv_sfkI, end_shDQ, wild2_X5 #)
+          }
+          };
+        1# ->
+          case $fIsStringBuilder1 ipv_sfkI eta_shvb wild_shDO of
+          { (# ipv1_sh1U, ipv2_sh1V, ipv3_sh1W #) ->
+          case ww_shv8 `cast` <Co:8> :: ... of { Ptr src#_af5b ->
+          case copyAddrToAddrNonOverlapping#
+                 src#_af5b ipv1_sh1U ipv_sfkI ipv3_sh1W
+          of wild2_X5
+          { __DEFAULT ->
+          (# plusAddr# ipv1_sh1U ipv_sfkI, ipv2_sh1V, wild2_X5 #)
+          }
+          }
+          }
+      }
+      }
+      }
+
+unsafeCStringLen1
+  = \ ds_shv6 eta_shvb eta1_shvc ->
+      case ds_shv6 of { (ww_shv8, ww1_shv9) ->
+      $wunsafeCStringLen ww_shv8 ww1_shv9 eta_shvb eta1_shvc
+      }
+
+unsafeCStringLen = unsafeCStringLen1 `cast` <Co:8> :: ...
+
+unsafeCString1
+  = \ cstr_a5xP v_B2 v1_X3 ->
+      case v1_X3 of wild_shDT { (# cur_shDU, end_shDV, s_shDW #) ->
+      case cstr_a5xP of { Ptr ds1_dc48 ->
+      case {__ffi_static_ccall_unsafe main:strlen :: Addr#
+                                          -> State# RealWorld -> (# State# RealWorld, Word64# #)}_dc4b
+             ds1_dc48 realWorld#
+      of
+      { (# ds2_dc4a, ds3_dc49 #) ->
+      let { len_sh2A = word64ToWord# ds3_dc49 } in
+      let { len1_sh2B = word2Int# len_sh2A } in
+      case <# (minusAddr# end_shDV cur_shDU) len1_sh2B of {
+        __DEFAULT ->
+          case copyAddrToAddrNonOverlapping#
+                 ds1_dc48 cur_shDU len1_sh2B s_shDW
+          of wild2_X5
+          { __DEFAULT ->
+          (# plusAddr# cur_shDU len1_sh2B, end_shDV, wild2_X5 #)
+          };
+        1# ->
+          case $fIsStringBuilder1 len1_sh2B v_B2 wild_shDT of
+          { (# ipv_sh1U, ipv1_sh1V, ipv2_sh1W #) ->
+          case copyAddrToAddrNonOverlapping#
+                 ds1_dc48 ipv_sh1U len1_sh2B ipv2_sh1W
+          of wild2_X5
+          { __DEFAULT ->
+          (# plusAddr# ipv_sh1U len1_sh2B, ipv1_sh1V, wild2_X5 #)
+          }
+          }
+      }
+      }
+      }
+      }
+
+unsafeCString = unsafeCString1 `cast` <Co:5> :: ...
+
+Rec {
+$fIsStringBuilder_$sgo1
+  = \ sc_skkZ sc1_skl1 sc2_skl2 sc3_skkY sc4_skkX ->
+      case sc4_skkX of {
+        [] -> (# sc_skkZ, sc1_skl1, sc2_skl2 #);
+        : y_ah0g ys_ah0h ->
+          join {
+            $sconrep_sklD sc5_sklw sc6_sklx sc7_skly
+              = case y_ah0g of { C# c#_afZL ->
+                case <=# (ord# c#_afZL) 127# of {
+                  __DEFAULT ->
+                    case <=# (ord# c#_afZL) 2047# of {
+                      __DEFAULT ->
+                        case <=# (ord# c#_afZL) 65535# of {
+                          __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   sc5_sklw
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 18#) 240#)))
+                                   sc7_skly
+                            of s2_afZg
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_sklw 1#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 63#)
+                                            128#)))
+                                   s2_afZg
+                            of s1_afZk
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_sklw 2#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#)
+                                            128#)))
+                                   s1_afZk
+                            of s3_afZo
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_sklw 3#)
+                                   0#
+                                   (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                   s3_afZo
+                            of s4_afZs
+                            { __DEFAULT ->
+                            $fIsStringBuilder_$sgo1
+                              (plusAddr# sc5_sklw 4#) sc6_sklx s4_afZs sc3_skkY ys_ah0h
+                            }
+                            }
+                            }
+                            };
+                          1# ->
+                            case writeWord8OffAddr#
+                                   sc5_sklw
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 224#)))
+                                   sc7_skly
+                            of s2_afYV
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_sklw 1#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#)
+                                            128#)))
+                                   s2_afYV
+                            of s1_afYZ
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc5_sklw 2#)
+                                   0#
+                                   (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                   s1_afYZ
+                            of s3_afZ3
+                            { __DEFAULT ->
+                            $fIsStringBuilder_$sgo1
+                              (plusAddr# sc5_sklw 3#) sc6_sklx s3_afZ3 sc3_skkY ys_ah0h
+                            }
+                            }
+                            }
+                        };
+                      1# ->
+                        case writeWord8OffAddr#
+                               sc5_sklw
+                               0#
+                               (wordToWord8#
+                                  (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 192#)))
+                               sc7_skly
+                        of s2_afYF
+                        { __DEFAULT ->
+                        case writeWord8OffAddr#
+                               (plusAddr# sc5_sklw 1#)
+                               0#
+                               (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                               s2_afYF
+                        of s1_afYJ
+                        { __DEFAULT ->
+                        $fIsStringBuilder_$sgo1
+                          (plusAddr# sc5_sklw 2#) sc6_sklx s1_afYJ sc3_skkY ys_ah0h
+                        }
+                        }
+                    };
+                  1# ->
+                    case writeWord8OffAddr#
+                           sc5_sklw 0# (wordToWord8# (int2Word# (ord# c#_afZL))) sc7_skly
+                    of s2_afYs
+                    { __DEFAULT ->
+                    $fIsStringBuilder_$sgo1
+                      (plusAddr# sc5_sklw 1#) sc6_sklx s2_afYs sc3_skkY ys_ah0h
+                    }
+                }
+                } } in
+          case <# (minusAddr# sc1_skl1 sc_skkZ) 4# of {
+            __DEFAULT -> jump $sconrep_sklD sc_skkZ sc1_skl1 sc2_skl2;
+            1# ->
+              case $fIsStringBuilder1
+                     4# sc3_skkY (# sc_skkZ, sc1_skl1, sc2_skl2 #)
+              of
+              { (# ipv_sgVu, ipv1_sgVv, ipv2_sgVw #) ->
+              jump $sconrep_sklD ipv_sgVu ipv1_sgVv ipv2_sgVw
+              }
+          }
+      }
+end Rec }
+
+$fIsStringBuilder2
+  = \ eta_B0 eta1_X1 eta2_B1 ->
+      case eta2_B1 of wild_shE0 { (# cur_shE1, end_shE2, s_shE3 #) ->
+      case eta_B0 of {
+        [] -> wild_shE0;
+        : y_ah0g ys_ah0h ->
+          join {
+            $sconrep_skkF sc_skky sc1_skkz sc2_skkA
+              = case y_ah0g of { C# c#_afZL ->
+                case <=# (ord# c#_afZL) 127# of {
+                  __DEFAULT ->
+                    case <=# (ord# c#_afZL) 2047# of {
+                      __DEFAULT ->
+                        case <=# (ord# c#_afZL) 65535# of {
+                          __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   sc_skky
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 18#) 240#)))
+                                   sc2_skkA
+                            of s2_afZg
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc_skky 1#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 63#)
+                                            128#)))
+                                   s2_afZg
+                            of s1_afZk
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc_skky 2#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#)
+                                            128#)))
+                                   s1_afZk
+                            of s3_afZo
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc_skky 3#)
+                                   0#
+                                   (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                   s3_afZo
+                            of s4_afZs
+                            { __DEFAULT ->
+                            $fIsStringBuilder_$sgo1
+                              (plusAddr# sc_skky 4#) sc1_skkz s4_afZs eta1_X1 ys_ah0h
+                            }
+                            }
+                            }
+                            };
+                          1# ->
+                            case writeWord8OffAddr#
+                                   sc_skky
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 12#) 224#)))
+                                   sc2_skkA
+                            of s2_afYV
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc_skky 1#)
+                                   0#
+                                   (wordToWord8#
+                                      (int2Word#
+                                         (+#
+                                            (andI# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 63#)
+                                            128#)))
+                                   s2_afYV
+                            of s1_afYZ
+                            { __DEFAULT ->
+                            case writeWord8OffAddr#
+                                   (plusAddr# sc_skky 2#)
+                                   0#
+                                   (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                                   s1_afYZ
+                            of s3_afZ3
+                            { __DEFAULT ->
+                            $fIsStringBuilder_$sgo1
+                              (plusAddr# sc_skky 3#) sc1_skkz s3_afZ3 eta1_X1 ys_ah0h
+                            }
+                            }
+                            }
+                        };
+                      1# ->
+                        case writeWord8OffAddr#
+                               sc_skky
+                               0#
+                               (wordToWord8#
+                                  (int2Word# (+# (uncheckedIShiftRA# (ord# c#_afZL) 6#) 192#)))
+                               sc2_skkA
+                        of s2_afYF
+                        { __DEFAULT ->
+                        case writeWord8OffAddr#
+                               (plusAddr# sc_skky 1#)
+                               0#
+                               (wordToWord8# (int2Word# (+# (andI# (ord# c#_afZL) 63#) 128#)))
+                               s2_afYF
+                        of s1_afYJ
+                        { __DEFAULT ->
+                        $fIsStringBuilder_$sgo1
+                          (plusAddr# sc_skky 2#) sc1_skkz s1_afYJ eta1_X1 ys_ah0h
+                        }
+                        }
+                    };
+                  1# ->
+                    case writeWord8OffAddr#
+                           sc_skky 0# (wordToWord8# (int2Word# (ord# c#_afZL))) sc2_skkA
+                    of s2_afYs
+                    { __DEFAULT ->
+                    $fIsStringBuilder_$sgo1
+                      (plusAddr# sc_skky 1#) sc1_skkz s2_afYs eta1_X1 ys_ah0h
+                    }
+                }
+                } } in
+          case <# (minusAddr# end_shE2 cur_shE1) 4# of {
+            __DEFAULT -> jump $sconrep_skkF cur_shE1 end_shE2 s_shE3;
+            1# ->
+              case $fIsStringBuilder1 4# eta1_X1 wild_shE0 of
+              { (# ipv_sgVu, ipv1_sgVv, ipv2_sgVw #) ->
+              jump $sconrep_skkF ipv_sgVu ipv1_sgVv ipv2_sgVw
+              }
+          }
+      }
+      }
+
+builderFromString = $fIsStringBuilder2 `cast` <Co:6> :: ...
+
+$fIsStringBuilder = $fIsStringBuilder2 `cast` <Co:10> :: ...
+
+$wfinalizeRingSink
+  = \ ww_shw2 ww1_shw6 s_shw8 ->
+      case readMutVar# ww_shw2 s_shw8 of { (# ipv_aecb, ipv1_aecc #) ->
+      case ipv1_aecc of wild_X3
+      { RingSinkState bx_dcis bx1_dcit bx2_dciu bx3_dciv bx4_dciw
+                      bx5_dcix ds_dc3e ds2_dc3f ds3_dc3g ds4_dc3h ->
+      case ds4_dc3h of {
+        __DEFAULT ->
+          let {
+            finalHead_sgAl
+              = plusWord64#
+                  bx_dcis
+                  (int64ToWord64#
+                     (intToInt64#
+                        (minusAddr#
+                           ww1_shw6
+                           (plusAddr#
+                              bx2_dciu
+                              (andI# (word2Int# (word64ToWord# bx_dcis)) bx3_dciv))))) } in
+          let { finalHead1_sgAn = W64# finalHead_sgAl } in
+          case gtWord64# finalHead_sgAl bx1_dcit of {
+            __DEFAULT -> (# ipv_aecb, finalHead1_sgAn #);
+            1# ->
+              case ((ds_dc3e finalHead1_sgAn) `cast` <Co:2> :: ...) ipv_aecb of
+              { (# ipv2_aegM, ipv3_aegN #) ->
+              (# ipv2_aegM, finalHead1_sgAn #)
+              }
+          };
+        SpillActive bx6_dch9 bx7_dcha ->
+          case bx6_dch9 of wild2_shEa { ForeignPtr fo_shEb ds5_shEc ->
+          case $wringCopyIn
+                 wild_X3 (Ptr fo_shEb) (minusAddr# ww1_shw6 fo_shEb) ipv_aecb
+          of
+          { (# ipv2_X7, ipv3_X8 #) ->
+          case touch# ds5_shEc ipv2_X7 of s'_aeAp { __DEFAULT ->
+          case writeMutVar#
+                 ww_shw2
+                 (case ipv3_X8 of
+                  { RingSinkState bx8_dcdo bx9_dcdp bx10_dcdq bx11_dcdr bx12_dcds
+                                  bx13_dcdt rsPublishHead1_B7 rsEnsureRoom1_B8 rsLoadTail1_B9
+                                  ds7_daBr ->
+                  RingSinkState
+                    bx8_dcdo
+                    bx9_dcdp
+                    bx10_dcdq
+                    bx11_dcdr
+                    bx12_dcds
+                    bx13_dcdt
+                    rsPublishHead1_B7
+                    rsEnsureRoom1_B8
+                    rsLoadTail1_B9
+                    (SpillIdle wild2_shEa bx7_dcha)
+                  })
+                 s'_aeAp
+          of s2#_ae4d
+          { __DEFAULT ->
+          (# s2#_ae4d,
+             case ipv3_X8 of
+             { RingSinkState bx8_dcdo bx9_dcdp bx10_dcdq bx11_dcdr bx12_dcds
+                             bx13_dcdt rsPublishHead1_B7 rsEnsureRoom1_B8 rsLoadTail1_B9
+                             ds7_daBr ->
+             W64# bx8_dcdo
+             } #)
+          }
+          }
+          }
+          }
+      }
+      }
+      }
+
+finalizeRingSink1
+  = \ rsRef_shw0 finalCur_shw4 s_shw8 ->
+      case rsRef_shw0 `cast` <Co:2> :: ... of { STRef ww_shw2 ->
+      case finalCur_shw4 of { Ptr ww1_shw6 ->
+      $wfinalizeRingSink ww_shw2 ww1_shw6 s_shw8
+      }
+      }
+
+finalizeRingSink = finalizeRingSink1 `cast` <Co:11> :: ...
+
+
+------ Local rules for imported ids --------
+"appendBuilder/assoc"
+    forall x_a5Es y_a5Et z_a5Ev.
+      appendBuilder (appendBuilder x_a5Es y_a5Et) z_a5Ev
+      = appendBuilder x_a5Es (appendBuilder y_a5Et z_a5Ev)
+"fast-builder: write/write"
+    forall w0_a5Ds w1_a5Dt.
+      appendBuilder (write w0_a5Ds) (write w1_a5Dt)
+      = write ($fMonoidBuilder_$c<> w0_a5Ds w1_a5Dt)
+"fast-builder: write/write/x"
+    forall w0_a5Cz w1_a5CA x_a5CB.
+      appendBuilder (write w0_a5Cz)
+                    (appendBuilder (write w1_a5CA) x_a5CB)
+      = appendBuilder
+          (write ($fMonoidBuilder_$c<> w0_a5Cz w1_a5CA)) x_a5CB
+"FastBuilder: builderFromString/unpackCString#"
+    forall addr_a5Dx.
+      builderFromString (unpackCString# addr_a5Dx)
+      = (\ v_B2 v1_X3 ->
+           case v1_X3 of { (# cur_sgKA, end_sgKB, s_sgKC #) ->
+           case {__ffi_static_ccall_unsafe main:strlen :: Addr#
+                                          -> State# RealWorld -> (# State# RealWorld, Word64# #)}_dc4b
+                  addr_a5Dx realWorld#
+           of
+           { (# _, ds1_dc49 #) ->
+           let { len_sh2D = word64ToWord# ds1_dc49 } in
+           let { len1_sh2E = word2Int# len_sh2D } in
+           case <# (minusAddr# end_sgKB cur_sgKA) len1_sh2E of {
+             __DEFAULT ->
+               case copyAddrToAddrNonOverlapping#
+                      addr_a5Dx cur_sgKA len1_sh2E s_sgKC
+               of wild2_X5
+               { __DEFAULT ->
+               (# plusAddr# cur_sgKA len1_sh2E, end_sgKB, wild2_X5 #)
+               };
+             1# ->
+               case ((getBytes_ len1_sh2E) `cast` <Co:1> :: ...)
+                      v_B2 (# cur_sgKA, end_sgKB, s_sgKC #)
+               of
+               { (# ipv_sh1U, ipv1_sh1V, ipv2_sh1W #) ->
+               case copyAddrToAddrNonOverlapping#
+                      addr_a5Dx ipv_sh1U len1_sh2E ipv2_sh1W
+               of wild2_X5
+               { __DEFAULT ->
+               (# plusAddr# ipv_sh1U len1_sh2E, ipv1_sh1V, wild2_X5 #)
+               }
+               }
+           }
+           }
+           })
+        `cast` <Co:2> :: ...
+

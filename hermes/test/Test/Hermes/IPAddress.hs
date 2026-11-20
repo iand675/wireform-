@@ -35,9 +35,29 @@ unit_doc =
 
 unit_v4mapped :: Spec
 unit_v4mapped =
-  it "parses ::ffff:192.0.2.1 (IPv4-mapped tail)" $
+  it "packs embedded IPv4 tails on both sides of the word boundary" $ do
     IP.parseIPv6 "::ffff:192.0.2.1"
       `shouldBe` Right (IP.IPv6 0 0 0 0 0 0xffff 0xc000 0x0201)
+    IP.parseIPv6 "::1:2:3:192.0.2.1"
+      `shouldBe` Right (IP.IPv6 0 0 0 1 2 3 0xc000 0x0201)
+    IP.parseIPv6 "1:2:3:4::192.0.2.1"
+      `shouldBe` Right (IP.IPv6 1 2 3 4 0 0 0xc000 0x0201)
+    IP.parseIPv6 "1:2:3:4:5:6:192.0.2.1"
+      `shouldBe` Right (IP.IPv6 1 2 3 4 5 6 0xc000 0x0201)
+
+
+unit_ipv6_compression_positions :: Spec
+unit_ipv6_compression_positions = it "decodes compressed groups on either side of the packed-word boundary" $ do
+  IP.parseIPv6 "::" `shouldBe` Right (IP.IPv6 0 0 0 0 0 0 0 0)
+  IP.parseIPv6 "1:2:3::5:6:7:8" `shouldBe` Right (IP.IPv6 1 2 3 0 5 6 7 8)
+  IP.parseIPv6 "1:2:3:4::6:7:8" `shouldBe` Right (IP.IPv6 1 2 3 4 0 6 7 8)
+  IP.parseIPv6 "1:2:3:4:5:6:7::" `shouldBe` Right (IP.IPv6 1 2 3 4 5 6 7 0)
+  IP.parseIPv6 "::2:3:4:5:6:7:FFFF" `shouldBe` Right (IP.IPv6 0 2 3 4 5 6 7 0xffff)
+  mapM_ reject ["1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7:8::", "1::2::3", "1:::2", "fffff::", "1:2:3:4:5:6:7:8:"]
+  where
+    reject wire = case IP.parseIPv6 wire of
+      Left _ -> pure ()
+      Right value -> expectationFailure (show (wire, value))
 
 
 unit_linklocal :: Spec
@@ -136,6 +156,7 @@ tests =
       , unit_loopback
       , unit_doc
       , unit_v4mapped
+      , unit_ipv6_compression_positions
       , unit_linklocal
       , unit_canonical
       , unit_render_ipv4

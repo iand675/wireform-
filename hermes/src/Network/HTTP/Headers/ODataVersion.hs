@@ -8,13 +8,11 @@ generate a request or response payload. Sent on both requests and responses
 == Grammar
 
 @
-OData-Version = major "." minor
-major         = 1*DIGIT
-minor         = 1*DIGIT
+OData-Version = "4.0" [ %x31-39 ]
 @
 
-The only versions defined by the specification are @4.0@ and @4.01@; the
-value is surfaced structurally as @major.minor@.
+The major number is 4 and the optional final digit is stored as the minor
+number. For example, @4.01@ is represented by @ODataVersion 4 1@.
 
 Spec: OData Version 4.01 Part 1: Protocol §8.1.5
 <https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part1-protocol.html#sec_HeaderODataVersion>
@@ -28,7 +26,7 @@ module Network.HTTP.Headers.ODataVersion (
   renderODataVersion,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hODataVersion)
 import qualified Network.HTTP.Headers.Mason as M
@@ -49,14 +47,14 @@ instance KnownHeader ODataVersion where
   type Direction ODataVersion = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser oDataVersionParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing OData-Version header: " <> show rest
-    Fail -> Left "Failed to parse OData-Version header"
-    Err e -> Left e
+  parseFromHeaders _ ("4.0" :| []) = Right (ODataVersion 4 0)
+  parseFromHeaders _ ("4.01" :| []) = Right (ODataVersion 4 1)
+  parseFromHeaders _ fields = parseSingleFieldLine "OData-Version" oDataVersionParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderODataVersion
+  renderToHeaders _ (ODataVersion 4 0) = "4.0"
+  renderToHeaders _ (ODataVersion 4 1) = "4.01"
+  renderToHeaders _ value = M.toStrictByteString (renderODataVersion value)
 
 
   headerName _ = hODataVersion
@@ -64,12 +62,14 @@ instance KnownHeader ODataVersion where
 
 oDataVersionParser :: ParserT st String ODataVersion
 oDataVersionParser = do
-  major <- anyAsciiDecimalWord
-  $(char '.')
-  minor <- anyAsciiDecimalWord
-  pure ODataVersion {oDataVersionMajor = major, oDataVersionMinor = minor}
+  $(string "4.0")
+  minor <- withSatisfyAscii (\c -> '1' <= c && c <= '9') (pure . fromIntegral . subtract (fromEnum '0') . fromEnum) <|> pure 0
+  pure (ODataVersion 4 minor)
 
 
 renderODataVersion :: ODataVersion -> M.Builder
+renderODataVersion (ODataVersion 4 minor)
+  | minor == 0 = "4.0"
+  | minor <= 9 = "4.0" <> M.wordDec minor
 renderODataVersion (ODataVersion major minor) =
   M.wordDec major <> M.char7 '.' <> M.wordDec minor

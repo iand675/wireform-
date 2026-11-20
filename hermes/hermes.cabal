@@ -31,9 +31,17 @@ library
       Network.HTTP.ContentCoding
       Network.HTTP.ContentNegotiation
       Network.HTTP.Grammar
+      Network.HTTP.Grammar.Authority
+      Network.HTTP.Grammar.ExtendedValue
+      Network.HTTP.Grammar.ExtensionDeclaration
+      Network.HTTP.Grammar.LanguageTag
+      Network.HTTP.Grammar.LegacyProtocol
       Network.HTTP.Grammar.Parser
+      Network.HTTP.Grammar.PEP
+      Network.HTTP.Grammar.PICS
       Network.HTTP.Grammar.Rendering
       Network.HTTP.Grammar.Types
+      Network.HTTP.Grammar.URIReference
       Network.HTTP.Header
       Network.HTTP.Headers
       Network.HTTP.Headers.AIM
@@ -292,6 +300,10 @@ library
       Network.Mailbox
       Network.TLS.Extensions
   other-modules:
+      Network.HTTP.Headers.OpaqueField
+      Network.HTTP.Headers.RetainedList
+      Network.HTTP.Headers.Signature.Internal
+      Network.HTTP.Headers.TransportPolicy
       Paths_hermes
   autogen-modules:
       Paths_hermes
@@ -314,10 +326,12 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       MonadRandom
+    , aeson >=2.1 && <2.4
     , base >=4.20 && <5
+    , base64-bytestring >=1.2 && <1.3
     , binary
     , bitvec
-    , bytestring
+    , bytestring >=0.12
     , case-insensitive
     , charset
     , containers
@@ -327,6 +341,7 @@ library
     , memory
     , mono-traversable
     , parser-combinators
+    , scientific
     , symbolize
     , template-haskell
     , text
@@ -337,6 +352,23 @@ library
     , validation
     , vector
     , wireform-core
+  default-language: Haskell2010
+
+benchmark hermes-bench
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: bench
+  default-extensions: OverloadedStrings, TypeApplications
+  ghc-options: -O2 -rtsopts
+  build-depends:
+      base
+    , bytestring
+    , case-insensitive
+    , criterion
+    , hermes
+    , text
+    , text-short
+    , time
   default-language: Haskell2010
 
 test-suite hermes-tests
@@ -359,10 +391,12 @@ test-suite hermes-tests
       Test.Hermes.ClientHints
       Test.Hermes.Conditional
       Test.Hermes.ContentMeta
+      Test.Hermes.Cookie
       Test.Hermes.ContentRange
       Test.Hermes.Cors
       Test.Hermes.CrossOrigin
       Test.Hermes.Csp
+      Test.Hermes.Date
       Test.Hermes.DefactoCorrelation
       Test.Hermes.DefactoForwarding
       Test.Hermes.DefactoMisc
@@ -370,6 +404,7 @@ test-suite hermes-tests
       Test.Hermes.DeltaEncoding
       Test.Hermes.Digest
       Test.Hermes.Expect
+      Test.Hermes.FieldLists
       Test.Hermes.Forwarded
       Test.Hermes.Framing
       Test.Hermes.IPAddress
@@ -377,6 +412,7 @@ test-suite hermes-tests
       Test.Hermes.Mailbox
       Test.Hermes.Memento
       Test.Hermes.MiscProvisional
+      Test.Hermes.Negotiation
       Test.Hermes.OAuthDpop
       Test.Hermes.OData
       Test.Hermes.ObsoleteContent
@@ -396,10 +432,12 @@ test-suite hermes-tests
       Test.Hermes.Server
       Test.Hermes.Signature
       Test.Hermes.Sse
+      Test.Hermes.StructuredFields
       Test.Hermes.Surrogate
       Test.Hermes.TCN
       Test.Hermes.TokenBinding
       Test.Hermes.Tracing
+      Test.Hermes.URIReference
       Test.Hermes.WWWAuthenticate
       Test.Hermes.WebDavCore
       Test.Hermes.WebDavExt

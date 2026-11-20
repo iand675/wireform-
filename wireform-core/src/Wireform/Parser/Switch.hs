@@ -22,6 +22,7 @@ comparisons with grouped bounds checks.
 module Wireform.Parser.Switch (
   switch,
   switchWithPost,
+  switchAsciiCI,
 
   -- * TH literal splices
   char,
@@ -37,7 +38,7 @@ module Wireform.Parser.Switch (
 
 import Control.Monad (forM)
 import Data.ByteString.Char8 qualified as BSC
-import Data.Char (ord)
+import Data.Char (isAsciiUpper, ord, toLower)
 import Data.Foldable (foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
@@ -161,6 +162,7 @@ mindepths (Branch rule ts)
                   ts'
       in Branch (rule, d) ts'
 
+
 ------------------------------------------------------------------------
 -- TH code generation
 ------------------------------------------------------------------------
@@ -177,7 +179,22 @@ switchWithPost :: Maybe (Q Exp) -> Q Exp -> Q Exp
 switchWithPost postAction qexp = do
   post <- sequence postAction
   (cases, deflt) <- parseSwitchExp qexp
-  genSwitch post cases deflt
+  genSwitch pure post cases deflt
+
+
+-- | Like 'switch', with case-insensitive ASCII string literals.
+switchAsciiCI :: Q Exp -> Q Exp
+switchAsciiCI qexp = do
+  (cases, deflt) <- parseSwitchExp qexp
+  genSwitch asciiVariants Nothing (map foldCase cases) deflt
+  where
+    asciiVariants w
+      | w >= 97 && w <= 122 = [w, w - 32]
+      | otherwise = [w]
+    foldCase (literal, action) = (map foldAscii literal, action)
+    foldAscii c
+      | isAsciiUpper c = toLower c
+      | otherwise = c
 
 
 parseSwitchExp :: Q Exp -> Q ([(String, Exp)], Maybe Exp)
@@ -197,8 +214,8 @@ parseSwitchExp qexp =
     _ -> fail "switch: expected 'case _ of' expression"
 
 
-genSwitch :: Maybe Exp -> [(String, Exp)] -> Maybe Exp -> Q Exp
-genSwitch post cases deflt = do
+genSwitch :: (Word8 -> [Word8]) -> Maybe Exp -> [(String, Exp)] -> Maybe Exp -> Q Exp
+genSwitch variants post cases deflt = do
   let indexed = zip [0 :: Int ..] cases
       trie = mindepths (listToTrie [(i, s) | (i, (s, _)) <- indexed])
 
@@ -214,14 +231,14 @@ genSwitch post cases deflt = do
 
   let nameMap = M.fromList [(k, n) | (k, n, _) <- bindings]
 
-  body <- genTrieCode nameMap trie
+  body <- genTrieCode variants nameMap trie
   letE
     [valD (varP n) (normalB (pure e)) [] | (_, n, e) <- bindings]
     (pure body)
 
 
-genTrieCode :: Map (Maybe Int) Name -> Trie (Rule, Int) -> Q Exp
-genTrieCode names = go 0
+genTrieCode :: (Word8 -> [Word8]) -> Map (Maybe Int) Name -> Trie (Rule, Int) -> Q Exp
+genTrieCode variants names = go 0
   where
     ruleName r = case M.lookup r names of
       Just n -> n
@@ -233,23 +250,31 @@ genTrieCode names = go 0
       | otherwise = do
           let need = ensured < 1
           branches <- forM (M.toList ts) \(w, sub) -> do
-            e <- go (if need then depth - 1 else ensured - 1) sub
-            pure (w, InfixE (Just (VarE 'switchSkip1)) (VarE '(>>)) (Just e))
+            child <- go (if need then depth - 1 else ensured - 1) sub
+            let advance = InfixE (Just (VarE 'switchSkip1)) (VarE '(>>)) (Just child)
+                match byte action = Match (LitP (IntegerL (fromIntegral byte))) (NormalB action) []
+            case variants w of
+              [byte] -> pure ([], [match byte advance])
+              bytes -> do
+                shared <- newName "branch"
+                pure
+                  ( [ValD (VarP shared) (NormalB advance) []]
+                  , map (\byte -> match byte (VarE shared)) bytes
+                  )
 
           let defE = VarE (ruleName rule)
-              body =
+              dispatch =
                 mkDoE
                   [ BindS (VarP (mkName "c")) (VarE 'switchPeekWord8Unsafe)
                   , NoBindS
                       ( CaseE
                           (VarE (mkName "c"))
-                          ( [ Match (LitP (IntegerL (fromIntegral w))) (NormalB e) []
-                            | (w, e) <- branches
-                            ]
-                              <> [Match WildP (NormalB defE) []]
-                          )
+                          (concatMap snd branches <> [Match WildP (NormalB defE) []])
                       )
                   ]
+              body = case concatMap fst branches of
+                [] -> dispatch
+                bindings -> LetE bindings dispatch
 
           if need
             then [|switchBranch depth $(pure body) $(pure defE)|]

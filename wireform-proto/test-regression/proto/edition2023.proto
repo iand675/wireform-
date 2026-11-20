@@ -1,0 +1,28 @@
+edition = "2023";
+enum Status23 { STATUS23_UNSPECIFIED = 0; STATUS23_READY = 1; }
+enum CaseAlias23 {
+  option allow_alias = true;
+  CASE_ALIAS_UNSPECIFIED = 0;
+  CASE_ALIAS_CANONICAL = 2;
+  MOO = 2;
+  moo = 2;
+}
+message EnumAlias23 {
+  CaseAlias23 value = 1;
+}
+message Fields23 {
+  int32 count = 1;
+  string name = 2;
+  bytes payload = 3;
+  bool enabled = 4;
+  Status23 status = 5;
+  double magnitude = 6;
+  float fraction = 7;
+  int32 implicit_count = 8 [features.field_presence = IMPLICIT];
+  repeated int32 values = 9;
+  message Inner { int32 count = 1; }
+  Inner inner = 10;
+  map<string, string> attrs = 11;
+  oneof choice { int32 picked = 12; string label = 13; }
+  int32 aggregate_implicit = 14 [features = {field_presence: IMPLICIT}];
+}

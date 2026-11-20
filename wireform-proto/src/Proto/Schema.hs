@@ -23,6 +23,7 @@ a getter, setter, and field descriptor.
 module Proto.Schema (
   -- * Message metadata
   ProtoMessage (..),
+  SomeProtoMessage (..),
 
   -- * Field access
   HasField (..),
@@ -34,6 +35,8 @@ module Proto.Schema (
   FieldLabel' (..),
   FieldAccessor (..),
   SomeFieldDescriptor (..),
+  OneofDescriptor (..),
+  OneofFieldDescriptor (..),
 
   -- * Enum metadata
   ProtoEnum (..),
@@ -49,6 +52,7 @@ module Proto.Schema (
   messageFieldNumbers,
 ) where
 
+import Data.Aeson (Value)
 import Data.ByteString (ByteString)
 import Data.Kind (Type)
 import Data.Map.Strict (Map)
@@ -56,6 +60,7 @@ import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import GHC.TypeLits (Symbol)
+import Proto.Internal.Wire.Decode (Decoder)
 
 
 {- | Typeclass carrying full proto schema metadata for a message type.
@@ -77,6 +82,25 @@ class ProtoMessage a where
   protoFieldDescriptors :: Proxy a -> Map Int (SomeFieldDescriptor a)
 
 
+  -- | Every wire member of each oneof, including its declared wire type.
+  protoOneofDescriptors :: Proxy a -> [OneofDescriptor]
+  protoOneofDescriptors _ = []
+
+  -- | The recognized numbers for ordinary closed-enum fields, including
+  -- enum-valued maps. Open enums and oneof members are omitted.
+  protoClosedEnumFields :: Proxy a -> Map Int [Int]
+  protoClosedEnumFields _ = Map.empty
+
+  -- | Schemas for message and group fields, keyed by wire field number.
+  protoSubmessageSchemas :: Proxy a -> Map Int SomeProtoMessage
+  protoSubmessageSchemas _ = Map.empty
+
+  -- | Validators for the message payloads in map values, keyed by map field
+  -- number. An entry's keys and value framing are handled separately.
+  protoMapValueDecoders :: Proxy a -> Map Int (Decoder ())
+  protoMapValueDecoders _ = Map.empty
+
+
   {- | The raw serialized FileDescriptorProto bytes.
   Can be fed to other proto tools for interop.
   -}
@@ -86,6 +110,16 @@ class ProtoMessage a where
 
   -- | Default value with all fields at their proto default.
   protoDefaultValue :: a
+
+
+  -- | Prepare typed ProtoJSON for parsing in ignore-unknown-enum-names mode.
+  protoJSONIgnoreUnknownEnumNames :: Proxy a -> Value -> Value
+  protoJSONIgnoreUnknownEnumNames _ = id
+
+
+-- | A message schema whose Haskell type is selected at runtime.
+data SomeProtoMessage where
+  SomeProtoMessage :: ProtoMessage a => Proxy a -> SomeProtoMessage
 
 
 {- | Type-safe field access via plain get\/set functions.
@@ -127,11 +161,30 @@ data SomeFieldDescriptor msg where
   SomeField :: FieldDescriptor msg a -> SomeFieldDescriptor msg
 
 
+data OneofDescriptor = OneofDescriptor
+  { odName :: !Text
+  , odFields :: ![OneofFieldDescriptor]
+  }
+  deriving stock (Show, Eq)
+
+
+data OneofFieldDescriptor = OneofFieldDescriptor
+  { ofdName :: !Text
+  , ofdNumber :: {-# UNPACK #-} !Int
+  , ofdType :: !FieldTypeDescriptor
+  , ofdEnumValues :: !(Maybe [Int])
+  -- ^ Allowed values for a closed enum. Open enums use 'Nothing'.
+  }
+  deriving stock (Show, Eq)
+
+
 -- | Proto field type descriptor.
 data FieldTypeDescriptor
   = ScalarType !ScalarFieldType
   | -- | Fully-qualified message type name
     MessageType !Text
+  | -- | Message encoded between matching group tags.
+    GroupType !Text
   | -- | Fully-qualified enum type name
     EnumType !Text
   | -- | Map<key, value>
@@ -192,6 +245,11 @@ class ProtoEnum a where
 
   -- | Convert from proto numeric value.
   fromProtoEnumValue :: Int -> Maybe a
+
+
+  -- | Whether the enum accepts unrecognized wire values.
+  protoEnumIsOpen :: Proxy a -> Bool
+  protoEnumIsOpen _ = True
 
 
   -- | Convert to proto numeric value.

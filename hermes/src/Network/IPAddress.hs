@@ -1,3 +1,9 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE UnboxedSums #-}
+{-# LANGUAGE UnboxedTuples #-}
+
 {- |
 IP address literals as used throughout IETF protocols.
 
@@ -25,26 +31,37 @@ module Network.IPAddress (
   IPAddress (..),
   ipv4Parser,
   ipv6Parser,
+  ipLiteralParser,
+  skipIPv6Parser,
+  skipIPLiteralParser,
   ipAddressParser,
   renderIPv4,
   renderIPv6,
   renderIPAddress,
   parseIPv4,
+  parseBareIPv4,
   parseIPv6,
+  parseBareIPv6,
   parseIPAddress,
 ) where
 
+import Data.Bifunctor (first)
+import Data.Bits (unsafeShiftL, unsafeShiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import Data.Char (isAsciiLower, isAsciiUpper)
-import Data.List (foldl')
 import qualified Data.Text.Short as ST
-import Data.Word (Word16, Word8)
+import Data.Word (Word16, Word64, Word8)
+import Foreign.ForeignPtr (withForeignPtr)
+import GHC.Exts (Addr#, Int (I#), RealWorld, State#, Word (W#), Word#, eqAddr#, gtWord#, indexWord8OffAddr#, isTrue#, minusWord#, or#, plusAddr#, plusWord#, timesWord#, uncheckedShiftL#, uncheckedShiftRL#, word8ToWord#, wordToWord8#, (-#))
+import GHC.ForeignPtr (ForeignPtr (ForeignPtr))
+import GHC.IO (IO (..))
+import GHC.Word (Word8 (W8#))
+import Network.HTTP.Grammar (WireGrammar (..), grammarParseErrorToString, parseGrammar)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Numeric (showHex)
-import Data.Bifunctor (first)
-import Network.HTTP.Grammar (WireGrammar (..), grammarParseErrorToString, parseGrammar)
+import Wireform.Parser.Internal (Parser (..), StRes#, pattern Fail#, pattern OK#)
 
 
 -- ---------------------------------------------------------------------------
@@ -79,16 +96,64 @@ data IPAddress
 
 -- | Parse a dotted-quad IPv4 address: four decimal octets @0-255@ joined by @.@.
 ipv4Parser :: ParserT st String IPv4
-ipv4Parser = do
-  a <- octet
-  dot
-  b <- octet
-  dot
-  c <- octet
-  dot
-  IPv4 a b c <$> octet
+ipv4Parser = Parser $ \_ end start st ->
+  case scanIPv4 start end of
+    (# (# packed, stop #) | #) -> (# st, OK# (unpackIPv4 packed) stop #)
+    (# | (# #) #) -> (# st, Fail# #)
+{-# INLINE ipv4Parser #-}
+
+
+-- Scan four decimal octets. The returned cursor lets parsers embed
+-- the same grammar in a larger value without copying its bytes.
+scanIPv4 :: Addr# -> Addr# -> (# (# Word#, Addr# #) | (# #) #)
+scanIPv4 start end = octet start 0## 3#
   where
-    dot = satisfyAscii_ (== '.')
+    byteAt cur = word8ToWord# (indexWord8OffAddr# cur 0#)
+    digitAt cur = minusWord# (byteAt cur) 48##
+    octet cur packed octetsLeft
+      | isTrue# (eqAddr# cur end) = (# | (# #) #)
+      | otherwise =
+          let next = plusAddr# cur 1#
+              digit = digitAt cur
+          in case digit of
+               0##
+                 | isTrue# (eqAddr# next end) || isTrue# (gtWord# (digitAt next) 9##) ->
+                     finish next packed octetsLeft 0##
+                 | otherwise -> (# | (# #) #)
+               _
+                 | isTrue# (gtWord# digit 9##) -> (# | (# #) #)
+                 | otherwise -> moreDigits next packed octetsLeft digit
+    moreDigits cur packed octetsLeft octetValue
+      | isTrue# (eqAddr# cur end) = finish cur packed octetsLeft octetValue
+      | otherwise =
+          let digit = digitAt cur
+              total = plusWord# (timesWord# octetValue 10##) digit
+          in if isTrue# (gtWord# digit 9##)
+               then finish cur packed octetsLeft octetValue
+               else
+                 if isTrue# (gtWord# total 255##)
+                   then (# | (# #) #)
+                   else moreDigits (plusAddr# cur 1#) packed octetsLeft total
+    finish cur packed octetsLeft octetValue =
+      let next = or# (uncheckedShiftL# packed 8#) octetValue
+      in case octetsLeft of
+           0# -> (# (# next, cur #) | #)
+           _
+             | not (isTrue# (eqAddr# cur end))
+             , 46## <- byteAt cur ->
+                 octet (plusAddr# cur 1#) next (octetsLeft -# 1#)
+             | otherwise -> (# | (# #) #)
+{-# INLINE scanIPv4 #-}
+
+
+unpackIPv4 :: Word# -> IPv4
+unpackIPv4 packed =
+  IPv4
+    (W8# (wordToWord8# (uncheckedShiftRL# packed 24#)))
+    (W8# (wordToWord8# (uncheckedShiftRL# packed 16#)))
+    (W8# (wordToWord8# (uncheckedShiftRL# packed 8#)))
+    (W8# (wordToWord8# packed))
+{-# INLINE unpackIPv4 #-}
 
 
 {- | Parse an IPv6 address per <https://www.rfc-editor.org/rfc/rfc4291#section-2.2 RFC 4291 §2.2>:
@@ -96,9 +161,23 @@ hextet groups joined by @:@, at most one @::@ zero-compression marker, and an
 optional embedded IPv4 address occupying the final 32 bits.
 -}
 ipv6Parser :: ParserT st String IPv6
-ipv6Parser = do
-  bs <- byteStringOf (skipSome (satisfyAscii isIPv6Char))
-  maybe failed pure (assembleIPv6 bs)
+ipv6Parser = Parser $ \_ end start -> scanIPv6Value start end
+
+scanIPv6Value :: Addr# -> Addr# -> State# RealWorld -> StRes# String IPv6
+scanIPv6Value start end st =
+  scanIPv6 True start end
+    (\stop count compression upper lower ->
+      (# st, OK# (unpackIPv6 count compression upper lower) stop #))
+    st
+{-# NOINLINE scanIPv6Value #-}
+
+-- | Validate an IPv6 address without constructing its numeric value.
+skipIPv6Parser :: ParserT st String ()
+skipIPv6Parser = Parser $ \_ end start st ->
+  scanIPv6 False start end
+    (\stop _ _ _ _ -> (# st, OK# () stop #))
+    st
+{-# NOINLINE skipIPv6Parser #-}
 
 
 {- | Parse any IP-literal form, trying IPv6 first, then IPv4, then IPvFuture.
@@ -114,117 +193,157 @@ ipAddressParser =
     <|> (IPvFuture <$> ipvFutureParser)
 
 
+-- | A bracketed URI IP literal. IPv4 addresses use the unbracketed form.
+ipLiteralParser :: ParserT st String IPAddress
+ipLiteralParser =
+  satisfyAscii_ (== '[')
+    *> ((IPv6Address <$> ipv6Parser) <|> (IPvFuture <$> ipvFutureParser))
+    <* satisfyAscii_ (== ']')
+{-# INLINE ipLiteralParser #-}
+
+-- | Validate a bracketed URI literal while retaining its original spelling
+-- at the call site.
+skipIPLiteralParser :: ParserT st String ()
+skipIPLiteralParser =
+  satisfyAscii_ (== '[')
+    *> (skipIPv6Parser <|> ipvFutureBytes)
+    <* satisfyAscii_ (== ']')
+{-# INLINE skipIPLiteralParser #-}
+
+
 -- | @IPvFuture = "v" 1*HEXDIG "." 1*( unreserved \/ sub-delims \/ ":" )@.
 ipvFutureParser :: ParserT st e ST.ShortText
-ipvFutureParser = shortASCIIFromParser_ $ do
+ipvFutureParser = shortASCIIFromParser_ ipvFutureBytes
+
+ipvFutureBytes :: ParserT st e ()
+ipvFutureBytes = do
   satisfyAscii_ (\c -> c == 'v' || c == 'V')
-  skipSome (satisfyAscii isHexDigitChar)
+  skipSome (skipSatisfyAscii isHexDigitChar)
   satisfyAscii_ (== '.')
-  skipSome (satisfyAscii isIPvFutureChar)
-
-
--- | One decimal octet: 1–3 digits with value @0-255@.
-octet :: ParserT st String Word8
-octet = do
-  d0 <- asciiDigit
-  ds <- upTo 2 asciiDigit
-  let v = foldl' (\acc x -> acc * 10 + x) d0 ds
-  if v > 255 then failed else pure (fromIntegral v)
-
-
-asciiDigit :: ParserT st e Int
-asciiDigit = (\c -> fromEnum c - 0x30) <$> satisfyAscii isDigit
-
-
--- | Run @p@ at most @n@ times, collecting results (greedily).
-upTo :: Int -> ParserT st e a -> ParserT st e [a]
-upTo n p
-  | n <= 0 = pure []
-  | otherwise = withOption p (\x -> (x :) <$> upTo (n - 1) p) (pure [])
+  skipSome (skipSatisfyAscii isIPvFutureChar)
 
 
 -- ---------------------------------------------------------------------------
 -- IPv6 assembly (pure)
 -- ---------------------------------------------------------------------------
 
-{- | Turn the captured run of IPv6 characters into eight hextets, expanding a
-single @::@ and any embedded trailing IPv4 literal.  Returns 'Nothing' when the
-bytes do not form a valid address.
--}
-assembleIPv6 :: ByteString -> Maybe IPv6
-assembleIPv6 bs =
-  let (before, afterRaw) = BS.breakSubstring doubleColon bs
-  in if BS.null afterRaw
-      then do
-        hs <- parseGroups True (splitGroups bs)
-        if length hs == 8 then toIPv6 hs else Nothing
-      else
-        let after = BS.drop 2 afterRaw
-        in if doubleColon `BS.isInfixOf` after
-            then Nothing -- more than one "::"
-            else do
-              left <- parseGroups False (splitGroups before)
-              right <- parseGroups True (splitGroups after)
-              let n = length left + length right
-              if n <= 7 -- "::" must stand in for at least one zero hextet
-                then toIPv6 (left ++ replicate (8 - n) 0 ++ right)
-                else Nothing
-
-
--- | Split a colon-separated run into its groups; an empty run yields no groups.
-splitGroups :: ByteString -> [ByteString]
-splitGroups bs
-  | BS.null bs = []
-  | otherwise = BS.split 0x3A bs
-
-
-{- | Parse a non-@::@ run of groups.  Every group is a hextet, except the final
-group which — when @allowV4@ is set — may instead be an embedded IPv4 literal
-contributing two hextets.
--}
-parseGroups :: Bool -> [ByteString] -> Maybe [Word16]
-parseGroups _ [] = Just []
-parseGroups allowV4 groups = go groups
+-- Scan groups directly in the parser input. The validation caller
+-- specializes away the packed values and retains only group and digit counts.
+scanIPv6
+  :: Bool
+  -> Addr#
+  -> Addr#
+  -> (Addr# -> Int -> Int -> Word64 -> Word64 -> StRes# e a)
+  -> State# RealWorld
+  -> StRes# e a
+scanIPv6 save start end success st
+  | doubleColonAt start = afterCompression (plusAddr# start 2#) 0 0 0 0
+  | otherwise = group start 0 (-1) 0 0
   where
-    go [] = Just []
-    go [g] = lastGroup g
-    go (g : rest) = (:) <$> hextet g <*> go rest
-    lastGroup g
-      | allowV4
-      , Just (IPv4 a b c d) <- parseV4Bytes g =
-          Just [combineV4 a b, combineV4 c d]
-      | otherwise = (: []) <$> hextet g
+    peek cur
+      | isTrue# (eqAddr# cur end) = 256##
+      | otherwise = word8ToWord# (indexWord8OffAddr# cur 0#)
 
+    doubleColonAt cur = case peek cur of
+      58## -> case peek (plusAddr# cur 1#) of
+        58## -> True
+        _ -> False
+      _ -> False
 
--- | Parse a complete IPv4 literal, requiring it to consume all of @g@.
-parseV4Bytes :: ByteString -> Maybe IPv4
-parseV4Bytes g = case runParser ipv4Parser g of
-  OK ip rest | BS.null rest -> Just ip
-  _ -> Nothing
+    afterCompression cur !count !compression !upper !lower =
+      case peek cur of
+        46## -> (# st, Fail# #)
+        58## -> (# st, Fail# #)
+        byte
+          | isTrue# (gtWord# (hexNibble byte) 15##) ->
+              finish cur count compression upper lower
+          | otherwise -> group cur count compression upper lower
 
+    group cur !count !compression !upper !lower
+      | count == 8 = (# st, Fail# #)
+      | otherwise = digits cur (0 :: Int) (0 :: Word64)
+      where
+        digits next !width !value = case peek next of
+          46## -> mixed cur count compression upper lower
+          byte
+            | let nibble = hexNibble byte
+            , not (isTrue# (gtWord# nibble 15##)) ->
+                if width == 4
+                  then (# st, Fail# #)
+                  else
+                    let !nextValue = if save then value * 16 + fromIntegral (W# nibble) else 0
+                    in digits (plusAddr# next 1#) (width + 1) nextValue
+            | width == 0 -> (# st, Fail# #)
+            | otherwise ->
+                let !count' = count + 1
+                    !upper' = if save && count < 4 then (upper `unsafeShiftL` 16) .|. value else upper
+                    !lower' = if save && count >= 4 then (lower `unsafeShiftL` 16) .|. value else lower
+                in case byte of
+                    58##
+                      | doubleColonAt next ->
+                          if compression < 0 && count' < 8
+                            then afterCompression (plusAddr# next 2#) count' count' upper' lower'
+                            else (# st, Fail# #)
+                      | otherwise -> group (plusAddr# next 1#) count' compression upper' lower'
+                    _ -> finish next count' compression upper' lower'
 
--- | A single @h16@ hextet: 1–4 hex digits.
-hextet :: ByteString -> Maybe Word16
-hextet g
-  | n >= 1 && n <= 4 && BS.all isHexByte g =
-      Just (BS.foldl' (\acc w -> acc * 16 + hexVal w) 0 g)
-  | otherwise = Nothing
+    -- A dotted quad occupies the last two encoded groups. Reuse the
+    -- bounded IPv4 reader from the start of this group.
+    mixed cur count compression upper lower
+      | count > 6 = (# st, Fail# #)
+      | otherwise = case scanIPv4 cur end of
+          (# (# packed, stop #) | #) -> case peek stop of
+            46## -> (# st, Fail# #)
+            58## -> (# st, Fail# #)
+            byte | isTrue# (gtWord# (hexNibble byte) 15##) ->
+              let value = fromIntegral (W# packed)
+                  upper'
+                    | not save = upper
+                    | count < 3 = (upper `unsafeShiftL` 32) .|. value
+                    | count == 3 = (upper `unsafeShiftL` 16) .|. (value `unsafeShiftR` 16)
+                    | otherwise = upper
+                  lower'
+                    | not save = lower
+                    | count == 3 = value .&. 0xffff
+                    | count >= 4 = (lower `unsafeShiftL` 32) .|. value
+                    | otherwise = lower
+              in finish stop (count + 2) compression upper' lower'
+            _ -> (# st, Fail# #)
+          (# | (# #) #) -> (# st, Fail# #)
+
+    finish stop count compression upper lower
+      | compression < 0 && count /= 8 = (# st, Fail# #)
+      | compression >= 0 && count == 8 = (# st, Fail# #)
+      | otherwise = success stop count compression upper lower
+{-# INLINE scanIPv6 #-}
+
+-- 16 marks a byte outside HEXDIG.
+hexNibble :: Word# -> Word#
+hexNibble byte =
+  let digit = minusWord# byte 48##
+      alpha = minusWord# (or# byte 32##) 97##
+  in if not (isTrue# (gtWord# digit 9##))
+       then digit
+       else if not (isTrue# (gtWord# alpha 5##)) then plusWord# alpha 10## else 16##
+{-# INLINE hexNibble #-}
+
+unpackIPv6 :: Int -> Int -> Word64 -> Word64 -> IPv6
+unpackIPv6 count compression upper lower =
+  if compression < 0
+    then IPv6 (packed 0) (packed 1) (packed 2) (packed 3) (packed 4) (packed 5) (packed 6) (packed 7)
+    else IPv6 (field 0) (field 1) (field 2) (field 3) (field 4) (field 5) (field 6) (field 7)
   where
-    n = BS.length g
-
-
-toIPv6 :: [Word16] -> Maybe IPv6
-toIPv6 [a, b, c, d, e, f, g, h] = Just (IPv6 a b c d e f g h)
-toIPv6 _ = Nothing
-
-
--- | Pack two IPv4 octets into one hextet.
-combineV4 :: Word8 -> Word8 -> Word16
-combineV4 hi lo = fromIntegral hi * 256 + fromIntegral lo
-
-
-doubleColon :: ByteString
-doubleColon = BS.pack [0x3A, 0x3A]
+    -- Align once after appending the encoded groups to each word.
+    !high = if count > 0 && count < 4 then upper `unsafeShiftL` (16 * (4 - count)) else upper
+    !low = if count > 4 && count < 8 then lower `unsafeShiftL` (16 * (8 - count)) else lower
+    missing = 8 - count
+    field position
+      | position < compression = packed position
+      | position < compression + missing = 0
+      | otherwise = packed (position - missing)
+    packed position
+      | position < 4 = fromIntegral (high `unsafeShiftR` (48 - 16 * position))
+      | otherwise = fromIntegral (low `unsafeShiftR` (112 - 16 * position))
 
 
 -- ---------------------------------------------------------------------------
@@ -250,11 +369,11 @@ renderIPv6 (IPv6 a b c d e f g h) =
   let hs = [a, b, c, d, e, f, g, h]
       (start, len) = bestZeroRun hs
   in if len >= 2
-      then
-        joinColon (map hx (take start hs))
-          <> M.string8 "::"
-          <> joinColon (map hx (drop (start + len) hs))
-      else joinColon (map hx hs)
+       then
+         joinColon (map hx (take start hs))
+           <> M.string8 "::"
+           <> joinColon (map hx (drop (start + len) hs))
+       else joinColon (map hx hs)
   where
     hx w = M.string8 (showHex w "")
     joinColon = M.intersperse (M.char7 ':')
@@ -317,12 +436,43 @@ instance WireGrammar IPAddress where
 
 -- | Parse a complete IPv4 address from a 'ByteString'.
 parseIPv4 :: ByteString -> Either String IPv4
-parseIPv4 = first (grammarParseErrorToString "IPv4 address") . parseGrammar
+parseIPv4 bytes = case parseBareIPv4 bytes of
+  Just address -> Right address
+  Nothing -> first (grammarParseErrorToString "IPv4 address") (parseGrammar bytes)
+
+
+-- | Parse a complete dotted quad directly from a bare byte slice.
+parseBareIPv4 :: ByteString -> Maybe IPv4
+parseBareIPv4 (BSI.BS fp@(ForeignPtr start _) (I# size)) =
+  BSI.accursedUnutterablePerformIO $ withForeignPtr fp $ \_ ->
+    let end = plusAddr# start size
+        result = case scanIPv4 start end of
+          (# (# packed, stop #) | #)
+            | isTrue# (eqAddr# stop end) -> Just $! unpackIPv4 packed
+          _ -> Nothing
+    in pure $! result
+{-# INLINE parseBareIPv4 #-}
 
 
 -- | Parse a complete IPv6 address from a 'ByteString'.
 parseIPv6 :: ByteString -> Either String IPv6
-parseIPv6 = first (grammarParseErrorToString "IPv6 address") . parseGrammar
+parseIPv6 wire = withBareIPv6 wire Right $
+  first (grammarParseErrorToString "IPv6 address") (parseGrammar wire)
+
+-- | Parse a complete IPv6 literal directly from a bare byte slice.
+parseBareIPv6 :: ByteString -> Maybe IPv6
+parseBareIPv6 wire = withBareIPv6 wire Just Nothing
+{-# INLINE parseBareIPv6 #-}
+
+withBareIPv6 :: ByteString -> (IPv6 -> a) -> a -> a
+withBareIPv6 (BSI.BS fp@(ForeignPtr start _) (I# size)) success fallback =
+  BSI.accursedUnutterablePerformIO $ withForeignPtr fp $ \_ -> IO $ \st ->
+    let end = plusAddr# start size
+    in case scanIPv6Value start end st of
+      (# st', OK# address stop #) | isTrue# (eqAddr# stop end) ->
+        (# st', success address #)
+      (# st', _ #) -> (# st', fallback #)
+{-# INLINE withBareIPv6 #-}
 
 
 -- | Parse a complete IP-literal of any form from a 'ByteString'.
@@ -333,10 +483,6 @@ parseIPAddress = first (grammarParseErrorToString "IP address") . parseGrammar
 -- ---------------------------------------------------------------------------
 -- Character classes
 -- ---------------------------------------------------------------------------
-
-isIPv6Char :: Char -> Bool
-isIPv6Char c = isHexDigitChar c || c == ':' || c == '.'
-
 
 isHexDigitChar :: Char -> Bool
 isHexDigitChar c =
@@ -361,18 +507,3 @@ isUnreservedChar c =
 
 isSubDelimChar :: Char -> Bool
 isSubDelimChar c = c `elem` ("!$&'()*+,;=" :: String)
-
-
-isHexByte :: Word8 -> Bool
-isHexByte w =
-  (w >= 0x30 && w <= 0x39)
-    || (w >= 0x61 && w <= 0x66)
-    || (w >= 0x41 && w <= 0x46)
-
-
-hexVal :: Word8 -> Word16
-hexVal w
-  | w >= 0x30 && w <= 0x39 = fromIntegral (w - 0x30)
-  | w >= 0x61 && w <= 0x66 = fromIntegral (w - 0x61) + 10
-  | w >= 0x41 && w <= 0x46 = fromIntegral (w - 0x41) + 10
-  | otherwise = 0

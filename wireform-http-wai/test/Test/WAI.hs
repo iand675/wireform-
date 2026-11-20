@@ -11,6 +11,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.CaseInsensitive (mk)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Network.HTTP.Client qualified as Client
 import Network.HTTP.Message qualified as U
 import Network.HTTP.WAI
 import Network.Wai qualified as Wai
@@ -56,11 +57,21 @@ tests =
             , testToWaiRequestHostFromAuthority
             , testToWaiRequestEmptyTarget
             ]
+      , testWaiTransportEmptyQuery
       , describe "Error handling" $
           sequence_
             [ testWaiAppDidNotRespond
             ]
       ]
+
+
+testWaiTransportEmptyQuery :: Spec
+testWaiTransportEmptyQuery = it "passes a bare query delimiter to the WAI application" $ do
+  let app req respond =
+        respond (Wai.responseLBS WAIHttp.status200 [] (LBS.fromStrict (Wai.rawQueryString req)))
+      clientReq = Client.request U.mGet (Client.staticURI "http://example.com/record?#") Client.emptyStream
+  response <- Client.sendRaw (waiTransport app) clientReq
+  Client.popperBytes (Client.bodyPopper response) `shouldReturn` "?"
 
 
 ------------------------------------------------------------------------

@@ -1,0 +1,273 @@
+Warning: The package list for 'hackage.haskell.org' is 24 days old.
+Run 'cabal update' to get the latest list of available packages.
+Resolving dependencies...
+Build profile: -w ghc-9.10.3 -O2
+In order, the following will be built (use -v for more details):
+ - wireform-proto-0.3.0.0 (lib) (configuration changed)
+ - wireform-proto-0.3.0.0 (bench:compare-bench) (configuration changed)
+Configuring library for wireform-proto-0.3.0.0...
+Preprocessing library for wireform-proto-0.3.0.0...
+Building library for wireform-proto-0.3.0.0...
+[18 of 70] Compiling Proto.Internal.FieldPresence ( src/Proto/Internal/FieldPresence.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/FieldPresence.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/FieldPresence.dyn_o ) [Source file changed]
+[32 of 70] Compiling Proto.CodeGen    ( src/Proto/CodeGen.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen.dyn_o ) [Proto.Internal.FieldPresence changed]
+[68 of 70] Compiling Proto.TH         ( src/Proto/TH.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH.dyn_o ) [Proto.Internal.FieldPresence changed]
+src/Proto/TH.hs:609:28: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘fields’ shadows the existing binding
+      bound at src/Proto/TH.hs:585:5
+    |
+609 |             MEExtend owner fields -> extendToDecls (scPackage childScope) owner fields
+    |                            ^^^^^^
+
+Warning: -rtsopts and -with-rtsopts have no effect with -shared.
+    Call hs_init_ghc() from your main() function to set these options.
+Configuring benchmark 'compare-bench' for wireform-proto-0.3.0.0...
+Preprocessing benchmark 'compare-bench' for wireform-proto-0.3.0.0...
+Building benchmark 'compare-bench' for wireform-proto-0.3.0.0...
+[5 of 5] Linking /private/tmp/wireform-proto-release-2026-11-06/repo/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/b/compare-bench/opt/build/compare-bench/compare-bench [Library changed]
+Running 1 benchmarks...
+Benchmark compare-bench: RUNNING...
+benchmarking Small/encode/wireform
+time                 22.47 ns   (22.10 ns .. 22.74 ns)
+                     0.998 R²   (0.997 R² .. 0.999 R²)
+mean                 22.33 ns   (22.02 ns .. 22.65 ns)
+std dev              714.6 ps   (554.0 ps .. 864.0 ps)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              127.906    (127.906 .. 127.906)
+  y                  3084.509   (2872.244 .. 3273.332)
+variance introduced by outliers: 50% (moderately inflated)
+
+benchmarking Small/encode/proto-lens
+time                 161.8 ns   (159.0 ns .. 164.8 ns)
+                     0.997 R²   (0.995 R² .. 0.998 R²)
+mean                 162.3 ns   (160.0 ns .. 164.9 ns)
+std dev              6.173 ns   (4.780 ns .. 7.823 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              5303.843   (5303.840 .. 5303.845)
+  y                  3136.968   (2929.389 .. 3337.624)
+variance introduced by outliers: 55% (severely inflated)
+
+benchmarking Small/decode/wireform
+time                 41.65 ns   (41.02 ns .. 42.25 ns)
+                     0.997 R²   (0.996 R² .. 0.998 R²)
+mean                 41.69 ns   (41.09 ns .. 42.64 ns)
+std dev              1.578 ns   (1.135 ns .. 1.993 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              336.000    (336.000 .. 336.001)
+  y                  3059.966   (2866.294 .. 3273.209)
+variance introduced by outliers: 57% (severely inflated)
+
+benchmarking Small/decode/proto-lens
+time                 95.76 ns   (93.66 ns .. 98.19 ns)
+                     0.995 R²   (0.992 R² .. 0.998 R²)
+mean                 97.40 ns   (94.72 ns .. 99.53 ns)
+std dev              5.181 ns   (2.926 ns .. 7.195 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              976.000    (975.999 .. 976.002)
+  y                  3065.216   (2822.333 .. 3280.984)
+variance introduced by outliers: 71% (severely inflated)
+
+benchmarking Small/roundtrip/wireform
+time                 60.61 ns   (59.26 ns .. 61.99 ns)
+                     0.995 R²   (0.993 R² .. 0.997 R²)
+mean                 59.81 ns   (58.15 ns .. 61.00 ns)
+std dev              3.334 ns   (2.295 ns .. 4.969 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              431.906    (431.905 .. 431.907)
+  y                  3118.423   (2872.628 .. 3333.964)
+variance introduced by outliers: 74% (severely inflated)
+
+benchmarking Small/roundtrip/proto-lens
+time                 270.8 ns   (263.1 ns .. 280.1 ns)
+                     0.990 R²   (0.979 R² .. 0.997 R²)
+mean                 276.6 ns   (265.8 ns .. 304.9 ns)
+std dev              47.32 ns   (11.81 ns .. 77.95 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              6215.844   (6215.838 .. 6215.848)
+  y                  3093.791   (2857.368 .. 3359.803)
+variance introduced by outliers: 96% (severely inflated)
+
+benchmarking Medium/encode/wireform
+time                 62.31 ns   (59.93 ns .. 65.24 ns)
+                     0.982 R²   (0.969 R² .. 0.992 R²)
+mean                 66.28 ns   (62.87 ns .. 73.78 ns)
+std dev              10.38 ns   (6.786 ns .. 14.47 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              432.000    (431.999 .. 432.001)
+  y                  3009.568   (2762.320 .. 3238.796)
+variance introduced by outliers: 96% (severely inflated)
+
+benchmarking Medium/encode/proto-lens
+time                 268.9 ns   (266.0 ns .. 272.2 ns)
+                     0.998 R²   (0.997 R² .. 0.999 R²)
+mean                 271.5 ns   (267.9 ns .. 278.1 ns)
+std dev              11.36 ns   (8.589 ns .. 15.64 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              6215.653   (6215.649 .. 6215.656)
+  y                  3105.876   (2877.044 .. 3312.270)
+variance introduced by outliers: 58% (severely inflated)
+
+benchmarking Medium/decode/wireform
+time                 116.3 ns   (109.0 ns .. 123.1 ns)
+                     0.984 R²   (0.976 R² .. 0.991 R²)
+mean                 117.3 ns   (109.6 ns .. 122.3 ns)
+std dev              14.59 ns   (11.78 ns .. 18.87 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              752.000    (751.999 .. 752.002)
+  y                  3054.003   (2806.382 .. 3361.269)
+variance introduced by outliers: 93% (severely inflated)
+
+benchmarking Medium/decode/proto-lens
+time                 236.5 ns   (231.3 ns .. 243.0 ns)
+                     0.996 R²   (0.994 R² .. 0.998 R²)
+mean                 239.3 ns   (233.6 ns .. 248.9 ns)
+std dev              12.71 ns   (9.791 ns .. 17.10 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              2440.002   (2439.997 .. 2440.007)
+  y                  3144.643   (2929.390 .. 3380.779)
+variance introduced by outliers: 69% (severely inflated)
+
+benchmarking Medium/roundtrip/wireform
+time                 160.1 ns   (154.9 ns .. 165.3 ns)
+                     0.994 R²   (0.990 R² .. 0.997 R²)
+mean                 157.5 ns   (154.6 ns .. 161.7 ns)
+std dev              8.319 ns   (6.395 ns .. 11.23 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              1152.000   (1151.998 .. 1152.003)
+  y                  3107.239   (2868.945 .. 3318.273)
+variance introduced by outliers: 70% (severely inflated)
+
+benchmarking Medium/roundtrip/proto-lens
+time                 559.7 ns   (550.1 ns .. 570.0 ns)
+                     0.996 R²   (0.994 R² .. 0.997 R²)
+mean                 563.7 ns   (553.6 ns .. 572.9 ns)
+std dev              22.55 ns   (16.26 ns .. 32.71 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              8591.792   (8591.783 .. 8591.801)
+  y                  3007.158   (2720.980 .. 3261.313)
+variance introduced by outliers: 54% (severely inflated)
+
+benchmarking Nested/encode/wireform
+time                 42.18 ns   (41.06 ns .. 43.47 ns)
+                     0.992 R²   (0.988 R² .. 0.997 R²)
+mean                 44.36 ns   (42.66 ns .. 47.91 ns)
+std dev              4.957 ns   (3.733 ns .. 6.801 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              288.000    (288.000 .. 288.000)
+  y                  3135.649   (2950.939 .. 3360.770)
+variance introduced by outliers: 92% (severely inflated)
+
+benchmarking Nested/encode/proto-lens
+time                 342.2 ns   (338.5 ns .. 351.4 ns)
+                     0.995 R²   (0.991 R² .. 0.997 R²)
+mean                 343.4 ns   (337.6 ns .. 353.7 ns)
+std dev              17.35 ns   (10.43 ns .. 25.35 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              10752.000  (10751.995 .. 10752.007)
+  y                  3098.781   (2842.383 .. 3363.963)
+variance introduced by outliers: 66% (severely inflated)
+
+benchmarking Nested/decode/wireform
+time                 80.59 ns   (78.44 ns .. 82.40 ns)
+                     0.995 R²   (0.992 R² .. 0.998 R²)
+mean                 81.37 ns   (79.24 ns .. 84.94 ns)
+std dev              5.223 ns   (3.767 ns .. 7.182 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              672.000    (671.999 .. 672.001)
+  y                  3061.465   (2826.530 .. 3310.731)
+variance introduced by outliers: 79% (severely inflated)
+
+benchmarking Nested/decode/proto-lens
+time                 174.6 ns   (169.3 ns .. 181.2 ns)
+                     0.988 R²   (0.979 R² .. 0.995 R²)
+mean                 182.3 ns   (172.1 ns .. 192.3 ns)
+std dev              20.13 ns   (16.03 ns .. 25.20 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              1856.000   (1855.997 .. 1856.003)
+  y                  3073.451   (2872.622 .. 3274.982)
+variance introduced by outliers: 91% (severely inflated)
+
+benchmarking Nested/roundtrip/wireform
+time                 120.7 ns   (112.5 ns .. 126.2 ns)
+                     0.984 R²   (0.981 R² .. 0.994 R²)
+mean                 118.6 ns   (112.6 ns .. 125.2 ns)
+std dev              14.48 ns   (10.31 ns .. 16.86 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              928.000    (927.998 .. 928.002)
+  y                  3110.427   (2851.756 .. 3332.454)
+variance introduced by outliers: 93% (severely inflated)
+
+benchmarking Nested/roundtrip/proto-lens
+time                 611.4 ns   (566.0 ns .. 671.7 ns)
+                     0.967 R²   (0.949 R² .. 0.998 R²)
+mean                 599.7 ns   (560.7 ns .. 661.4 ns)
+std dev              99.18 ns   (23.82 ns .. 157.3 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              12544.002  (12543.991 .. 12544.011)
+  y                  3099.123   (2882.580 .. 3397.062)
+variance introduced by outliers: 96% (severely inflated)
+
+benchmarking Repeated/encode/wireform
+time                 851.2 ns   (829.6 ns .. 867.8 ns)
+                     0.996 R²   (0.994 R² .. 0.998 R²)
+mean                 847.1 ns   (828.9 ns .. 871.6 ns)
+std dev              45.62 ns   (30.78 ns .. 73.74 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              6511.263   (6511.247 .. 6511.278)
+  y                  3169.083   (2960.657 .. 3472.972)
+variance introduced by outliers: 67% (severely inflated)
+
+benchmarking Repeated/encode/proto-lens
+time                 3.415 μs   (3.293 μs .. 3.521 μs)
+                     0.994 R²   (0.991 R² .. 0.997 R²)
+mean                 3.434 μs   (3.346 μs .. 3.537 μs)
+std dev              220.3 ns   (173.5 ns .. 260.6 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              75662.864  (75662.820 .. 75662.914)
+  y                  3387.924   (3035.963 .. 3746.739)
+variance introduced by outliers: 71% (severely inflated)
+
+benchmarking Repeated/decode/wireform
+time                 1.703 μs   (1.657 μs .. 1.754 μs)
+                     0.995 R²   (0.992 R² .. 0.998 R²)
+mean                 1.692 μs   (1.643 μs .. 1.732 μs)
+std dev              92.54 ns   (57.96 ns .. 133.8 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              13992.000  (13991.973 .. 13992.029)
+  y                  3068.887   (2799.274 .. 3344.293)
+variance introduced by outliers: 66% (severely inflated)
+
+benchmarking Repeated/decode/proto-lens
+time                 2.765 μs   (2.711 μs .. 2.823 μs)
+                     0.996 R²   (0.994 R² .. 0.998 R²)
+mean                 2.804 μs   (2.758 μs .. 2.902 μs)
+std dev              143.9 ns   (100.2 ns .. 204.6 ns)
+allocated:           1.000 R²   (1.000 R² .. 1.000 R²)
+  iters              22559.999  (22559.953 .. 22560.051)
+  y                  3078.780   (2850.175 .. 3444.571)
+variance introduced by outliers: 62% (severely inflated)
+
+Benchmark compare-bench: FINISH
+/private/tmp/wireform-proto-release-2026-11-06/repo/wireform-proto/bench-results/summary/proto-vs-proto-lens-decode.json: mapped 8/8 cell(s) [wireform-proto, proto-lens], 8 changed
+  wireform-proto | Small: 41.65 -> 41.69 Nanos
+  wireform-proto | Medium: 111.48 -> 117.28 Nanos
+  wireform-proto | Nested: 80.99 -> 81.37 Nanos
+  wireform-proto | Repeated: 1421.86 -> 1691.53 Nanos
+  proto-lens | Small: 81.64 -> 97.4 Nanos
+  proto-lens | Medium: 211.81 -> 239.33 Nanos
+  proto-lens | Nested: 151.4 -> 182.28 Nanos
+  proto-lens | Repeated: 2292.94 -> 2803.96 Nanos
+/private/tmp/wireform-proto-release-2026-11-06/repo/wireform-proto/bench-results/summary/proto-vs-proto-lens-encode.json: mapped 8/8 cell(s) [wireform-proto, proto-lens], 8 changed
+  wireform-proto | Small: 26.57 -> 22.33 Nanos
+  wireform-proto | Medium: 72.44 -> 66.28 Nanos
+  wireform-proto | Nested: 55.47 -> 44.36 Nanos
+  wireform-proto | Repeated: 1038.04 -> 847.07 Nanos
+  proto-lens | Small: 150.58 -> 162.32 Nanos
+  proto-lens | Medium: 286.02 -> 271.55 Nanos
+  proto-lens | Nested: 332.82 -> 343.43 Nanos
+  proto-lens | Repeated: 2758.21 -> 3434.05 Nanos
+==> wireform-proto:bench:compare-bench
+    $ cabal bench --project-file=cabal.project.proto-bench wireform-proto:bench:compare-bench --benchmark-options=--json /private/tmp/wireform-proto-release-2026-11-06/repo/dist-stats/bench-raw/proto.json --time-limit 0.2 --resamples 100 --regress allocated:iters +RTS -T -RTS
+    $ python3 /private/tmp/wireform-proto-release-2026-11-06/repo/scripts/distill-bench.py /private/tmp/wireform-proto-release-2026-11-06/repo/wireform-proto/bench-results/summary/proto-vs-proto-lens-decode.json /private/tmp/wireform-proto-release-2026-11-06/repo/dist-stats/bench-raw/proto.json --map wireform-proto|Small=Small/decode/wireform --map proto-lens|Small=Small/decode/proto-lens --map wireform-proto|Medium=Medium/decode/wireform --map proto-lens|Medium=Medium/decode/proto-lens --map wireform-proto|Nested=Nested/decode/wireform --map proto-lens|Nested=Nested/decode/proto-lens --map wireform-proto|Repeated=Repeated/decode/wireform --map proto-lens|Repeated=Repeated/decode/proto-lens --strict --dry-run
+    $ python3 /private/tmp/wireform-proto-release-2026-11-06/repo/scripts/distill-bench.py /private/tmp/wireform-proto-release-2026-11-06/repo/wireform-proto/bench-results/summary/proto-vs-proto-lens-encode.json /private/tmp/wireform-proto-release-2026-11-06/repo/dist-stats/bench-raw/proto.json --map wireform-proto|Small=Small/encode/wireform --map proto-lens|Small=Small/encode/proto-lens --map wireform-proto|Medium=Medium/encode/wireform --map proto-lens|Medium=Medium/encode/proto-lens --map wireform-proto|Nested=Nested/encode/wireform --map proto-lens|Nested=Nested/encode/proto-lens --map wireform-proto|Repeated=Repeated/encode/wireform --map proto-lens|Repeated=Repeated/encode/proto-lens --strict --dry-run
+
+OK: processed 1 bench target(s)

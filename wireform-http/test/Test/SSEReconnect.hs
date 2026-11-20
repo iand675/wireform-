@@ -19,7 +19,6 @@ import Network.HTTP.Client.BodyStream qualified as BSm
 import Network.HTTP.Client.Protocol (ProtocolInfo (..))
 import Network.HTTP.Client.Request (Request, get)
 import Network.HTTP.Client.Request qualified as WReq
-import Network.HTTP.Client.Response (RawResponse (..))
 import Network.HTTP.Client.Response qualified as Resp
 import Network.HTTP.Client.SSE
 import Network.HTTP.Client.Send (prepareRequest)
@@ -62,7 +61,7 @@ mkTransport script = do
         let (st, hdrs, body) = next
         popper <- BSm.popperFromStrict body
         pure
-          RawResponse
+          Resp.RawResponse
             { Resp.statusCode = st
             , Resp.headers = hdrs
             , Resp.bodyPopper = popper
@@ -130,6 +129,62 @@ unit_resumes_with_last_event_id = it
     (ids !! 2) `shouldBe` (Just "3")
 
 
+unit_commits_id_only_blocks :: Spec
+unit_commits_id_only_blocks = it "carries ID-only updates across connections and discards an unfinished ID" $ do
+  (t, idsRef) <- mkTransport
+    [ (S.status200, eventStreamHeaders, "id: ready\r\n\r\nid: unfinished\r\n")
+    , (S.status200, eventStreamHeaders, "data: next\n\n")
+    , (S.status204, [], "")
+    ]
+  req <- mkRequest
+  events <- withReconnectingSSE t req defaultReconnectPolicy{rpInitialRetryMs = 0} $ \pop -> drainAt pop 5
+  map sseEventId events `shouldBe` [Just "ready"]
+  reverse <$> readIORef idsRef `shouldReturn` [Nothing, Just "ready", Just "ready"]
+
+
+unit_empty_id_clears_seed :: Spec
+unit_empty_id_clears_seed = it "removes Last-Event-ID after a blank-line-terminated empty ID" $ do
+  (t, idsRef) <- mkTransport
+    [ (S.status200, eventStreamHeaders, "data: seeded\n\n")
+    , (S.status200, eventStreamHeaders, "id:\n\nid: unfinished\n")
+    , (S.status200, eventStreamHeaders, "data: reset\n\n")
+    , (S.status204, [], "")
+    ]
+  req <- WReq.setHeader H.hLastEventID "seed" <$> mkRequest
+  events <- withReconnectingSSE t req defaultReconnectPolicy{rpInitialRetryMs = 0} $ \pop -> drainAt pop 5
+  map sseEventId events `shouldBe` [Just "seed", Just ""]
+  reverse <$> readIORef idsRef `shouldReturn` [Just "seed", Just "seed", Nothing, Nothing]
+
+
+unit_repairs_utf8_in_cursor :: Spec
+unit_repairs_utf8_in_cursor = it "replays the decoded UTF-8 ID and ignores a later ID containing NUL" $ do
+  let raw = "id: " <> BS.pack [0xF0, 0x9F] <> "\n\nid: invalid\0id\ndata: event\n\n"
+      replacement = BS.pack [0xEF, 0xBF, 0xBD]
+  (t, idsRef) <- mkTransport [(S.status200, eventStreamHeaders, raw), (S.status204, [], "")]
+  req <- mkRequest
+  events <- withReconnectingSSE t req defaultReconnectPolicy{rpInitialRetryMs = 0} $ \pop -> drainAt pop 5
+  map sseEventId events `shouldBe` [Just replacement]
+  reverse <$> readIORef idsRef `shouldReturn` [Nothing, Just replacement]
+
+
+unit_ignores_unusable_resume_seed :: Spec
+unit_ignores_unusable_resume_seed = it "omits malformed, repeated or connection-scoped caller cursors" $ do
+  req <- mkRequest
+  let seeds =
+        [ ([(H.hLastEventID, BS.singleton 0xFF)], Just "learned")
+        , ([(H.hLastEventID, "first"), (H.hLastEventID, "second")], Just "learned")
+        , ([(H.hLastEventID, "local"), (H.hConnection, "last-event-id")], Nothing)
+        ]
+  mapM_ (\(fields, replay) -> do
+    (t, idsRef) <- mkTransport
+      [ (S.status200, eventStreamHeaders, "id: learned\n\n")
+      , (S.status204, [], "")
+      ]
+    _ <- withReconnectingSSE t req{WReq.headers = fields}
+      defaultReconnectPolicy{rpInitialRetryMs = 0} $ \pop -> drainAt pop 1
+    reverse <$> readIORef idsRef `shouldReturn` [Nothing, replay]) seeds
+
+
 unit_204_stops :: Spec
 unit_204_stops = it
   "204 No Content from the first attempt stops reconnecting"
@@ -177,6 +232,10 @@ tests =
   describe "Network.HTTP.Client.SSE.Reconnect" $
     sequence_
       [ unit_resumes_with_last_event_id
+      , unit_commits_id_only_blocks
+      , unit_empty_id_clears_seed
+      , unit_repairs_utf8_in_cursor
+      , unit_ignores_unusable_resume_seed
       , unit_204_stops
       , unit_max_attempts
       ]

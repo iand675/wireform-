@@ -1,0 +1,8 @@
+edition = "2024";
+package wireform.option_fixture;
+
+import option "option_policy.proto";
+
+message InvalidOptionImport {
+  .wireform.option_fixture.OptionOnlyMessage payload = 1;
+}

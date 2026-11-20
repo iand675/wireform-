@@ -19,6 +19,7 @@ module Network.HTTP.Client.Media (
   MediaType (..),
   mediaTypeBytes,
   parseMediaType,
+  parseMediaRange,
   renderMediaType,
   matches,
   matchesAny,
@@ -45,10 +46,12 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.Char (toLower)
 import Data.List qualified as List
 import Data.String (IsString (..))
+import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Short qualified as ST
 import Network.HTTP.ContentNegotiation qualified as Hermes
-import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Headers.Mason qualified as M
+import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
 import Network.HTTP.Types.Header qualified as H
 
 
@@ -70,7 +73,7 @@ data MediaType = MediaType
 instance. Parameters are parsed if present.
 -}
 instance IsString MediaType where
-  fromString s = case parseMediaType (BS8.pack s) of
+  fromString s = case parseMediaRange (BS8.pack s) of
     Right mt -> mt
     Left _ -> MediaType (BS8.pack (map toLower s)) "" []
 
@@ -79,21 +82,29 @@ mediaTypeBytes :: MediaType -> ByteString
 mediaTypeBytes = renderMediaType
 
 
-{- | Parse a @Content-Type@ value using hermes's
-'Hermes.mediaRangeParser', then project into the wireform
-'MediaType' shape. Trailing whitespace is tolerated.
--}
+-- | Parse a concrete @Content-Type@ value, including any parameters.
 parseMediaType :: ByteString -> Either String MediaType
-parseMediaType bs0 =
-  let bs = BS.dropWhileEnd (== 0x20) (BS.dropWhile (== 0x20) bs0)
-  in case runParser Hermes.mediaRangeParser bs of
+parseMediaType = parseMediaValue "Content-Type" Hermes.mediaTypeWithParametersParser
+
+
+-- | Parse one media range, including a possible wildcard and parameters.
+parseMediaRange :: ByteString -> Either String MediaType
+parseMediaRange = parseMediaValue "media range" Hermes.mediaRangeParser
+
+
+parseMediaValue :: String -> ParserT st String Hermes.MediaRange -> ByteString -> Either String MediaType
+parseMediaValue name parser bs0 =
+  let bs = BS.dropWhile isOWS bs0
+  in case runParser parser bs of
        OK r leftover
-         | BS.all (\b -> b == 0x20 || b == 0x09) leftover ->
+         | BS.all isOWS leftover ->
              Right (fromHermesRange r)
          | otherwise ->
-             Left ("trailing input after Content-Type: " <> show leftover)
-       Fail -> Left ("malformed Content-Type: " <> show bs0)
+             Left ("trailing input after " <> name <> ": " <> show leftover)
+       Fail -> Left ("malformed " <> name <> ": " <> show bs0)
        Err e -> Left e
+  where
+    isOWS b = b == 0x20 || b == 0x09
 
 
 {- | Convert a hermes 'MediaRange' to our 'MediaType'. Hermes uses
@@ -105,27 +116,38 @@ the rest of the Wire client.
 fromHermesRange :: Hermes.MediaRange -> MediaType
 fromHermesRange r =
   let mt = Hermes.mediaType r
-      stBytes = TE.encodeUtf8 . ST.toText
+      stBytes = ST.toByteString
       normalise b
         | BS.null b = "*"
-        | otherwise = BS8.map toLower b
+        | otherwise = lowerToken b
   in MediaType
        { mtType = normalise (stBytes (Hermes.mediaBaseType mt))
        , mtSubType = normalise (stBytes (Hermes.mediaSubtype mt))
        , mtParameters =
-           [ (BS8.map toLower (stBytes k), stBytes v)
-           | (k, v) <- Hermes.mediaParams r
-           ]
+           map (\(k, v) -> (lowerToken (stBytes k), opaqueBytes v)) (Hermes.mediaParams r)
        }
+  where
+    -- The parser has already validated these names as ASCII tokens.
+    lowerToken bytes
+      | BS.any isUpperAscii bytes = BS.map lowerAscii bytes
+      | otherwise = bytes
+    isUpperAscii w = w >= 65 && w <= 90
+    lowerAscii w
+      | isUpperAscii w = w + 32
+      | otherwise = w
+    opaqueBytes value
+      | T.isAscii (ST.toText value) = ST.toByteString value
+      | otherwise = M.toStrictByteString (T.foldr (\c rest -> M.char8 c <> rest) mempty (ST.toText value))
 
 
 renderMediaType :: MediaType -> ByteString
-renderMediaType m =
-  let core = mtType m <> "/" <> mtSubType m
-      params =
-        mconcat
-          ["; " <> k <> "=" <> v | (k, v) <- mtParameters m, not (BS.null k)]
-  in core <> params
+renderMediaType m = M.toStrictByteString $
+  M.byteString (mtType m) <> "/" <> M.byteString (mtSubType m) <> foldMap renderParam (mtParameters m)
+  where
+    renderParam (key, value)
+      | BS.null key = mempty
+      | otherwise =
+          "; " <> M.byteString key <> "=" <> Hermes.renderMediaParameterValue (ST.fromText (TE.decodeLatin1 value))
 
 
 -- | Drop any media-type parameters, leaving the bare @type\/subtype@.
@@ -207,15 +229,14 @@ instance Exception DecodeError
 -- ---------------------------------------------------------------------------
 
 {- | Extract a 'MediaType' from a header list. Returns
-@application\/octet-stream@ if the header is absent (RFC 9110
-§ 8.3 default).
+@application\/octet-stream@ if the field is absent, malformed, or repeated.
 -}
 contentTypeOf :: H.Headers -> MediaType
-contentTypeOf hdrs = case H.lookupHeader H.hContentType hdrs of
-  Nothing -> MediaType "application" "octet-stream" []
-  Just v -> case parseMediaType v of
-    Right mt -> mt
-    Left _ -> MediaType "application" "octet-stream" []
+contentTypeOf hdrs = case H.lookupSingletonHeader H.hContentType hdrs of
+  Right (Just v) -> either (const defaultMediaType) id (parseMediaType v)
+  _ -> defaultMediaType
+  where
+    defaultMediaType = MediaType "application" "octet-stream" []
 
 
 {- | Render a list of @(media-type, quality)@ pairs as an @Accept@

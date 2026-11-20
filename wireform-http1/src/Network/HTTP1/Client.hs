@@ -27,19 +27,19 @@ module Network.HTTP1.Client (
   sendRequest,
   sendRequestOn,
   sendRequestOnWithExpect,
+  sendRequestOnWithContinueTimeout,
 
   -- * Connection introspection
   clientConnectionSocket,
+  clientConnectionCanReuse,
 ) where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket, bracketOnError, catch, mask_, onException)
+import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Network.HTTP1.Chunked (
-  encodeChunk,
-  encodeLastChunk,
-  encodeLastChunkWithTrailers,
- )
+import Data.IORef (newIORef, readIORef, writeIORef)
+import GHC.Clock (getMonotonicTimeNSec)
 import Network.HTTP1.Connection
 import Network.HTTP1.Encode (requestBuilder)
 import Network.HTTP1.Parser
@@ -83,17 +83,21 @@ clientConnectionSocket :: ClientConnection -> Maybe Socket
 clientConnectionSocket (ClientConnection c) = connectionSocket c
 
 
+-- | Whether the protocol permits reuse after the current response is drained.
+clientConnectionCanReuse :: ClientConnection -> IO Bool
+clientConnectionCanReuse (ClientConnection conn) = connectionCanReuse conn
+
+
 openClientConnection :: ClientConfig -> IO ClientConnection
 openClientConnection cfg = do
   let hints = NS.defaultHints {NS.addrSocketType = NS.Stream}
   addrs <- NS.getAddrInfo (Just hints) (Just (clientHost cfg)) (Just (clientPort cfg))
   case addrs of
     [] -> error "wireform-http1: no address found"
-    (addr : _) -> do
-      sock <- NS.openSocket addr
+    (addr : _) -> bracketOnError (NS.openSocket addr) NS.close $ \sock -> do
       NS.connect sock (NS.addrAddress addr)
       NS.setSocketOption sock NS.NoDelay 1
-      ClientConnection <$> newConnectionFromSocket sock
+      ClientConnection <$> newConnectionFromOwnedSocket sock
 
 
 closeClientConnection :: ClientConnection -> IO ()
@@ -122,7 +126,9 @@ sendRequest cfg req = withClientConnection cfg $ \conn -> do
   r <- sendRequestOn conn req
   case r of
     Left e -> pure (Left e)
-    Right resp -> do
+    Right resp -> materialize resp `catch` \(ProtocolException e) -> pure (Left e)
+  where
+    materialize resp = do
       bs <- collectBody (responseBody resp)
       trs <- responseTrailers resp
       pure $
@@ -153,55 +159,68 @@ collectBody = \case
 pipelining). The returned response's body is a streaming producer;
 you MUST consume it (or call 'drainBody') before sending another
 request on the same connection — otherwise the next response will
-be misframed.
+be misframed. A close-delimited response ends the connection when
+the body reaches EOF.
 -}
 sendRequestOn :: ClientConnection -> Request -> IO (Either ParseError Response)
-sendRequestOn (ClientConnection conn) req = do
+sendRequestOn = sendRequestOnWithContinueTimeout 1_000_000
+
+
+-- | Like 'sendRequestOn', with a per-request continue timeout in microseconds.
+sendRequestOnWithContinueTimeout :: Int -> ClientConnection -> Request -> IO (Either ParseError Response)
+sendRequestOnWithContinueTimeout timeoutUs client req
+  | requestVersion req == HTTP_1_1
+  , requestCarriesBody req
+  , expectsContinue (requestHeaders req) =
+      sendRequestOnWithExpect client req timeoutUs
+  | otherwise = sendImmediately client req
+
+
+sendImmediately :: ClientConnection -> Request -> IO (Either ParseError Response)
+sendImmediately client@(ClientConnection conn) req = do
+  recordRequestOptions conn req
   case requestBody req of
-    BodyEmpty ->
-      connectionSendBuilderDirect conn (requestBuilder req)
+    BodyEmpty -> sendHead >> readHead
     BodyBytes bs
-      | BS.null bs ->
-          connectionSendBuilderDirect conn (requestBuilder req)
-      | otherwise ->
+      | BS.null bs -> sendHead >> readHead
+      | otherwise -> do
           withConnectionCork conn $ \corked -> do
             sendBuilderDirect corked (requestBuilder req)
             sendByteString corked bs
-    BodyStream producer -> do
-      connectionSendBuilderDirect conn (requestBuilder req)
-      streamChunked conn producer (requestTrailers req)
-    BodyPreEncoded _ -> pure ()
-    -- \^ Pre-encoded request bodies are unusual but not nonsensical
-    -- (e.g. a pre-built JSON payload). The Body has already been
-    -- baked into the request bytes the user constructed; if they
-    -- wanted it sent here they should have used BodyBytes.
-    BodyFile _ -> pure ()
-  -- \^ Client-side sendfile is a follow-up. For now you can stream
-  -- a file with @BodyStream@ + a producer that 'hGet's chunks.
-  -- Read the response head.  RFC 9110 §15.2 / RFC 9112 §4.1: 1xx
-  -- (informational) responses are interim — keep reading until we
-  -- see the final one.  This is how an @Expect: 100-continue@ on
-  -- the request gets its 100 acknowledgement transparently absorbed.
-  readFinal conn (requestMethod req)
+          readHead
+    BodyStream producer -> case requestStreamFraming req of
+      Left err -> pure (Left err)
+      Right NoBody | requestVersion req == HTTP_1_0 -> do
+        bytes <- bufferStream producer mempty
+        sendImmediately client req {requestBody = BodyBytes bytes}
+      Right framing -> do
+        sendHead
+        sendRequestStream conn req framing producer >>= either (pure . Left) (const readHead)
+    BodyPreEncoded _ -> readHead
+    BodyFile _ -> readHead
+  where
+    sendHead = connectionSendBuilderDirect conn (requestBuilder req)
+    readHead = readFinal conn (requestMethod req)
+
+    bufferStream producer !builder = producer >>= \case
+      Nothing -> pure (B.toStrictByteString builder)
+      Just chunk -> bufferStream producer (builder <> B.byteString chunk)
 
 
 {- | Two-stage @Expect: 100-continue@ send (RFC 9110 §10.1.1).
 
 Sends the request headers first, then waits up to @timeoutUs@
-microseconds for an interim response from the server:
+microseconds for @100 Continue@ or a final response.
 
-* If the server sends @100 Continue@ (or any other 1xx), the
-  request body is sent and the final response is read.
-* If the server sends a non-1xx response (e.g. @417 Expectation
-  Failed@) before the body is transmitted, the body is /not/
-  sent and the server's response is returned verbatim.  The
-  caller should inspect the status and retry without @Expect@ if
-  appropriate.
-* If @timeoutUs@ elapses with no interim response, the body is
+* After @100 Continue@, the client sends the body and reads the final
+  response. It skips other informational responses during the wait.
+* An early final response returns without running the body producer
+  and retires the connection from reuse.
+* If @timeoutUs@ elapses, the body is
   sent unconditionally, as permitted by RFC 9110 §10.1.1.
 
-This function is called automatically by 'Network.HTTP.Connection.sendOn'
-when the request carries an @Expect: 100-continue@ header.
+'sendRequestOn' calls this automatically for HTTP/1.1 requests that
+carry a body and a @100-continue@ expectation.
 -}
 sendRequestOnWithExpect
   :: ClientConnection
@@ -209,93 +228,113 @@ sendRequestOnWithExpect
   -> Int
   -- ^ timeout in microseconds (e.g. 1_000_000 for 1 s)
   -> IO (Either ParseError Response)
-sendRequestOnWithExpect (ClientConnection conn) req timeoutUs = do
-  -- Step 1: send request headers (no body).
-  connectionSendBuilderDirect conn (requestBuilder req)
-  -- Step 2: wait up to timeoutUs for an interim response.
-  mInterim <- timeout timeoutUs (readResponseHead conn (requestMethod req))
-  case mInterim of
-    Nothing ->
-      -- Timeout: proceed with body (RFC 9110 §10.1.1 permits this).
-      sendBodyAndReadFinal
-    Just (Left _) ->
-      -- Read error on interim wait: proceed optimistically.
-      sendBodyAndReadFinal
-    Just (Right (resp0, framing))
-      | is1xx (responseStatus resp0) ->
-          -- 100 Continue (or other 1xx): proceed with body.
-          sendBodyAndReadFinal
-      | otherwise -> do
-          -- Non-1xx before body was sent (e.g. 417): return the
-          -- server's response and skip the body.
-          (body, trailersIO) <- readBodyAndTrailers conn framing
-          pure $
-            Right
-              resp0
-                { responseBody = body
-                , responseTrailers = trailersIO
-                }
+sendRequestOnWithExpect client req _
+  | requestVersion req /= HTTP_1_1 || not (requestCarriesBody req) = sendImmediately client req
+sendRequestOnWithExpect client@(ClientConnection conn) req timeoutUs = case requestBody req of
+  BodyStream producer -> case requestStreamFraming req of
+    Left err -> pure (Left err)
+    Right (ContentLength 0) -> sendImmediately client req
+    Right framing -> handshake (sendRequestStream conn req framing producer)
+  BodyBytes bytes -> handshake (Right <$> connectionSendBytes conn bytes)
+  _ -> sendImmediately client req
   where
-    is1xx (Status code) = code >= 100 && code < 200
+    handshake sendBody = do
+      recordRequestOptions conn req
+      connectionSendBuilderDirect conn (requestBuilder req)
+      mInterim <- waitForContinue conn (requestMethod req) timeoutUs
+      let sendBodyAndReadFinal =
+            sendBody >>= either (pure . Left) (const (readFinal conn (requestMethod req)))
+      case mInterim of
+        Nothing -> sendBodyAndReadFinal
+        Just (Left failure) -> pure (Left (headParseError failure))
+        Just (Right (resp0, framing))
+          | responseStatus resp0 == Status 100 -> sendBodyAndReadFinal
+          | otherwise -> do
+              retireConnection conn
+              finishResponse conn resp0 framing
 
-    sendBodyAndReadFinal = do
-      sendBody
-      readFinal conn (requestMethod req)
 
-    sendBody = case requestBody req of
-      BodyEmpty -> pure ()
-      BodyBytes bs
-        | BS.null bs -> pure ()
-        | otherwise -> connectionSendBytes conn bs
-      BodyStream producer -> streamChunked conn producer (requestTrailers req)
-      BodyPreEncoded _ -> pure ()
-      BodyFile _ -> pure ()
+requestStreamFraming :: Request -> Either ParseError Framing
+requestStreamFraming req =
+  requestFraming (requestMethod req) (requestVersion req) (requestHeaders req)
 
 
--- | Read response heads, skipping 1xx interim responses.
+sendRequestStream :: Connection -> Request -> Framing -> IO (Maybe ByteString) -> IO (Either ParseError ())
+sendRequestStream conn req framing producer =
+  writeBody `onException` retireConnection conn
+  where
+    writeBody = case framing of
+      ContentLength size -> fixed size
+      _ -> Right <$> writeChunkedBody conn producer (requestTrailers req)
+
+    fixed remaining = producer >>= \case
+      Nothing | remaining == 0 -> pure (Right ())
+      Just chunk | let size = fromIntegral (BS.length chunk), size <= remaining -> do
+        connectionSendBytes conn chunk
+        fixed (remaining - size)
+      _ -> do
+        retireConnection conn
+        pure (Left ParseInvalidLength)
+
+
+requestCarriesBody :: Request -> Bool
+requestCarriesBody req = case requestBody req of
+  BodyBytes bytes -> not (BS.null bytes)
+  BodyStream _ -> True
+  _ -> False
+
+
+waitForContinue :: Connection -> Method -> Int -> IO (Maybe (Either SR.ReadError (Response, Framing)))
+waitForContinue _ _ timeoutUs | timeoutUs <= 0 = pure Nothing
+waitForContinue conn method timeoutUs = do
+  start <- getMonotonicTimeNSec
+  observed <- newIORef Nothing
+  -- A blocking receive is interruptible. Keep the completed head and
+  -- cursor update together even if the timer fires as parsing finishes.
+  let wait = do
+        headResult <- readResponseHead conn method
+        case headResult of
+          Right (response, _)
+            | let status = responseStatus response
+            , isInterim status
+            , status /= Status 100 -> do
+                now <- getMonotonicTimeNSec
+                when ((now - start) `quot` 1000 < fromIntegral timeoutUs) wait
+          _ -> writeIORef observed (Just headResult)
+  _ <- timeout timeoutUs (mask_ wait)
+  readIORef observed
+
+
+recordRequestOptions :: Connection -> Request -> IO ()
+recordRequestOptions conn req =
+  when (ConnClose `elem` connectionOptions (requestHeaders req)) (retireConnection conn)
+
+
+-- | Read response heads, skipping interim responses.
 readFinal :: Connection -> Method -> IO (Either ParseError Response)
 readFinal conn method = do
   hE <- readResponseHead conn method
   case hE of
-    Left SR.ReadUnexpectedEof -> pure (Left ParseUnexpectedEof)
-    Left (SR.ReadMessageTooLong _) -> pure (Left ParseMessageTooLong)
-    Left (SR.ReadTransportError _) -> pure (Left ParseUnexpectedEof)
-    Left (SR.ReadParse e) -> pure (Left e)
+    Left failure -> pure (Left (headParseError failure))
     Right (resp0, framing)
-      | is1xx (responseStatus resp0) -> readFinal conn method
-      | otherwise -> do
-          (body, trailersIO) <- readBodyAndTrailers conn framing
-          pure $
-            Right
-              resp0
-                { responseBody = body
-                , responseTrailers = trailersIO
-                }
-  where
-    is1xx (Status code) = code >= 100 && code < 200
+      | isInterim (responseStatus resp0) -> readFinal conn method
+      | otherwise -> finishResponse conn resp0 framing
 
 
-{- | Stream a chunked body, then emit the terminating zero-size
-chunk.  If the request supplies a non-empty trailer block
-('requestTrailers'), they are emitted in the trailer-fields
-section of the final chunk per RFC 9112 §7.1.2; otherwise the
-final chunk is a bare @\"0\\r\\n\\r\\n\"@.
+-- Switching Protocols ends the HTTP exchange.
+isInterim :: Status -> Bool
+isInterim (Status code) = code >= 100 && code < 200 && code /= 101
 
-The trailers action is run lazily — after the producer has
-returned 'Nothing' — so callers can compute trailers from
-streaming-body state (e.g. content digests, row counts).
--}
-streamChunked :: Connection -> IO (Maybe ByteString) -> IO Headers -> IO ()
-streamChunked conn producer trailersIO = loop
-  where
-    loop = do
-      mc <- producer
-      case mc of
-        Nothing -> do
-          trls <- trailersIO
-          if null trls
-            then connectionSendBuilder conn encodeLastChunk
-            else connectionSendBuilder conn (encodeLastChunkWithTrailers trls)
-        Just bs
-          | BS.null bs -> loop
-          | otherwise -> connectionSendBuilder conn (encodeChunk bs) >> loop
+
+headParseError :: SR.ReadError -> ParseError
+headParseError = \case
+  SR.ReadUnexpectedEof -> ParseUnexpectedEof
+  SR.ReadMessageTooLong _ -> ParseMessageTooLong
+  SR.ReadTransportError _ -> ParseUnexpectedEof
+  SR.ReadParse failure -> failure
+
+
+finishResponse :: Connection -> Response -> Framing -> IO (Either ParseError Response)
+finishResponse conn response framing = do
+  (body, trailers) <- readBodyAndTrailers conn framing
+  pure (Right response {responseBody = body, responseTrailers = trailers})

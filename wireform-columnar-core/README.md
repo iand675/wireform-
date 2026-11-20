@@ -1,4 +1,4 @@
-# wireform-columnar
+# wireform-columnar-core
 
 [![BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
@@ -11,7 +11,7 @@ Format-agnostic columnar primitives shared by the
 and [`wireform-orc`](../wireform-orc/) packages. A pull-based iterator
 surface (`Columnar.Stream`), a pushdown predicate vocabulary
 (`Columnar.Predicate`), an mmap-aware file loader (`Columnar.IO`), an
-LZ4 codec wrapper (`Columnar.LZ4`), and SIMD-accelerated bit-unpacking
+LZ4 codec wrapper (`Columnar.LZ4`), raw LZO1X codec (`Columnar.LZO`), and SIMD-accelerated bit-unpacking
 and popcount kernels (`Columnar.SIMD`).
 
 The columnar tier in wireform is structured so that the formats share
@@ -40,7 +40,7 @@ packages. Most users will pick it up transitively by depending on
 ```cabal
 build-depends:
   base,
-  wireform-columnar,
+  wireform-columnar-core,
 ```
 
 The package needs `liblz4` available at link time for `Columnar.LZ4`.
@@ -55,6 +55,7 @@ On Debian / Ubuntu: `apt install liblz4-dev`. On macOS:
 | `Columnar.Predicate` | Shared pushdown vocabulary: `PValue`, `PColPredicate`, `Predicate`. Per-format evaluators (`Parquet.Statistics`, `ORC.Statistics`, Iceberg expression evaluator) all consume this. |
 | `Columnar.IO`        | mmap-aware file loader: `loadFile` (mmap above 64 KiB, eager below), `loadFileMmap`, `loadFileEager`. |
 | `Columnar.LZ4`       | LZ4 frame and block-format codec wrapper around the system `liblz4`. |
+| `Columnar.LZO`       | Raw LZO1X blocks with an explicit output budget and validation before allocation; no external LZO dependency. |
 | `Columnar.SIMD`      | SIMD-accelerated bit-unpacking, popcount, LSB-first packed-bool unpack (Arrow / Parquet validity bitmaps), 16-byte bulk `memcpy`. C kernel in `cbits/columnar_simd.c` using vendored simde for SSE2 / AVX2 / NEON portability. |
 
 ## Pull-based iterators
@@ -112,6 +113,16 @@ eager path is faster for small files (mmap setup costs more than the
 read itself); the mmap path keeps RSS flat for the large files
 columnar formats are usually applied to. Callers that want to force
 the choice use `loadFileMmap` or `loadFileEager` directly.
+
+## LZO blocks
+
+`Columnar.LZO` provides raw LZO1X compression and decompression with a portable
+C backend and no external codec dependency. Decoding measures and validates
+the stream before allocating output, and larger calls permit garbage collection.
+
+Enable `-flzo-reference-bench` to compare the `columnar-lzo-throughput`
+benchmark with an installed liblzo2. Its `--validation-cost` mode separates
+the public decoder's validation pass from decoding into a pre-sized buffer.
 
 ## SIMD kernels
 

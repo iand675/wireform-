@@ -20,9 +20,8 @@ unsatisfied-range   = \"*/\" complete-length
 complete-length     = 1*DIGIT
 @
 
-The @bytes@ form is by far the most common; we surface it
-typed. Other units are exposed as raw bytes so callers can route
-them through their own logic.
+The unit is retained as received. RFC 9110 also permits this field
+on partial PUT requests by private agreement.
 
 See also: "Network.HTTP.Headers.Range", "Network.HTTP.Headers.AcceptRanges", "Network.HTTP.Headers.IfRange".
 -}
@@ -33,9 +32,6 @@ module Network.HTTP.Headers.ContentRange (
   renderContentRange,
 ) where
 
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Data.Word (Word64)
 import Network.HTTP.Headers
@@ -59,10 +55,10 @@ data RangeResp
       , rangeLast :: !Word64
       , rangeTotal :: !(Maybe Word64)
       }
-  | -- | For 416 responses. @rangeTotal@ is 'Just' iff the server
-    --     actually knew the complete length and sent it (the
-    --     @*\\/N@ form); @Nothing@ if the server emitted the
-    --     @*\\/*@ form (rare but seen in the wild).
+  | {- | For 416 responses, with the complete length in 'Just'.
+    'Nothing' remains available for callers constructing legacy @*\\/*@
+    values. The parser requires a complete length.
+    -}
     RangeRespUnsatisfied {rangeTotal :: !(Maybe Word64)}
   deriving stock (Eq, Show)
 
@@ -78,18 +74,10 @@ data ContentRange = ContentRange
 instance KnownHeader ContentRange where
   type ParseFailure ContentRange = String
   type Cardinality ContentRange = 'ZeroOrOne
-  type Direction ContentRange = 'Response
+  type Direction ContentRange = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser contentRangeParser (NE.head headers) of
-    OK cr leftover
-      | B.null (dropOws leftover) -> Right cr
-      | otherwise ->
-          Left ("Unconsumed input after parsing Content-Range: " <> show leftover)
-    Fail -> Left "Failed to parse Content-Range header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = parseSingleFieldLine "Content-Range" contentRangeParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentRange
@@ -105,29 +93,23 @@ instance KnownHeader ContentRange where
 contentRangeParser :: ParserT st String ContentRange
 contentRangeParser = do
   ows
-  unit <- rfc9110Token
-  skipSome $(char ' ')
-  resp <- unsatisfied <|> satisfied
+  unit <- branch $(string "bytes ") (pure "bytes") (rfc9110Token <* $(char ' '))
+  resp <- branch $(string "*/") unsatisfied satisfied
   pure ContentRange {contentRangeUnit = unit, contentRangeResp = resp}
   where
-    unsatisfied = do
-      $(char '*')
-      $(char '/')
-      total <- (Nothing <$ $(char '*')) <|> (Just . fromIntegral <$> anyAsciiDecimalWord)
-      pure (RangeRespUnsatisfied total)
+    position = boundedDecimalWord64 (err "Content-Range position or length exceeds Word64")
+    unsatisfied = RangeRespUnsatisfied . Just <$> position
 
     satisfied = do
-      a <- anyAsciiDecimalWord
+      a <- position
       $(char '-')
-      b <- anyAsciiDecimalWord
+      b <- position
+      if b < a then err "Content-Range ends before it starts" else pure ()
       $(char '/')
-      total <- (Nothing <$ $(char '*')) <|> (Just . fromIntegral <$> anyAsciiDecimalWord)
-      pure
-        RangeRespSatisfied
-          { rangeFirst = fromIntegral a
-          , rangeLast = fromIntegral b
-          , rangeTotal = total
-          }
+      total <- branch $(char '*') (pure Nothing) (Just <$> position)
+      case total of
+        Just len | len <= b -> err "Content-Range ends outside the complete length"
+        _ -> pure (RangeRespSatisfied a b total)
 
 
 -- ---------------------------------------------------------------------------
@@ -140,12 +122,12 @@ renderContentRange (ContentRange unit resp) =
   where
     renderResp = \case
       RangeRespSatisfied a b mTot ->
-        M.wordDec (fromIntegral a)
+        M.word64Dec a
           <> M.char7 '-'
-          <> M.wordDec (fromIntegral b)
+          <> M.word64Dec b
           <> M.char7 '/'
           <> mTotal mTot
       RangeRespUnsatisfied mTot ->
         "*/" <> mTotal mTot
     mTotal Nothing = "*"
-    mTotal (Just n) = M.wordDec (fromIntegral n)
+    mTotal (Just n) = M.word64Dec n

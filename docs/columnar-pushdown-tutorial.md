@@ -14,10 +14,10 @@ import qualified Parquet.HighLevel as PHL
 import qualified Parquet.Types as P
 
 let !schema = V.fromList
-      [ P.SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing Nothing
-      , P.SchemaElement "id"     (Just P.Required) (Just P.PTInt64)  Nothing Nothing Nothing Nothing
+      [ P.SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing Nothing Nothing
+      , P.SchemaElement "id"     (Just P.Required) (Just P.PTInt64)  Nothing Nothing Nothing Nothing Nothing
       , P.SchemaElement "sku"    (Just P.Required) (Just P.PTByteArray) Nothing
-          (Just P.CTUtf8) Nothing Nothing
+          (Just P.CTUtf8) Nothing Nothing Nothing
       ]
     !rows  = V.fromList
       [ PHL.ColInt64     (VP.fromList ([1 .. 1_000_000] :: [Int64]))
@@ -86,9 +86,10 @@ case PHL.decodeParquet PHL.defaultReadOptions bytes of
 import qualified Parquet.BloomFilter as Bloom
 import qualified Parquet.PageIndex as PI
 
+-- skuSchemaElement is the matching Parquet schema leaf, including annotations.
 case PI.readBloomFilter pf 0 0 of
   Right (Just sbbf) ->
-    if Pred.evalBloomChunk P.PTByteArray sbbf
+    if Pred.evalBloomChunk skuSchemaElement sbbf
          (Pred.PEq (Pred.PVText "AAA001"))
        == Pred.PMaybeKeep
       then putStrLn "sku=AAA001 may be present (decode the chunk)"
@@ -108,6 +109,10 @@ putStrLn $ "rows=" ++ show rows ++ " max(id)=" ++ show maxId
 ```
 
 Both calls touch only the footer; no column data is decoded.
+`columnMax` returns `Nothing` when the footer lacks an exact maximum;
+a compact upper bound can still prune data but cannot answer `max(id)`.
+`fileRowCount` sums row groups, including older files with a stale file total.
+Use `fileRowCountChecked` to require consistency with that total as well.
 
 ## 6. Stream a multi-GB file without OOM
 

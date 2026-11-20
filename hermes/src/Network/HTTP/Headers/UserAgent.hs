@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 The @User-Agent@ request header identifies the client software making the
 request — a whitespace-separated sequence of @product@ identifiers (each a
@@ -18,7 +16,6 @@ See also: "Network.HTTP.Headers.Server", "Network.HTTP.Headers.From", "Network.H
 -}
 module Network.HTTP.Headers.UserAgent where
 
-import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName
@@ -47,11 +44,7 @@ instance KnownHeader UserAgent where
   type Direction UserAgent = 'Request
 
 
-  parseFromHeaders _ headers = case runParser userAgentParser $ NE.head headers of
-    OK userAgent "" -> Right userAgent
-    OK _ rest -> Left $ "Unconsumed input after parsing User-Agent header: " <> show rest
-    Fail -> Left "Failed to parse User-Agent header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "User-Agent" userAgentParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderUserAgent
@@ -61,10 +54,7 @@ instance KnownHeader UserAgent where
 
 
 userAgentParser :: ParserT st String UserAgent
-userAgentParser = UserAgent <$> productParser <*> many (eitherP commentParser productParser)
-  where
-    productParser = Product <$> rfc9110Token <*> optional ($(char '/') *> rfc9110Token)
-    commentParser = Comment <$> comment
+userAgentParser = productSequence Product UserAgent
 
 
 eitherP :: ParserT st e a -> ParserT st e b -> ParserT st e (Either a b)
@@ -72,12 +62,6 @@ eitherP l r = (Right <$> r) <|> (Left <$> l)
 
 
 renderUserAgent :: UserAgent -> M.Builder
-renderUserAgent (UserAgent fp rest) =
-  shortText (productName fp)
-    <> maybe mempty (\v -> "/" <> shortText v) (productVersion fp)
-    <> foldMap (either renderComment renderProduct) rest
+renderUserAgent (UserAgent first rest) = renderProductSequence renderProduct first rest
   where
-    renderComment (Comment c) = "(" <> M.textUtf8 c <> ")"
-    renderProduct (Product n mv) = case mv of
-      Nothing -> shortText n
-      Just v -> shortText n <> "/" <> shortText v
+    renderProduct (Product name version) = renderProductToken name version

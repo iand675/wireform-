@@ -9,35 +9,46 @@ Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-8.4>
 
 See also: "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.ContentLanguage", "Network.HTTP.Headers.AcceptEncoding", "Network.HTTP.Headers.TransferEncoding".
 -}
-module Network.HTTP.Headers.ContentEncoding where
+module Network.HTTP.Headers.ContentEncoding (
+  ContentEncoding (..),
+  contentCodings,
+  contentEncodingParser,
+  renderContentEncoding,
+) where
 
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import Network.HTTP.ContentCoding
+import Network.HTTP.ContentNegotiation (negotiationList, parseNegotiationHeaders)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentEncoding)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Network.HTTP.Headers.Rendering.Util (sepByCommas1)
 
 
-newtype ContentEncoding = ContentEncoding
-  { contentEncoding :: ContentCoding
-  }
+{- | A present @Content-Encoding@ field, possibly with no applied codings.
+Use 'contentCodings' to read the field in all cases. The 'contentEncoding'
+record selector applies to the populated constructors.
+-}
+data ContentEncoding
+  = ContentEncoding {contentEncoding :: !ContentCoding}
+  | ContentEncodingChain
+      { contentEncoding :: !ContentCoding
+      , additionalContentCodings :: !(NonEmpty ContentCoding)
+      }
+  | ContentEncodingEmpty
   deriving stock (Eq, Show)
 
 
 instance KnownHeader ContentEncoding where
   type ParseFailure ContentEncoding = String
   type Cardinality ContentEncoding = 'ZeroOrOne
-  type Direction ContentEncoding = 'Response
+  type Direction ContentEncoding = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser contentEncodingParser header of
-      OK ce "" -> Right ce
-      OK _ rest -> Left $ "Unconsumed input after parsing Content-Encoding header: " <> show rest
-      Fail -> Left "Failed to parse Content-Encoding header"
-      Err e -> Left e
+  parseFromHeaders _ headers =
+    fromCodings <$> parseNegotiationHeaders "Content-Encoding" codingList headers
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentEncoding
@@ -47,8 +58,28 @@ instance KnownHeader ContentEncoding where
 
 
 contentEncodingParser :: ParserT st String ContentEncoding
-contentEncodingParser = ContentEncoding <$> contentCodingParser
+contentEncodingParser = fromCodings <$> codingList
+
+
+codingList :: ParserT st e [ContentCoding]
+codingList = negotiationList contentCodingParser
+
+
+fromCodings :: [ContentCoding] -> ContentEncoding
+fromCodings [] = ContentEncodingEmpty
+fromCodings [coding] = ContentEncoding coding
+fromCodings (first : second : rest) = ContentEncodingChain first (second :| rest)
+
+
+-- | Return the codings in the order in which they were applied.
+contentCodings :: ContentEncoding -> [ContentCoding]
+contentCodings ContentEncodingEmpty = []
+contentCodings (ContentEncoding coding) = [coding]
+contentCodings (ContentEncodingChain first rest) = first : NE.toList rest
 
 
 renderContentEncoding :: ContentEncoding -> M.Builder
-renderContentEncoding (ContentEncoding encoding) = renderContentCoding encoding
+renderContentEncoding ContentEncodingEmpty = mempty
+renderContentEncoding (ContentEncoding coding) = renderContentCoding coding
+renderContentEncoding (ContentEncodingChain first rest) =
+  renderContentCoding first <> ", " <> sepByCommas1 (renderContentCoding <$> rest)

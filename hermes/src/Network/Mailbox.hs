@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
@@ -5,10 +6,9 @@
 RFC 5322 §3.4 email addresses — @addr-spec@, @mailbox@, @address@ and
 the @mailbox-list@ \/ @address-list@ aggregates.
 
-This is a faithful but /practical/ subset of the grammar restricted to
-the common, non-obsolete forms. The @obs-@ productions are ignored, and
-folding white space \/ comments (@CFWS@) are treated as simple ASCII
-@OWS@ (space \/ tab) rather than the full RFC 5234 folding machinery.
+This accepts common, non-obsolete forms of the grammar in a single field
+value. Comments and space or tab are accepted at @CFWS@ positions. HTTP
+field values carry the unfolded spelling.
 
 == Grammar (the subset we accept)
 
@@ -31,7 +31,8 @@ address         = mailbox \/ group
 address-list    = address *(\",\" address)
 @
 
-Surrounding 'ows' is tolerated everywhere a @CFWS@ would be permitted.
+Domain names use letter, digit, and hyphen labels. Comments are discarded
+and omitted when rendering.
 
 <https://www.rfc-editor.org/rfc/rfc5322#section-3.4>
 -}
@@ -66,9 +67,14 @@ module Network.Mailbox (
 
 import Control.Monad.Combinators (sepBy, sepBy1)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
 import Data.CharSet (CharSet)
 import qualified Data.CharSet as CharSet
+import qualified Data.Text as T
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Data.Word (Word8)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
@@ -145,16 +151,18 @@ dtextCharSet :: CharSet
 dtextCharSet = CharSet.range '\x21' '\x5A' <> CharSet.range '\x5E' '\x7E'
 
 
-atextChar :: ParserT st String Char
-atextChar = satisfyAscii (`CharSet.member` atextCharSet)
+atextSet :: AsciiSet
+atextSet = asciiSet atextCharSet
+{-# NOINLINE atextSet #-}
 
 
-ldhChar :: ParserT st String Char
-ldhChar = satisfyAscii (`CharSet.member` ldhCharSet)
+ldhSet :: AsciiSet
+ldhSet = asciiSet ldhCharSet
+{-# NOINLINE ldhSet #-}
 
 
-dtextChar :: ParserT st String Char
-dtextChar = satisfyAscii (`CharSet.member` dtextCharSet)
+dtextChar :: ParserT st String ()
+dtextChar = satisfyAscii_ (`CharSet.member` dtextCharSet)
 
 
 isAtext :: Char -> Bool
@@ -167,30 +175,34 @@ isAtext c = c `CharSet.member` atextCharSet
 
 -- | @1*atext *(\".\" 1*atext)@, captured verbatim (dots included).
 dotAtomText :: ParserT st String ST.ShortText
-dotAtomText = shortASCIIFromParser_ $ do
-  skipSome atextChar
-  skipMany ($(char '.') *> skipSome atextChar)
+dotAtomText = dotAtomWith atextSet
 
 
 -- | Domain @dot-atom@ over let-dig-hyphen labels.
 domainDotAtom :: ParserT st String ST.ShortText
-domainDotAtom = shortASCIIFromParser_ $ do
-  skipSome ldhChar
-  skipMany ($(char '.') *> skipSome ldhChar)
+domainDotAtom = dotAtomWith ldhSet
+
+
+dotAtomWith :: AsciiSet -> ParserT st String ST.ShortText
+dotAtomWith chars = shortASCIIFromParser_ (atom *> skipMany ($(char '.') *> atom))
+  where
+    atom = asciiAlnumSetBytes chars
+{-# INLINE dotAtomWith #-}
 
 
 -- | @\"[\" *dtext \"]\"@; the result holds the text inside the brackets.
 domainLiteral :: ParserT st String Domain
-domainLiteral = do
-  $(char '[')
-  inner <- shortASCIIFromParser_ (skipMany dtextChar)
-  $(char ']')
-  pure (DomainLiteral inner)
+domainLiteral = $(char '[') *> (DomainLiteral <$> (bare <|> spaced))
+  where
+    bare = shortASCIIFromParser_ (skipMany dtextChar) <* $(char ']')
+    spaced =
+      (STU.fromByteStringUnsafe . B.filter (\w -> w /= 9 && w /= 32)
+        <$> byteStringOf (ows *> skipMany (dtextChar *> ows))) <* $(char ']')
 
 
 -- | @local-part = dot-atom \/ quoted-string@ (decoded).
 localPartParser :: ParserT st String ST.ShortText
-localPartParser = dotAtomText <|> quotedString
+localPartParser = dotAtomText <|> mailboxQuotedString
 
 
 -- | @domain = dot-atom \/ domain-literal@.
@@ -200,46 +212,59 @@ domainParser = (DomainName <$> domainDotAtom) <|> domainLiteral
 
 -- | A single @word@: an @atom@ or a @quoted-string@ (decoded).
 word :: ParserT st String ST.ShortText
-word = atom <|> quotedString
+word = atom <|> mailboxQuotedString
   where
-    atom = shortASCIIFromParser_ (skipSome atextChar)
+    atom = shortASCIIFromParser_ (asciiAlnumSetBytes atextSet)
+
+
+mailboxQuotedString :: ParserT st String ST.ShortText
+mailboxQuotedString = shortTextFromLatin1 <$> httpQuotedBytes
+
+
+-- | Comment and whitespace positions on an already unfolded field line.
+cfws :: ParserT st String ()
+cfws = ows *> skipMany (skipComment *> ows)
+{-# INLINE cfws #-}
 
 
 -- | @phrase@: one or more 'word's, joined by single ASCII spaces.
 displayName :: ParserT st String ST.ShortText
 displayName = do
-  ws <- word `sepBy1` rws
-  pure (ST.fromString (unwords (map ST.toString ws)))
+  first <- word
+  rest <- many (cfws *> word)
+  case rest of
+    [] -> pure first
+    _ -> pure (ST.fromText (T.intercalate " " (map ST.toText (first : rest))))
 
 
 -- | The separator between list members: @[OWS] \",\" [OWS]@.
 listSeparator :: ParserT st String ()
-listSeparator = ows *> $(char ',') *> ows
+listSeparator = cfws *> $(char ',') *> cfws
 
 
 -- | @addr-spec@ without leading 'ows' (composed under 'mailboxCore').
 addrSpecCore :: ParserT st String AddrSpec
 addrSpecCore = do
   lp <- localPartParser
-  ows
+  cfws
   $(char '@')
-  ows
-  d <- domainParser
+  cfws
+  d <- domainParser <* cfws
   pure AddrSpec {localPart = lp, domain = d}
 
 
 -- | @mailbox@ without leading 'ows'.
 mailboxCore :: ParserT st String Mailbox
-mailboxCore = nameAddr <|> bareAddr
+mailboxCore = bareAddr <|> nameAddr
   where
     nameAddr = do
       mName <- optional displayName
-      ows
+      cfws
       $(char '<')
-      ows
+      cfws
       a <- addrSpecCore
-      ows
       $(char '>')
+      cfws
       pure Mailbox {mailboxName = mName, mailboxAddr = a}
     bareAddr = Mailbox Nothing <$> addrSpecCore
 
@@ -248,12 +273,13 @@ mailboxCore = nameAddr <|> bareAddr
 groupCore :: ParserT st String Address
 groupCore = do
   name <- displayName
-  ows
+  cfws
   $(char ':')
-  ows
+  cfws
   members <- mailboxCore `sepBy` listSeparator
-  ows
+  cfws
   $(char ';')
+  cfws
   pure AddressGroup {groupName = name, groupMembers = members}
 
 
@@ -264,27 +290,27 @@ addressCore = groupCore <|> (AddressMailbox <$> mailboxCore)
 
 -- | Parse a bare @addr-spec@ (allowing surrounding 'ows').
 addrSpecParser :: ParserT st String AddrSpec
-addrSpecParser = ows *> addrSpecCore
+addrSpecParser = cfws *> addrSpecCore
 
 
 -- | Parse a @mailbox@ (allowing surrounding 'ows').
 mailboxParser :: ParserT st String Mailbox
-mailboxParser = ows *> mailboxCore
+mailboxParser = cfws *> mailboxCore
 
 
 -- | Parse an @address@ — a 'Mailbox' or a @group@ (allowing surrounding 'ows').
 addressParser :: ParserT st String Address
-addressParser = ows *> addressCore
+addressParser = cfws *> addressCore
 
 
 -- | Parse a non-empty @mailbox-list@.
 mailboxListParser :: ParserT st String [Mailbox]
-mailboxListParser = ows *> (mailboxCore `sepBy1` listSeparator)
+mailboxListParser = cfws *> (mailboxCore `sepBy1` listSeparator)
 
 
 -- | Parse a non-empty @address-list@.
 addressListParser :: ParserT st String [Address]
-addressListParser = ows *> (addressCore `sepBy1` listSeparator)
+addressListParser = cfws *> (addressCore `sepBy1` listSeparator)
 
 
 -- ---------------------------------------------------------------------------
@@ -349,8 +375,13 @@ renderDisplayName name
 -- | Emit a @quoted-string@, escaping @"@ and @\\@ with @quoted-pair@.
 renderQuoted :: ST.ShortText -> M.Builder
 renderQuoted t =
-  M.char7 '"' <> foldMap escape (ST.toString t) <> M.char7 '"'
+  M.char7 '"' <> content <> M.char7 '"'
   where
+    bytes = ST.toShortByteString t
+    content
+      | SBS.any (\w -> w == 34 || w == 92 || w >= 128) bytes =
+          T.foldr (\c rest -> escape c <> rest) mempty (ST.toText t)
+      | otherwise = M.shortByteString bytes
     escape '"' = M.char7 '\\' <> M.char7 '"'
     escape '\\' = M.char7 '\\' <> M.char7 '\\'
     escape c = M.char8 c
@@ -360,20 +391,26 @@ renderQuoted t =
   @atext@ labels (no leading\/trailing\/doubled dots).
 -}
 isDotAtomText :: ST.ShortText -> Bool
-isDotAtomText t =
-  all (\l -> not (null l) && all isAtext l) (splitOn '.' (ST.toString t))
+isDotAtomText = separatedAtoms 46
 
 
 -- | True iff @t@ is a space-separated @phrase@ of @atom@s.
 isPhraseOfAtoms :: ST.ShortText -> Bool
-isPhraseOfAtoms t =
-  all (\w -> not (null w) && all isAtext w) (splitOn ' ' (ST.toString t))
+isPhraseOfAtoms = separatedAtoms 32
 
 
-splitOn :: Char -> String -> [String]
-splitOn c s = case break (== c) s of
-  (a, []) -> [a]
-  (a, _ : rest) -> a : splitOn c rest
+separatedAtoms :: Word8 -> ST.ShortText -> Bool
+separatedAtoms separator text = scan 0 False
+  where
+    bytes = ST.toShortByteString text
+    size = SBS.length bytes
+    scan !offset !inAtom
+      | offset == size = inAtom
+      | byte == separator = inAtom && scan (offset + 1) False
+      | otherwise = isAtext (toEnum (fromIntegral byte)) && scan (offset + 1) True
+      where
+        byte = SBSI.unsafeIndex bytes offset
+{-# INLINE separatedAtoms #-}
 
 
 -- ---------------------------------------------------------------------------

@@ -7,8 +7,8 @@ Lists the origins permitted to read otherwise opaque timing
 information through the Resource Timing API:
 
 @
-Timing-Allow-Origin = 1#( \"*\" / serialized-origin )
-serialized-origin   = scheme \"://\" host [ \":\" port ]
+Timing-Allow-Origin = 1#( \"*\" / origin-or-null )
+origin-or-null      = "null" / serialized-origin
 @
 
 The wildcard @*@ grants access to every origin. Multiple header
@@ -26,14 +26,9 @@ module Network.HTTP.Headers.TimingAllowOrigin (
   renderTimingAllowOrigin,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
-import Data.ByteString (ByteString)
-import Data.CharSet (CharSet)
-import qualified Data.CharSet as CharSet
-import Data.CharSet.Posix.Ascii (alnum)
-import Data.Foldable1 (fold1)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Authority (serializedOriginListMember)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTimingAllowOrigin)
 import qualified Network.HTTP.Headers.Mason as M
@@ -45,7 +40,7 @@ import Network.HTTP.Headers.Rendering.Util (shortText)
 data TimingAllowOriginItem
   = -- | The literal @*@ wildcard.
     TimingAllowOriginAny
-  | -- | A serialized origin, e.g. @https://example.com@.
+  | -- | A serialized origin, including @null@ for an opaque origin.
     TimingAllowOriginOrigin !ST.ShortText
   deriving stock (Eq, Show)
 
@@ -62,7 +57,11 @@ instance KnownHeader TimingAllowOrigin where
   type Direction TimingAllowOrigin = 'Response
 
 
-  parseFromHeaders _ headers = fold1 <$> traverse runTimingAllowOrigin headers
+  parseFromHeaders _ headers = do
+    entries <- parseListFieldLines "Timing-Allow-Origin" (httpList originItem) headers
+    case NE.nonEmpty entries of
+      Nothing -> Left "Timing-Allow-Origin requires an origin or wildcard"
+      Just origins -> Right (TimingAllowOrigin origins)
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderTimingAllowOrigin
@@ -71,27 +70,19 @@ instance KnownHeader TimingAllowOrigin where
   headerName _ = hTimingAllowOrigin
 
 
-runTimingAllowOrigin :: ByteString -> Either String TimingAllowOrigin
-runTimingAllowOrigin bs = case runParser timingAllowOriginParser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left $ "Unconsumed input after parsing Timing-Allow-Origin header: " <> show rest
-  Fail -> Left "Failed to parse Timing-Allow-Origin header"
-  Err e -> Left e
-
-
--- | Characters forming a @serialized-origin@ (no comma, whitespace or @*@).
-originCharSet :: CharSet
-originCharSet = alnum <> CharSet.fromList "+-.:/[]"
-
-
 timingAllowOriginParser :: ParserT st String TimingAllowOrigin
-timingAllowOriginParser = TimingAllowOrigin <$> (item `sepBy1` (ows *> $(char ',') *> ows))
-  where
-    item = wildcard <|> origin
-    wildcard = TimingAllowOriginAny <$ $(char '*')
-    origin =
-      TimingAllowOriginOrigin
-        <$> shortASCIIFromParser_ (skipSome (skipSatisfyAscii (`CharSet.member` originCharSet)))
+timingAllowOriginParser = do
+  entries <- httpList originItem
+  case NE.nonEmpty entries of
+    Nothing -> err "Timing-Allow-Origin requires an origin or wildcard"
+    Just origins -> pure (TimingAllowOrigin origins)
+
+
+originItem :: ParserT st String TimingAllowOriginItem
+originItem =
+  (TimingAllowOriginAny <$ $(char '*'))
+    <|> (TimingAllowOriginOrigin <$> serializedOriginListMember)
+    <|> (TimingAllowOriginOrigin "null" <$ $(string "null"))
 
 
 renderTimingAllowOrigin :: TimingAllowOrigin -> M.Builder

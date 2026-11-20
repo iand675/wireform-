@@ -7,15 +7,15 @@ carrying implementation-specific caching directives.
 == Grammar
 
 @
-Pragma           = #pragma-directive
+Pragma           = 1#pragma-directive
 pragma-directive = "no-cache" / extension-pragma
 extension-pragma = token [ "=" ( token / quoted-string ) ]
 @
 
 @no-cache@ is just the well-known extension-pragma with no value, so
 every directive is modelled uniformly as a token name with an optional
-token-or-quoted-string value. The original token\/quoted-string form of
-a value is preserved so the value round-trips exactly.
+token-or-quoted-string value. The codec preserves that distinction and
+uses canonical HTTP quoted pairs when rendering.
 
 The header is obsolete (RFC 9111 deprecates it in favour of
 @Cache-Control@), but is parsed\/rendered faithfully for compatibility.
@@ -32,11 +32,8 @@ module Network.HTTP.Headers.Pragma (
   renderPragma,
 ) where
 
-import Control.Monad.Combinators (option)
-import Control.Monad.Combinators.NonEmpty (sepBy1)
-import Data.ByteString (ByteString)
-import Data.Foldable1 (fold1)
 import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPragma)
@@ -60,7 +57,8 @@ data PragmaDirective = PragmaDirective
 
 
 {- | The value of an @extension-pragma@, preserving whether it was
-written as a bare token or as a quoted-string.
+written as a bare token or as a quoted-string. The legacy quoted
+constructor carries decoded HTTP octets as Latin-1 code points.
 -}
 data PragmaValue
   = PragmaToken !ShortText
@@ -74,38 +72,29 @@ instance KnownHeader Pragma where
   type Direction Pragma = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = fold1 <$> traverse runPragmaParser headers
+  parseFromHeaders _ = parseFieldLine "Pragma" pragmaParser . combineFieldLines ", "
   renderToHeaders _ = pure . M.toStrictByteString . renderPragma
   headerName _ = hPragma
 
 
-runPragmaParser :: ByteString -> Either String Pragma
-runPragmaParser bs = case runParser pragmaParser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left $ "Unconsumed input after parsing Pragma header: " <> show rest
-  Fail -> Left "Failed to parse Pragma header"
-  Err e -> Left e
-
-
 pragmaParser :: ParserT st String Pragma
-pragmaParser =
-  Pragma <$> (ows *> (pragmaDirectiveParser `sepBy1` (ows *> $(char ',') *> ows)) <* ows)
+pragmaParser = Pragma <$> httpList1 "Pragma" pragmaDirectiveParser
 
 
 pragmaDirectiveParser :: ParserT st e PragmaDirective
 pragmaDirectiveParser = do
   name <- rfc9110Token
-  value <- option Nothing (Just <$> ($(char '=') *> pragmaValueParser))
+  value <- branch $(char '=') (Just <$> pragmaValueParser) (pure Nothing)
   pure PragmaDirective {pragmaName = name, pragmaValue = value}
 
 
 pragmaValueParser :: ParserT st e PragmaValue
 pragmaValueParser =
-  (PragmaQuoted <$> rfc8941String) <|> (PragmaToken <$> rfc9110Token)
+  (PragmaToken <$> rfc9110Token) <|> (PragmaQuoted . RFC8941String . shortTextFromLatin1 <$> httpQuotedBytes)
 
 
 renderPragma :: Pragma -> M.Builder
-renderPragma = R.sepByCommas1 . fmap renderPragmaDirective . pragmaDirectives
+renderPragma = R.renderSeparated ", " renderPragmaDirective . NE.toList . pragmaDirectives
 
 
 renderPragmaDirective :: PragmaDirective -> M.Builder
@@ -116,4 +105,4 @@ renderPragmaDirective (PragmaDirective name value) =
 renderPragmaValue :: PragmaValue -> M.Builder
 renderPragmaValue = \case
   PragmaToken t -> R.shortText t
-  PragmaQuoted s -> R.rfc8941String s
+  PragmaQuoted (RFC8941String s) -> R.renderHttpQuotedShortText s

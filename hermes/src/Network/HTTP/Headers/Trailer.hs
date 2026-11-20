@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 RFC 9110 §6.6.2 @Trailer@ — lists the field names the sender anticipates
 emitting in the trailer section that follows a chunked message body.
@@ -21,9 +19,8 @@ module Network.HTTP.Headers.Trailer (
   renderTrailer,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
 import Data.List.NonEmpty (NonEmpty)
-import Data.Semigroup (sconcat)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTrailer)
@@ -32,10 +29,17 @@ import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (sepByCommas1, shortText)
 
 
--- | A @Trailer@ header value: a non-empty list of field names.
-newtype Trailer = Trailer {trailerFieldNames :: NonEmpty ST.ShortText}
+-- | The field names that may appear in trailers. 'TrailerEmpty' announces none.
+data Trailer
+  = Trailer {trailerFieldNames :: NonEmpty ST.ShortText}
+  | TrailerEmpty
   deriving stock (Eq, Show)
-  deriving newtype (Semigroup)
+
+
+instance Semigroup Trailer where
+  TrailerEmpty <> other = other
+  other <> TrailerEmpty = other
+  Trailer xs <> Trailer ys = Trailer (xs <> ys)
 
 
 instance KnownHeader Trailer where
@@ -44,20 +48,19 @@ instance KnownHeader Trailer where
   type Direction Trailer = 'RequestAndResponse
 
 
-  parseFromHeaders _ neHeaders = sconcat <$> traverse parseLine neHeaders
-    where
-      parseLine bs = case runParser trailerParser bs of
-        OK v "" -> Right v
-        OK _ rest -> Left $ "Unconsumed input after parsing Trailer header: " <> show rest
-        Fail -> Left "Failed to parse Trailer header"
-        Err e -> Left e
+  parseFromHeaders _ = fmap fromNames . parseListFieldLines "Trailer" (httpList fieldName)
   renderToHeaders _ = pure . M.toStrictByteString . renderTrailer
   headerName _ = hTrailer
 
 
 trailerParser :: ParserT st String Trailer
-trailerParser = Trailer <$> (fieldName `sepBy1` (ows *> $(char ',') *> ows))
+trailerParser = fromNames <$> httpList fieldName
+
+
+fromNames :: [ST.ShortText] -> Trailer
+fromNames = maybe TrailerEmpty Trailer . NE.nonEmpty
 
 
 renderTrailer :: Trailer -> M.Builder
+renderTrailer TrailerEmpty = mempty
 renderTrailer (Trailer names) = sepByCommas1 (fmap shortText names)

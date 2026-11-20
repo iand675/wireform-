@@ -8,7 +8,7 @@ appear on both requests and responses. It is an RFC 8941 Structured
 Field Dictionary whose keys are signature labels and whose member
 values are Byte Sequences (@:base64:@) holding the raw signature bytes.
 Each label matches a corresponding entry in the companion
-@Signature-Input@ field.
+@Signature-Input@ field. A label can appear only once across the field lines.
 
 @
 Signature = sf-dictionary    ; label = ":" base64(signature-bytes) ":"
@@ -29,16 +29,14 @@ module Network.HTTP.Headers.Signature (
 ) where
 
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
 import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSignature)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Network.HTTP.Headers.Signature.Internal (signatureDictionary)
 
 
 {- | The @Signature@ dictionary: an ordered, non-empty mapping from a
@@ -56,15 +54,7 @@ instance KnownHeader Signature where
   type Direction Signature = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers =
-    case runParser signatureParser (B.intercalate ", " (NE.toList headers)) of
-      OK v rest
-        | B.null (B.dropWhile isOwsByte rest) -> Right v
-        | otherwise -> Left ("Unconsumed input after parsing Signature header: " <> show rest)
-      Fail -> Left "Failed to parse Signature header"
-      Err e -> Left e
-    where
-      isOwsByte w = w == 0x20 || w == 0x09
+  parseFromHeaders _ = parseStructuredFieldLines "Signature" signatureParser
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderSignature
@@ -78,28 +68,13 @@ instance KnownHeader Signature where
 -- ---------------------------------------------------------------------------
 
 signatureParser :: ParserT st String Signature
-signatureParser = do
-  ows
-  Signature <$> rfc8941List1 member
+signatureParser = Signature <$> signatureDictionary fst member
   where
-    member = do
-      label <- dictionaryKey
+    member label = do
       $(char '=')
-      bytes <- rfc8941Binary <* $(char ':')
+      bytes <- rfc8941Binary
+      skipStructuredFieldParameters
       pure (label, bytes)
-
-
-{- | An RFC 8941 dictionary @key@:
-@( lcalpha \/ "*" ) *( lcalpha \/ DIGIT \/ "_" \/ "-" \/ "." \/ "*" )@.
--}
-dictionaryKey :: ParserT st e ShortText
-dictionaryKey =
-  shortASCIIFromParser_ $
-    skipSatisfyAscii (`CharSet.member` keyFirst)
-      *> skipMany (skipSatisfyAscii (`CharSet.member` keyRest))
-  where
-    keyFirst = CharSet.range 'a' 'z' <> CharSet.singleton '*'
-    keyRest = CharSet.range 'a' 'z' <> CharSet.range '0' '9' <> "_-.*"
 
 
 -- ---------------------------------------------------------------------------
@@ -111,4 +86,4 @@ renderSignature (Signature vs) =
   M.intersperse ", " (renderMember <$> vs)
   where
     renderMember (label, bytes) =
-      R.shortText label <> M.char7 '=' <> R.rfc8941Binary bytes <> M.char7 ':'
+      R.shortText label <> M.char7 '=' <> R.rfc8941Binary bytes

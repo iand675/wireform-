@@ -4,6 +4,7 @@ module Test.Hermes.Caching (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Data.Time.Calendar (fromGregorian)
@@ -11,6 +12,8 @@ import Data.Time.Clock (UTCTime (..), secondsToDiffTime)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupHeaderWith, setHeader, withHeaderDateReference)
+import qualified Network.HTTP.Headers.CacheControl as CC
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (RFC8941String (..), Result (..), runParser)
 import qualified Network.HTTP.Headers.Pragma as P
@@ -54,6 +57,96 @@ renderWarning = M.toStrictByteString . W.renderWarning
 mkTime :: Integer -> Int -> Int -> Integer -> UTCTime
 mkTime year month day secs =
   UTCTime (fromGregorian year month day) (secondsToDiffTime secs)
+
+
+cacheControlTests :: Spec
+cacheControlTests = describe "Cache-Control" $ do
+  it "combines repeated lines, preserving order and accepting empty list members" $ do
+    let empty = headerMapFromList []
+        fields =
+          headerMapFromList
+            [ ("Cache-Control", " \t, MAX-AGE=10, ,")
+            , ("cache-control", "")
+            , ("Cache-Control", " \tNo-Store, max-age=20 \t ")
+            ]
+    lookupHeader @CC.CacheControl empty `shouldBe` Right Nothing
+    lookupHeader @CC.CacheControl fields `shouldBe` Right (Just (CC.CacheControl (CC.MaxAge 10 :| [CC.NoStore, CC.MaxAge 20])))
+    lookupHeader @CC.CacheControl (headerMapFromList [("Cache-Control", ", ,\t")]) `shouldBe` Right (Just CC.CacheControlEmpty)
+    headerMapToList (setHeader CC.CacheControlEmpty empty) `shouldBe` [("cache-control", "")]
+    CC.cacheControlDirectiveList CC.CacheControlEmpty `shouldBe` []
+
+  it "types the remaining RFC 9111 directives and handles their request and response roles" $ do
+    let request = [CC.MaxStale Nothing, CC.MaxStale (Just 12), CC.MinFresh 7, CC.OnlyIfCached]
+        response = [CC.MustUnderstand, CC.NoStore]
+    CC.parseCacheControlDirectives "MAX-STALE, max-stale=\"12\", Min-Fresh=7, ONLY-IF-CACHED, Must-Understand, no-store"
+      `shouldBe` Right (request <> response)
+    CC.usableDirectives (CC.usableRequestDirectives (request <> response))
+      `shouldBe` (request <> [CC.NoStore])
+    CC.usableDirectives (CC.usableResponseDirectives (request <> response))
+      `shouldBe` response
+
+  it "matches the list grammar for canonical single directives" $ do
+    let check value directive = do
+          CC.parseCacheControlDirectives value `shouldBe` Right [directive]
+          CC.parseCacheControlHeader value `shouldBe` Right (directive :| [])
+          lookupHeader @CC.CacheControl (headerMapFromList [("Cache-Control", value)])
+            `shouldBe` Right (Just (CC.CacheControl (directive :| [])))
+    check "no-cache" (CC.NoCache Nothing)
+    check "no-store" CC.NoStore
+    check "only-if-cached" CC.OnlyIfCached
+    check "max-age=000000000" (CC.MaxAge 0)
+    check "max-age=999999999" (CC.MaxAge 999999999)
+    check "max-age=1000000000" (CC.MaxAge 1000000000)
+    check " Max-Age=\"32\" " (CC.MaxAge 32)
+    CC.parseCacheControlDirectives "max-age=12x" `shouldSatisfy` isLeft
+    CC.parseCacheControlDirectives "max-age=12, no-store" `shouldBe` Right [CC.MaxAge 12, CC.NoStore]
+
+  it "decodes field names and renders qualified directives with quotes" $ do
+    let fields = CC.Private (Just "Set-Cookie, X-Example")
+        noCache = CC.NoCache (Just "X-Other")
+        expected = CC.CacheControl (fields :| [noCache])
+        wire = "private=\"Set-Cookie, X-Example\",no-cache=\"X-Other\""
+        headers value = headerMapFromList [("Cache-Control", value)]
+    lookupHeader @CC.CacheControl (headers "private=\"Set-Cookie, X\\-Example\", No-Cache=X-Other")
+      `shouldBe` Right (Just expected)
+    CC.cacheDirectiveFieldNames fields `shouldBe` Just ("set-cookie" :| ["x-example"])
+    CC.cacheDirectiveFieldNames noCache `shouldBe` Just ("x-other" :| [])
+    CC.privateFor ("set-cookie" :| ["x-example"]) `shouldBe` CC.Private (Just "set-cookie, x-example")
+    CC.noCacheFor ("x-other" :| []) `shouldBe` CC.NoCache (Just "x-other")
+    headerMapToList (setHeader expected (headerMapFromList [])) `shouldBe` [("cache-control", wire)]
+    lookupHeader @CC.CacheControl (headers wire) `shouldBe` Right (Just expected)
+
+  it "applies immutable to freshness and allows qualified private fields in shared caching" $ do
+    let directives = [CC.Immutable, CC.StaleWhileRevalidate 30, CC.Private (Just "X-Example"), CC.SMaxAge 60]
+    CC.parseCacheControlDirectives "immutable=\"ignored\", stale-while-revalidate=30, private=X-Example, s-maxage=60"
+      `shouldBe` Right directives
+    null (CC.validateCacheDirectives directives) `shouldBe` False
+
+  it "round-trips extensions with reserved prefixes, empty arguments, escapes and opaque bytes" $ do
+    let wire = "Publicity=full,no-cache-v2=\"\",X-Label=\"a, \\\"\\\\\t" <> BS.pack [0x80, 0xff] <> "\""
+        headers = headerMapFromList [("Cache-Control", wire)]
+        expected =
+          CC.CacheControl
+            ( CC.Unknown "Publicity" (Just "full")
+                :| [CC.Unknown "no-cache-v2" (Just ""), CC.Unknown "X-Label" (Just "a, \"\\\t\x80\xff")]
+            )
+    lookupHeader @CC.CacheControl headers `shouldBe` Right (Just expected)
+    headerMapToList (setHeader expected (headerMapFromList [])) `shouldBe` [("cache-control", wire)]
+
+  it "rejects invalid arguments and leftover input" $
+    mapM_
+      (\value -> CC.parseCacheControlDirectives value `shouldSatisfy` isLeft)
+      [ "private=\"\""
+      , "private=\"x:field\""
+      , "no-cache=\"X Y\""
+      , "no-store=yes"
+      , "max-age"
+      , "max-age=12x"
+      , "max-stale="
+      , "min-fresh=+1"
+      , "only-if-cached=\"true\""
+      , "public no-store"
+      ]
 
 
 -- Pragma --------------------------------------------------------------------
@@ -184,14 +277,17 @@ warnCodeGen = Gen.word (Range.linear 0 999)
 
 
 agentGen :: Gen ST.ShortText
-agentGen = ST.fromString <$> Gen.list (Range.linear 1 10) (Gen.element achars)
-  where
-    achars = ['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9'] <> ".-:"
+agentGen =
+  Gen.choice
+    [ tokenGen
+    , (<> ":8080") <$> tokenGen
+    , Gen.element ["example.net", "[::1]", "[2001:db8::1]:443", "[vF.a:b]:"]
+    ]
 
 
 utcTimeGen :: Gen UTCTime
 utcTimeGen = do
-  year <- Gen.integral (Range.linear 1000 9999) :: Gen Integer
+  year <- Gen.integral (Range.linear 1900 9999) :: Gen Integer
   month <- Gen.integral (Range.linear 1 12) :: Gen Int
   day <- Gen.integral (Range.linear 1 28) :: Gen Int
   secs <- Gen.integral (Range.linear 0 86399) :: Gen Integer
@@ -209,13 +305,50 @@ warningGen = W.Warning <$> Gen.nonEmpty (Range.linear 1 4) valueGen
         <*> Gen.maybe utcTimeGen
 
 
+legacyFieldTests :: Spec
+legacyFieldTests = describe "legacy cache fields" $ do
+  it "combines Pragma directives and preserves HTTP quoted octets" $ do
+    let fields = headerMapFromList . map (\wire -> ("Pragma", wire))
+        readPragma = lookupHeader @P.Pragma . fields
+        value = P.Pragma (P.PragmaDirective "no-cache" Nothing :| [P.PragmaDirective "x" (Just (P.PragmaQuoted (RFC8941String "a, \xff x\"\\")))])
+    readPragma [", no-cache,, x=\"a", "\xff \\x\\\"\\\\\",", " , \t"] `shouldBe` Right (Just value)
+    headerMapToList (setHeader value (fields ["old"]))
+      `shouldBe` [("pragma", "no-cache, x=\"a, \xff x\\\"\\\\\"")]
+    mapM_ (\wire -> readPragma ["no-cache", wire] `shouldSatisfy` isLeft)
+      ["x=", "x =a", "x=\"abc", "x=\"a\n\"", "x=a junk"]
+    readPragma [" ,", "\t"] `shouldSatisfy` isLeft
+  it "validates Warning agents and preserves HTTP quoted text and order" $ do
+    let fields = headerMapFromList . map (\wire -> ("Warning", wire))
+        readWarning = lookupHeader @W.Warning . fields
+        value =
+          W.Warning (W.WarningValue 110 "edge#1" (RFC8941String "a, \xff x") Nothing
+            :| [W.WarningValue 199 "[::1]:70000" (RFC8941String "b") Nothing])
+    readWarning [",110 edge#1 \"a", "\xff \\x\",, 199 [::1]:70000 \"b\" ,"] `shouldBe` Right (Just value)
+    headerMapToList (setHeader value (fields ["old"]))
+      `shouldBe` [("warning", "110 edge#1 \"a, \xff x\", 199 [::1]:70000 \"b\"")]
+    mapM_ (\agent -> readWarning ["110 " <> agent <> " \"text\""] `shouldSatisfy` isLeft)
+      ["@", "user@edge.test", "[:::1]", "[::1]:fast", "edge.test:fast", "edge\t", "\"edge\""]
+    readWarning [" ,", "\t"] `shouldSatisfy` isLeft
+  it "uses the reference clock for a Warning date" $ do
+    let settings = withHeaderDateReference (mkTime 2020 1 1 5) defaultHeaderSettings
+        fields = headerMapFromList [("Warning", "112 - \"stale\" \"Wednesday, 01-Jan-70 00:00:05 GMT\"")]
+        value = W.Warning (W.WarningValue 112 "-" (RFC8941String "stale") (Just (mkTime 2070 1 1 5)) :| [])
+    lookupHeaderWith @W.Warning settings fields `shouldBe` Right (Just value)
+  it "preserves the old Warning when an authored code exceeds three digits" $ do
+    let fields = headerMapFromList [("Warning", "112 - \"stale\"")]
+        invalid = W.Warning (W.WarningValue 1000 "-" (RFC8941String "new") Nothing :| [])
+    setHeader invalid fields `shouldBe` fields
+
+
 -- Suite ---------------------------------------------------------------------
 
 tests :: Spec
 tests =
   describe "Caching" $
     sequence_
-      [ unit_pragma_parse
+      [ cacheControlTests
+      , legacyFieldTests
+      , unit_pragma_parse
       , unit_pragma_quoted
       , unit_pragma_render
       , it "Pragma render/parse round-trip" prop_pragma_roundtrip

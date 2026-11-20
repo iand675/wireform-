@@ -7,8 +7,8 @@ Replay-Nonce = 1*base64url
 base64url    = ALPHA / DIGIT / \"-\" / \"_\"
 @
 
-The nonce is base64url-encoded without padding. We validate that character
-shape on parse and keep the verbatim token as a 'ST.ShortText'.
+The nonce is canonical Base64url without padding. The codec validates the
+alphabet, length, and final sextet, preserving the encoded spelling.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc8555.html#section-6.5.1 RFC 8555 §6.5.1>
 
@@ -20,9 +20,10 @@ module Network.HTTP.Headers.ReplayNonce (
   renderReplayNonce,
 ) where
 
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Unsafe as BSU
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hReplayNonce)
 import qualified Network.HTTP.Headers.Mason as M
@@ -41,14 +42,10 @@ instance KnownHeader ReplayNonce where
   type Direction ReplayNonce = 'Response
 
 
-  parseFromHeaders _ headers = case runParser replayNonceParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Replay-Nonce header: " <> show rest
-    Fail -> Left "Failed to parse Replay-Nonce header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Replay-Nonce" replayNonceParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderReplayNonce
+  renderToHeaders _ = ST.toByteString . replayNonce
 
 
   headerName _ = hReplayNonce
@@ -56,10 +53,18 @@ instance KnownHeader ReplayNonce where
 
 replayNonceParser :: ParserT st String ReplayNonce
 replayNonceParser =
-  ReplayNonce <$> shortASCIIFromParser_ (some (satisfyAscii (`CharSet.member` base64urlCharSet)))
+  withByteString base64UrlBytes $ \() wire ->
+    if canonicalTail wire
+      then pure (ReplayNonce (STU.fromByteStringUnsafe wire))
+      else err "Invalid unpadded Base64url Replay-Nonce"
   where
-    base64urlCharSet =
-      CharSet.fromList (['A' .. 'Z'] <> ['a' .. 'z'] <> ['0' .. '9']) <> "-_"
+    -- The scanner guarantees a nonempty run. A partial group must have
+    -- four or two zero bits in its last sextet, respectively.
+    canonicalTail wire = case BS.length wire `rem` 4 of
+      0 -> True
+      2 -> BSU.unsafeLast wire `BS.elem` "AQgw"
+      3 -> BSU.unsafeLast wire `BS.elem` "AEIMQUYcgkosw048"
+      _ -> False
 
 
 renderReplayNonce :: ReplayNonce -> M.Builder

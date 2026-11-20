@@ -4,11 +4,15 @@ module Test.Hermes.ClientCert (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
+import Data.Time (UTCTime (..), fromGregorian)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
 import qualified Network.HTTP.Headers.CertNotAfter as CNA
 import qualified Network.HTTP.Headers.CertNotBefore as CNB
 import qualified Network.HTTP.Headers.ClientCert as CC
@@ -96,49 +100,19 @@ prop_chain_roundtrip = property $ do
     Left err -> error (err <> " on " <> show (renderCCC v))
 
 
--- Cert-Not-Before -------------------------------------------------------------
-
-unit_notbefore_parse :: Spec
-unit_notbefore_parse = it "parses a Cert-Not-Before sf-date" $
-  case parseFull CNB.certNotBeforeParser "@1659578233" of
-    Right (CNB.CertNotBefore n) -> n `shouldBe` 1659578233
-    other -> error (show other)
-
-
-unit_notbefore_render :: Spec
-unit_notbefore_render =
-  it "renders a Cert-Not-Before sf-date" $
-    renderCNB (CNB.CertNotBefore 1659578233) `shouldBe` "@1659578233"
-
-
 prop_notbefore_roundtrip :: Property
 prop_notbefore_roundtrip = property $ do
   secs <- forAll (Gen.int (Range.linearFrom 0 (-1_000_000_000) 4_000_000_000))
-  let v = CNB.CertNotBefore secs
+  let v = CNB.CertNotBefore (posixSecondsToUTCTime (fromIntegral secs))
   case parseFull CNB.certNotBeforeParser (renderCNB v) of
     Right v' -> v === v'
     Left err -> error (err <> " on " <> show (renderCNB v))
 
 
--- Cert-Not-After --------------------------------------------------------------
-
-unit_notafter_parse :: Spec
-unit_notafter_parse = it "parses a Cert-Not-After sf-date" $
-  case parseFull CNA.certNotAfterParser "@1690354800" of
-    Right (CNA.CertNotAfter n) -> n `shouldBe` 1690354800
-    other -> error (show other)
-
-
-unit_notafter_render :: Spec
-unit_notafter_render =
-  it "renders a Cert-Not-After sf-date" $
-    renderCNA (CNA.CertNotAfter 1690354800) `shouldBe` "@1690354800"
-
-
 prop_notafter_roundtrip :: Property
 prop_notafter_roundtrip = property $ do
   secs <- forAll (Gen.int (Range.linearFrom 0 (-1_000_000_000) 4_000_000_000))
-  let v = CNA.CertNotAfter secs
+  let v = CNA.CertNotAfter (posixSecondsToUTCTime (fromIntegral secs))
   case parseFull CNA.certNotAfterParser (renderCNA v) of
     Right v' -> v === v'
     Left err -> error (err <> " on " <> show (renderCNA v))
@@ -154,10 +128,38 @@ tests =
       , unit_chain_parse
       , unit_chain_render
       , it "Client-Cert-Chain round-trip" prop_chain_roundtrip
-      , unit_notbefore_parse
-      , unit_notbefore_render
+      , it "requires one end-entity field and preserves the chain order across lines" $ do
+          let fields =
+                headerMapFromList
+                  [ ("Client-Cert", "\t:aGVsbG8:\t")
+                  , ("Client-Cert-Chain", " :d29ybGQ=: ")
+                  , ("Client-Cert-Chain", "\t:YQ==:, :Yg==:")
+                  ]
+          CC.lookupClientCertificateHeaders fields
+            `shouldBe` Right (Just (CC.ClientCertificateHeaders (CC.ClientCert "hello") (Just (CCC.ClientCertChain ("world" :| ["a", "b"])))))
+          lookupHeader @CC.ClientCert (headerMapFromList [("Client-Cert", ":YQ==:"), ("Client-Cert", ":Yg==:")]) `shouldSatisfy` isLeft
+          lookupHeader @CC.ClientCert (headerMapFromList [("Client-Cert", ":YQ==:, :Yg==:")]) `shouldSatisfy` isLeft
+          lookupHeader @CCC.ClientCertChain (headerMapFromList [("Client-Cert-Chain", ":YQ==:"), ("Client-Cert-Chain", "(:Yg==:)")])
+            `shouldSatisfy` isLeft
+      , it "rejects a chain with no leaf or with the leaf in the chain" $ do
+          CC.lookupClientCertificateHeaders (headerMapFromList [("Client-Cert-Chain", ":YQ==:")]) `shouldSatisfy` isLeft
+          CC.lookupClientCertificateHeaders (headerMapFromList [("Client-Cert", ":YQ:"), ("Client-Cert-Chain", ":Yg==:, :YQ==:")])
+            `shouldSatisfy` isLeft
+          CC.lookupClientCertificateHeaders (headerMapFromList [("Client-Cert", ":YQ:")])
+            `shouldBe` Right (Just (CC.ClientCertificateHeaders (CC.ClientCert "a") Nothing))
+      , it "looks up and renders the ACME STAR validity fields as HTTP dates" $ do
+          let beforeWire = "Thu, 03 Oct 2019 00:00:00 GMT"
+              afterWire = "Thu, 10 Oct 2019 00:00:00 GMT"
+              starts = CNB.CertNotBefore (UTCTime (fromGregorian 2019 10 3) 0)
+              expires = CNA.CertNotAfter (UTCTime (fromGregorian 2019 10 10) 0)
+              fields = headerMapFromList [("Cert-Not-Before", beforeWire), ("Cert-Not-After", afterWire)]
+          lookupHeader @CNB.CertNotBefore fields `shouldBe` Right (Just starts)
+          lookupHeader @CNA.CertNotAfter fields `shouldBe` Right (Just expires)
+          headerMapToList (setHeader starts (headerMapFromList [])) `shouldBe` [("cert-not-before", beforeWire)]
+          headerMapToList (setHeader expires (headerMapFromList [])) `shouldBe` [("cert-not-after", afterWire)]
+          lookupHeader @CNB.CertNotBefore (headerMapFromList [("Cert-Not-Before", beforeWire), ("Cert-Not-Before", beforeWire)])
+            `shouldSatisfy` isLeft
+          lookupHeader @CNA.CertNotAfter (headerMapFromList [("Cert-Not-After", "@1690354800")]) `shouldSatisfy` isLeft
       , it "Cert-Not-Before round-trip" prop_notbefore_roundtrip
-      , unit_notafter_parse
-      , unit_notafter_render
       , it "Cert-Not-After round-trip" prop_notafter_roundtrip
       ]

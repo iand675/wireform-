@@ -33,8 +33,6 @@ module Network.HTTP.Headers.OptionalWWWAuthenticate (
   ChallengeContents (..),
 ) where
 
-import qualified Data.ByteString as B
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hOptionalWWWAuthenticate)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,11 +41,12 @@ import Network.HTTP.Headers.WWWAuthenticate (
   AuthChallenge (..),
   ChallengeContents (..),
   challengesParser,
+  parseChallengeFieldLines,
   renderAuthChallenge,
  )
 
 
--- | @Optional-WWW-Authenticate@ value: zero-or-more advertised challenges.
+-- | @Optional-WWW-Authenticate@ value containing advertised challenges.
 newtype OptionalWWWAuthenticate = OptionalWWWAuthenticate
   { optionalAuthChallenges :: [AuthChallenge]
   }
@@ -60,29 +59,27 @@ instance KnownHeader OptionalWWWAuthenticate where
   type Direction OptionalWWWAuthenticate = 'Response
 
 
-  parseFromHeaders _ headers = do
-    challenges <- traverse parseOne (NE.toList headers)
-    pure (OptionalWWWAuthenticate (concat challenges))
-    where
-      parseOne hdr = case runParser challengesParser hdr of
-        OK cs leftover
-          | B.null (dropOws leftover) -> Right cs
-          | otherwise ->
-              Left ("Unconsumed input after parsing Optional-WWW-Authenticate: " <> show leftover)
-        Fail -> Left "Failed to parse Optional-WWW-Authenticate header"
-        Err err -> Left err
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ fields = parseChallengeFieldLines "Optional-WWW-Authenticate" fields >>= requireChallenges
 
 
-  renderToHeaders _ (OptionalWWWAuthenticate cs) =
-    [M.toStrictByteString (renderOptionalWWWAuthenticate (OptionalWWWAuthenticate cs))]
+  renderToHeaders _ (OptionalWWWAuthenticate []) = []
+  renderToHeaders _ value = [M.toStrictByteString (renderOptionalWWWAuthenticate value)]
+
+
+  omitHeaderValue = null . optionalAuthChallenges
+  {-# INLINE omitHeaderValue #-}
 
 
   headerName _ = hOptionalWWWAuthenticate
 
 
 optionalWWWAuthenticateParser :: ParserT st String OptionalWWWAuthenticate
-optionalWWWAuthenticateParser = OptionalWWWAuthenticate <$> challengesParser
+optionalWWWAuthenticateParser = challengesParser >>= either err pure . requireChallenges
+
+
+requireChallenges :: [AuthChallenge] -> Either String OptionalWWWAuthenticate
+requireChallenges [] = Left "Optional-WWW-Authenticate requires a challenge"
+requireChallenges cs = Right (OptionalWWWAuthenticate cs)
 
 
 renderOptionalWWWAuthenticate :: OptionalWWWAuthenticate -> M.Builder

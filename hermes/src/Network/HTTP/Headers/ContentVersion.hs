@@ -1,3 +1,6 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 {- |
 @Content-Version@ — obsolete HTTP entity-header (RFC 2068 §19.6.2.2) carrying
 the version tag of an evolving entity, intended to support collaborative
@@ -9,32 +12,43 @@ authoring together with @Derived-From@.
 Content-Version = \"Content-Version\" \":\" quoted-string
 @
 
-The version tag is opaque (e.g. @\"2.1.2\"@, @\"Fred 19950116-12:26:48\"@,
-@\"2.5a4-omega7\"@), so we capture its decoded contents as 'ST.ShortText' and
-re-emit it as an RFC 9110 §5.6.4 quoted-string (DQUOTE / backslash escaped).
+The RFC 9110 quoted-string codec retains the tag's decoded octets. Rendering
+quotes DQUOTE and backslash octets as needed.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc2068#section-19.6.2.2>
 
 See also: "Network.HTTP.Headers.DerivedFrom", "Network.HTTP.Headers.ETag", "Network.HTTP.Headers.URI".
 -}
 module Network.HTTP.Headers.ContentVersion (
-  ContentVersion (..),
+  ContentVersion (ContentVersion, ContentVersionBytes, contentVersionTag, contentVersionTagBytes),
   contentVersionParser,
   renderContentVersion,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Short as SBS
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Rendering (encodeHttpQuotedBytes, opaqueShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentVersion)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import qualified Network.HTTP.Headers.Rendering.Util as R
 
 
--- | @Content-Version@ value: the decoded version tag from the quoted-string.
-newtype ContentVersion = ContentVersion {contentVersionTag :: ST.ShortText}
+-- | The decoded tag octets. Construct with valid HTTP quoted-string octets.
+newtype ContentVersion = ContentVersionBytes {contentVersionTagBytes :: SBS.ShortByteString}
   deriving stock (Eq, Show)
+
+
+{- | The text interface constructs UTF-8 tag octets. The view uses Latin-1
+for invalid UTF-8. Use 'contentVersionTagBytes' to copy a received tag.
+-}
+pattern ContentVersion :: ST.ShortText -> ContentVersion
+pattern ContentVersion {contentVersionTag} <- ContentVersionBytes (opaqueShortText -> contentVersionTag)
+  where
+    ContentVersion tag = ContentVersionBytes (ST.toShortByteString tag)
+
+
+{-# COMPLETE ContentVersion #-}
 
 
 instance KnownHeader ContentVersion where
@@ -43,22 +57,18 @@ instance KnownHeader ContentVersion where
   type Direction ContentVersion = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser contentVersionParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Content-Version header: " <> show rest
-    Fail -> Left "Failed to parse Content-Version header"
-    Err e -> Left e
+  parseFromHeaders _ = parseQuotedFieldLine "Content-Version" (ContentVersionBytes . SBS.toShort)
 
 
-  renderToHeaders _ = M.toStrictByteString . renderContentVersion
+  renderToHeaders _ = encodeHttpQuotedBytes . contentVersionTagBytes
 
 
   headerName _ = hContentVersion
 
 
 contentVersionParser :: ParserT st String ContentVersion
-contentVersionParser = ows *> (ContentVersion . unsafeToRFC8941String <$> rfc8941String)
+contentVersionParser = ows *> (ContentVersionBytes . SBS.toShort <$> httpQuotedBytes)
 
 
 renderContentVersion :: ContentVersion -> M.Builder
-renderContentVersion (ContentVersion tag) = R.rfc8941String (RFC8941String tag)
+renderContentVersion = M.byteString . encodeHttpQuotedBytes . contentVersionTagBytes

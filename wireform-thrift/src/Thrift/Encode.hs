@@ -1,4 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE UnboxedSums #-}
+{-# LANGUAGE UnboxedTuples #-}
 
 {- | High-level Thrift encoding for Binary and Compact protocols.
 
@@ -18,7 +21,11 @@ let compactBytes = encodeCompact person
 -}
 module Thrift.Encode (
   encodeBinary,
+  encodeBinaryBounded,
   encodeCompact,
+  encodeCompactBounded,
+  binaryEncodedSizeBounded,
+  compactEncodedSizeBounded,
 ) where
 
 import Data.Bits (countLeadingZeros, shiftL, shiftR, xor, (.&.), (.|.))
@@ -29,12 +36,18 @@ import Data.Int (Int16, Int32, Int64)
 import Data.List (sortBy)
 import Data.Ord (comparing)
 import Data.Text.Encoding qualified as TE
+import Data.Text.Foreign qualified as TF
 import Data.Vector qualified as V
-import Data.Word (Word16, Word32, Word64, Word8)
+import Data.Word (Word16, Word32, Word64, Word8, byteSwap64)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (pokeByteOff)
+import GHC.ByteOrder (ByteOrder (..), targetByteOrder)
+import GHC.Exts (Int (I#), Int#, writeWord8OffAddrAsWord64#, (+#), (-#), (<#), (==#), (>#))
 import GHC.Float (castDoubleToWord64)
+import GHC.IO (IO (..))
+import GHC.Ptr (Ptr (Ptr))
+import GHC.Word (Word64 (W64#))
 import Thrift.Value qualified as TV
 import Thrift.Wire (ThriftType (..), thriftTypeToBin, thriftTypeToCompact)
 import Wireform.Encode.Direct (directEncode)
@@ -45,31 +58,20 @@ import Wireform.Encode.Direct (directEncode)
 --------------------------------------------------------------------------------
 
 encodeBinary :: TV.Value -> ByteString
-encodeBinary val = directEncode (binValueSize val) (writeBin val)
+encodeBinary = either error id . encodeBinaryBounded maxBound
 {-# INLINE encodeBinary #-}
 
 
-binValueSize :: TV.Value -> Int
-binValueSize = \case
-  TV.Bool _ -> 1
-  TV.Byte _ -> 1
-  TV.I16 _ -> 2
-  TV.I32 _ -> 4
-  TV.I64 _ -> 8
-  TV.Double _ -> 8
-  TV.String t -> let !bs = TE.encodeUtf8 t in 4 + BS.length bs
-  TV.Binary b -> 4 + BS.length b
-  TV.UUID _ -> 16
-  TV.Struct fields ->
-    let sorted = sortBy (comparing fst) (V.toList fields)
-        fieldsSize = sum [3 + binValueSize v | (_fid, v) <- sorted]
-    in fieldsSize + 1
-  TV.Map _kt _vt entries ->
-    6 + V.foldl' (\acc (k, v) -> acc + binValueSize k + binValueSize v) 0 entries
-  TV.List _et elems ->
-    5 + V.foldl' (\acc v -> acc + binValueSize v) 0 elems
-  TV.Set _et elems ->
-    5 + V.foldl' (\acc v -> acc + binValueSize v) 0 elems
+-- | Validate the complete value and byte budget before allocating output.
+encodeBinaryBounded :: Int -> TV.Value -> Either String ByteString
+encodeBinaryBounded limit value = do
+  size <- binaryEncodedSizeBounded limit value
+  Right (directEncode size (writeBin value))
+
+
+-- | Measure exactly without encoding strings or allocating output buffers.
+binaryEncodedSizeBounded :: Int -> TV.Value -> Either String Int
+binaryEncodedSizeBounded = checkedSize measureBinary#
 
 
 writeBin :: TV.Value -> Ptr Word8 -> Int -> IO Int
@@ -135,63 +137,173 @@ writeBinBytes p off bs = do
 --------------------------------------------------------------------------------
 
 encodeCompact :: TV.Value -> ByteString
-encodeCompact val = directEncode (compValueSize val) (writeComp val)
+encodeCompact = either error id . encodeCompactBounded maxBound
 {-# INLINE encodeCompact #-}
 
 
-compValueSize :: TV.Value -> Int
-compValueSize val = case val of
-  TV.Struct fields -> compStructSize fields
-  _ -> compPrimitiveSize val
+-- | Encode only after exact sizing and validation fit the requested budget.
+encodeCompactBounded :: Int -> TV.Value -> Either String ByteString
+encodeCompactBounded limit value = do
+  size <- compactEncodedSizeBounded limit value
+  Right (directEncode size (writeComp value))
 
 
-compStructSize :: V.Vector (Int16, TV.Value) -> Int
-compStructSize fields =
-  let sorted = sortBy (comparing fst) (V.toList fields)
-  in goStructSize 0 sorted + 1
+compactEncodedSizeBounded :: Int -> TV.Value -> Either String Int
+compactEncodedSizeBounded = checkedSize measureCompact#
 
 
-goStructSize :: Int16 -> [(Int16, TV.Value)] -> Int
-goStructSize _ [] = 0
-goStructSize !lastFid ((fid, v) : rest) =
-  let !delta = fid - lastFid
-      !hdrSz =
-        if delta > 0 && delta <= 15
-          then 1
-          else 1 + compVarintSize (fromIntegral (zigZagEncode32 (fromIntegral fid)))
-      !valSz = case v of
-        TV.Bool _ -> 0
-        _ -> compPrimitiveSize v
-  in hdrSz + valSz + goStructSize fid rest
+type Measure = Int# -> TV.Value -> (# String | Int# #)
 
 
-compPrimitiveSize :: TV.Value -> Int
-compPrimitiveSize = \case
-  TV.Bool _ -> 1
-  TV.Byte _ -> 1
-  TV.I16 v -> compVarintSize (fromIntegral (zigZagEncode32 (fromIntegral v)))
-  TV.I32 v -> compVarintSize (fromIntegral (zigZagEncode32 v))
-  TV.I64 v -> compVarintSize (zigZagEncode64 v)
-  TV.Double _ -> 8
-  TV.String t -> let !bs = TE.encodeUtf8 t in compVarintSize (fromIntegral (BS.length bs)) + BS.length bs
-  TV.Binary b -> compVarintSize (fromIntegral (BS.length b)) + BS.length b
-  TV.UUID _ -> 16
-  TV.Struct fields -> compStructSize fields
-  TV.Map _kt _vt entries ->
-    if V.null entries
-      then 1
-      else
-        compVarintSize (fromIntegral (V.length entries))
-          + 1
-          + V.foldl' (\acc (k, v) -> acc + compPrimitiveSize k + compPrimitiveSize v) 0 entries
-  TV.List _et elems ->
-    let !sz = V.length elems
-        !hdrSz = if sz < 15 then 1 else 1 + compVarintSize (fromIntegral sz)
-    in hdrSz + V.foldl' (\acc v -> acc + compPrimitiveSize v) 0 elems
-  TV.Set _et elems ->
-    let !sz = V.length elems
-        !hdrSz = if sz < 15 then 1 else 1 + compVarintSize (fromIntegral sz)
-    in hdrSz + V.foldl' (\acc v -> acc + compPrimitiveSize v) 0 elems
+-- Subtract from a remaining budget instead of adding sizes that can overflow.
+-- Recursive workers return raw counters/results, never a per-value Either.
+checkedSize :: Measure -> Int -> TV.Value -> Either String Int
+checkedSize measure (I# limit) value = case limit <# 0# of
+  1# -> Left "Thrift.Encode: negative size limit"
+  _ -> case measure limit value of
+    (# message | #) -> Left message
+    (# | remaining #) -> Right (I# (limit -# remaining))
+{-# INLINE checkedSize #-}
+
+
+spend# :: Int -> Int# -> (# String | Int# #)
+spend# (I# bytes) remaining = case bytes <# 0# of
+  1# -> (# "Thrift.Encode: negative size" | #)
+  _ -> case bytes ># remaining of
+    1# -> (# "Thrift.Encode: encoded value exceeds size limit" | #)
+    _ -> (# | remaining -# bytes #)
+{-# INLINE spend# #-}
+
+
+countFits :: Word64 -> Int -> Bool
+countFits maximumCount count = count >= 0 && fromIntegral count <= maximumCount
+{-# INLINE countFits #-}
+
+
+measurePayload# :: Word64 -> Int -> Int -> Int# -> (# String | Int# #)
+measurePayload# maximumCount prefixSize size remaining
+  | not (countFits maximumCount size) = (# "Thrift.Encode: byte length exceeds protocol limit" | #)
+  | otherwise = case spend# prefixSize remaining of
+      (# message | #) -> (# message | #)
+      (# | afterPrefix #) -> spend# size afterPrefix
+{-# INLINE measurePayload# #-}
+
+
+measureUUID# :: ByteString -> Int# -> (# String | Int# #)
+measureUUID# bytes remaining
+  | BS.length bytes /= 16 = (# "Thrift.Encode: UUID must contain exactly 16 bytes" | #)
+  | otherwise = spend# 16 remaining
+{-# INLINE measureUUID# #-}
+
+
+measureBinary# :: Measure
+measureBinary# remaining value = case value of
+  TV.Bool _ -> spend# 1 remaining
+  TV.Byte _ -> spend# 1 remaining
+  TV.I16 _ -> spend# 2 remaining
+  TV.I32 _ -> spend# 4 remaining
+  TV.I64 _ -> spend# 8 remaining
+  TV.Double _ -> spend# 8 remaining
+  TV.String text -> measurePayload# 0x7fffffff 4 (TF.lengthWord8 text) remaining
+  TV.Binary bytes -> measurePayload# 0x7fffffff 4 (BS.length bytes) remaining
+  TV.UUID bytes -> measureUUID# bytes remaining
+  TV.Struct fields -> case spend# 1 remaining of
+    (# message | #) -> (# message | #)
+    (# | rest #) ->
+      if V.length fields > I# rest `quot` 3
+        then (# "Thrift.Encode: encoded value exceeds size limit" | #)
+        else measureFields# False 0 (sortBy (comparing fst) (V.toList fields)) rest
+  TV.Map keyType valueType entries -> measureMap# False keyType valueType entries remaining
+  TV.List elementType elements -> measureSequence# False elementType elements remaining
+  TV.Set elementType elements -> measureSequence# False elementType elements remaining
+
+
+measureCompact# :: Measure
+measureCompact# remaining value = case value of
+  TV.Bool _ -> spend# 1 remaining
+  TV.Byte _ -> spend# 1 remaining
+  TV.I16 n -> spend# (compVarintSize (fromIntegral (zigZagEncode32 (fromIntegral n)))) remaining
+  TV.I32 n -> spend# (compVarintSize (fromIntegral (zigZagEncode32 n))) remaining
+  TV.I64 n -> spend# (compVarintSize (zigZagEncode64 n)) remaining
+  TV.Double _ -> spend# 8 remaining
+  TV.String text -> bytes (TF.lengthWord8 text)
+  TV.Binary valueBytes -> bytes (BS.length valueBytes)
+  TV.UUID valueBytes -> measureUUID# valueBytes remaining
+  TV.Struct fields -> case spend# 1 remaining of
+    (# message | #) -> (# message | #)
+    (# | rest #) ->
+      if V.length fields > I# rest
+        then (# "Thrift.Encode: encoded value exceeds size limit" | #)
+        else measureFields# True 0 (sortBy (comparing fst) (V.toList fields)) rest
+  TV.Map keyType valueType entries -> measureMap# True keyType valueType entries remaining
+  TV.List elementType elements -> measureSequence# True elementType elements remaining
+  TV.Set elementType elements -> measureSequence# True elementType elements remaining
+  where
+    bytes size = measurePayload# 0xffffffff (compVarintSize (fromIntegral size)) size remaining
+
+
+measureFields# :: Bool -> Int16 -> [(Int16, TV.Value)] -> Int# -> (# String | Int# #)
+measureFields# _ _ [] remaining = (# | remaining #)
+measureFields# compact lastFid ((fid, value) : fields) remaining =
+  let !delta = fromIntegral fid - fromIntegral lastFid :: Int
+      !headerSize = if not compact then 3 else if delta > 0 && delta <= 15 then 1 else 1 + compVarintSize (fromIntegral (zigZagEncode32 (fromIntegral fid)))
+  in case spend# headerSize remaining of
+       (# message | #) -> (# message | #)
+       (# | rest #) -> case value of
+         TV.Bool _ | compact -> measureFields# compact fid fields rest
+         _ -> case (if compact then measureCompact# else measureBinary#) rest value of
+           (# message | #) -> (# message | #)
+           (# | afterValue #) -> measureFields# compact fid fields afterValue
+
+
+measureSequence# :: Bool -> ThriftType -> V.Vector TV.Value -> Int# -> (# String | Int# #)
+measureSequence# compact elementType elements remaining
+  | not (countFits (if compact then 0xffffffff else 0x7fffffff) count) = (# "Thrift.Encode: container length exceeds protocol limit" | #)
+  | otherwise = case spend# headerSize remaining of
+      (# message | #) -> (# message | #)
+      (# | rest #) ->
+        if count > I# rest
+          then (# "Thrift.Encode: encoded value exceeds size limit" | #)
+          else
+            let go index budget = case index ==# count# of
+                  1# -> (# | budget #)
+                  _ ->
+                    let value = V.unsafeIndex elements (I# index)
+                    in if TV.thriftTypeOf value /= elementType
+                         then (# "Thrift.Encode: container element type mismatch" | #)
+                         else case (if compact then measureCompact# else measureBinary#) budget value of
+                           (# message | #) -> (# message | #)
+                           (# | next #) -> go (index +# 1#) next
+            in go 0# rest
+  where
+    !count@(I# count#) = V.length elements
+    !headerSize = if not compact then 5 else if count < 15 then 1 else 1 + compVarintSize (fromIntegral count)
+
+
+measureMap# :: Bool -> ThriftType -> ThriftType -> V.Vector (TV.Value, TV.Value) -> Int# -> (# String | Int# #)
+measureMap# compact keyType valueType entries remaining
+  | not (countFits (if compact then 0xffffffff else 0x7fffffff) count) = (# "Thrift.Encode: container length exceeds protocol limit" | #)
+  | otherwise = case spend# headerSize remaining of
+      (# message | #) -> (# message | #)
+      (# | rest #) ->
+        if count > I# rest `quot` 2
+          then (# "Thrift.Encode: encoded value exceeds size limit" | #)
+          else
+            let go index budget = case index ==# count# of
+                  1# -> (# | budget #)
+                  _ ->
+                    let (key, value) = V.unsafeIndex entries (I# index)
+                    in if TV.thriftTypeOf key /= keyType || TV.thriftTypeOf value /= valueType
+                         then (# "Thrift.Encode: map key/value type mismatch" | #)
+                         else case (if compact then measureCompact# else measureBinary#) budget key of
+                           (# message | #) -> (# message | #)
+                           (# | afterKey #) -> case (if compact then measureCompact# else measureBinary#) afterKey value of
+                             (# message | #) -> (# message | #)
+                             (# | next #) -> go (index +# 1#) next
+            in go 0# rest
+  where
+    !count@(I# count#) = V.length entries
+    !headerSize = if not compact then 6 else if count == 0 then 1 else 1 + compVarintSize (fromIntegral count)
 
 
 compVarintSize :: Word64 -> Int
@@ -250,7 +362,7 @@ goWriteCompStruct p off !lastFid ((fid, v) : rest) = do
 writeCompValue :: TV.Value -> Ptr Word8 -> Int -> IO Int
 writeCompValue val p off = case val of
   TV.Bool b -> do
-    pokeByteOff p off (if b then 1 :: Word8 else 0)
+    pokeByteOff p off (if b then 1 :: Word8 else 2)
     pure $! off + 1
   TV.Byte v -> do
     pokeByteOff p off (fromIntegral v :: Word8)
@@ -333,9 +445,12 @@ writeBE64 p off w = do
 
 
 writeLE64 :: Ptr Word8 -> Int -> Word64 -> IO Int
-writeLE64 p off w = do
-  pokeByteOff p off w
-  pure $! off + 8
+writeLE64 (Ptr address) (I# offset) value =
+  let !little = case targetByteOrder of LittleEndian -> value; BigEndian -> byteSwap64 value
+  in case little of
+       W64# word -> IO $ \state ->
+         case writeWord8OffAddrAsWord64# address offset word state of
+           next -> (# next, I# (offset +# 8#) #)
 {-# INLINE writeLE64 #-}
 
 

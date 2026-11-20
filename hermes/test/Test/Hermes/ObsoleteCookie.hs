@@ -2,114 +2,145 @@
 
 module Test.Hermes.ObsoleteCookie (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
-import qualified Data.Text.Short as ST
-import Hedgehog (Gen, Property, forAll, property, (===))
+import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
+import Hedgehog (Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
 import qualified Network.HTTP.Headers.Cookie2 as C2
+import Network.HTTP.Headers.HeaderFieldName (hCookie2, hSetCookie2)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Headers.Parsing.Util (parseFieldLine)
 import qualified Network.HTTP.Headers.SetCookie2 as SC2
 import Test.Syd
 import Test.Syd.Hedgehog ()
 
 
-parseCookie2 :: ByteString -> Either String C2.Cookie2
-parseCookie2 bs = case runParser C2.cookie2Parser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left ("unconsumed: " <> show rest)
-  Fail -> Left "parse failed"
-  Err err -> Left err
+readVersion :: ByteString -> Either String (Maybe Integer)
+readVersion wire =
+  fmap
+    (fmap toInteger)
+    (lookupHeader @C2.Cookie2 (headerMapFromList [("Cookie2", wire)]) >>= traverse C2.cookie2Version)
 
 
-renderCookie2 :: C2.Cookie2 -> ByteString
-renderCookie2 = M.toStrictByteString . C2.renderCookie2
+responseEntries :: [ByteString] -> Either String (Maybe [NonEmpty SC2.Cookie2Definition])
+responseEntries linesIn =
+  lookupHeader @SC2.SetCookie2s (headerMapFromList (map (\wire -> ("Set-Cookie2", wire)) linesIn))
+    >>= traverse (traverse SC2.setCookie2Entries . SC2.getSetCookie2s)
 
 
-parseSetCookie2 :: ByteString -> Either String SC2.SetCookie2
-parseSetCookie2 bs = case runParser SC2.setCookie2Parser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left ("unconsumed: " <> show rest)
-  Fail -> Left "parse failed"
-  Err err -> Left err
+propCookie2 :: Property
+propCookie2 = property $ do
+  version <- forAll (Gen.integral (Range.linear 0 (2 ^ (100 :: Int))))
+  let fields = setHeader (C2.cookie2FromVersion (fromInteger version)) (headerMapFromList [])
+  (lookupHeader @C2.Cookie2 fields >>= traverse C2.cookie2Version) === Right (Just (fromInteger version))
 
 
-renderSetCookie2 :: SC2.SetCookie2 -> ByteString
-renderSetCookie2 = M.toStrictByteString . SC2.renderSetCookie2
-
-
--- Cookie2 -----------------------------------------------------------------
-
-unit_cookie2_parse :: Spec
-unit_cookie2_parse = it "parses a Cookie2 version directive" $
-  case parseCookie2 "$Version=\"1\"" of
-    Right (C2.Cookie2 v) -> v `shouldBe` ST.fromString "$Version=\"1\""
-    other -> error (show other)
-
-
-unit_cookie2_render :: Spec
-unit_cookie2_render =
-  it "renders a Cookie2 version directive verbatim" $
-    renderCookie2 (C2.Cookie2 (ST.fromString "$Version=\"1\"")) `shouldBe` "$Version=\"1\""
-
-
--- Set-Cookie2 -------------------------------------------------------------
-
-unit_setcookie2_parse :: Spec
-unit_setcookie2_parse = it "parses a Set-Cookie2 definition" $
-  case parseSetCookie2 "Customer=\"WILE_E_COYOTE\"; Version=\"1\"; Path=\"/acme\"" of
-    Right (SC2.SetCookie2 v) ->
-      v `shouldBe` ST.fromString "Customer=\"WILE_E_COYOTE\"; Version=\"1\"; Path=\"/acme\""
-    other -> error (show other)
-
-
-unit_setcookie2_render :: Spec
-unit_setcookie2_render =
-  it "renders a Set-Cookie2 definition verbatim" $
-    renderSetCookie2 (SC2.SetCookie2 (ST.fromString "Part_Number=\"Rocket_Launcher_0001\"; Version=\"1\"; Path=\"/acme\""))
-      `shouldBe` "Part_Number=\"Rocket_Launcher_0001\"; Version=\"1\"; Path=\"/acme\""
-
-
--- Round-trip properties ---------------------------------------------------
-
-{- | Printable, non-empty ASCII values within the obsolete cookie grammar.
-The raw-preserving newtypes round-trip any such value byte-for-byte.
--}
-valueGen :: Gen ST.ShortText
-valueGen =
-  ST.fromString
-    <$> Gen.string (Range.linear 1 64) (Gen.element cookieChars)
-  where
-    cookieChars = ['A' .. 'Z'] <> ['a' .. 'z'] <> ['0' .. '9'] <> "=\"_-./$; "
-
-
-prop_cookie2_roundtrip :: Property
-prop_cookie2_roundtrip = property $ do
-  v <- C2.Cookie2 <$> forAll valueGen
-  let bs = renderCookie2 v
-  case parseCookie2 bs of
-    Right v' -> v === v'
-    Left err -> error (err <> " on " <> show bs)
-
-
-prop_setcookie2_roundtrip :: Property
-prop_setcookie2_roundtrip = property $ do
-  v <- SC2.SetCookie2 <$> forAll valueGen
-  let bs = renderSetCookie2 v
-  case parseSetCookie2 bs of
-    Right v' -> v === v'
-    Left err -> error (err <> " on " <> show bs)
+propSetCookie2 :: Property
+propSetCookie2 = property $ do
+  let quotedOctets = 9 : [32 .. 126] <> [128 .. 255]
+  payload <- BS.pack <$> forAll (Gen.list (Range.linear 0 32) (Gen.element quotedOctets))
+  ports <- forAll (Gen.nonEmpty (Range.linear 1 4) (Gen.word16 Range.constantBounded))
+  version <- forAll (Gen.word64 Range.constantBounded)
+  let cookies =
+        SC2.Cookie2Definition "session" payload (fromIntegral version) [SC2.Cookie2Port (Just ports), SC2.Cookie2Secure]
+          :| [SC2.Cookie2Definition "locale" "da-DK" 1 [SC2.Cookie2Extension "Custom" (Just payload)]]
+  case SC2.setCookie2FromEntries cookies of
+    Left err -> error err
+    Right header -> do
+      let rendered = M.toStrictByteString (SC2.renderSetCookie2 header)
+      responseEntries [rendered] === Right (Just [cookies])
+      parseFieldLine "Set-Cookie2" SC2.setCookie2Parser rendered === Right header
 
 
 tests :: Spec
-tests =
-  describe "ObsoleteCookie" $
-    sequence_
-      [ unit_cookie2_parse
-      , unit_cookie2_render
-      , unit_setcookie2_parse
-      , unit_setcookie2_render
-      , it "Cookie2 round-trip" prop_cookie2_roundtrip
-      , it "Set-Cookie2 round-trip" prop_setcookie2_roundtrip
-      ]
+tests = describe "ObsoleteCookie" $ do
+  describe "Cookie2" $ do
+    it "reads decimal versions in token and quoted form and retains the wire spelling" $ do
+      let wire = " \t$vErSiOn = \"0001\" \t"
+      readVersion wire `shouldBe` Right (Just 1)
+      readVersion "$Version=18446744073709551616" `shouldBe` Right (Just 18446744073709551616)
+      readVersion "$Version=\"1\"" `shouldBe` Right (Just 1)
+      let fields = headerMapFromList [("Cookie2", wire)]
+      case lookupHeader @C2.Cookie2 fields of
+        Right (Just header) -> do
+          lookupRawHeader hCookie2 (setHeader header (headerMapFromList [])) `shouldBe` Just (wire :| [])
+          parseFieldLine "Cookie2" C2.cookie2Parser wire `shouldBe` Right header
+        result -> expectationFailure (show result)
+      M.toStrictByteString (C2.renderCookie2 (C2.Cookie2 "$Version=\"1\"")) `shouldBe` "$Version=\"1\""
+    it "rejects malformed versions, extraneous directives and extra field lines" $ do
+      forM_ ["", "$Version", "$Version=", "Version=1", "$Version=+1", "$Version=-1", "$Version=\" 1\"", "$Version=a", "$Version=1, $Version=2", "$Version=1; Path=/"] $ \wire ->
+        readVersion wire `shouldSatisfy` isLeft
+      lookupHeader @C2.Cookie2 (headerMapFromList [("Cookie2", "$Version=1"), ("Cookie2", "$Version=2")])
+        `shouldSatisfy` isLeft
+    it "round-trips arbitrary-precision cookie versions" propCookie2
+  describe "Set-Cookie2" $ do
+    it "recognizes every RFC attribute and preserves folded and repeated field lines" $ do
+      let first =
+            "Customer=\"A, B\"; Version=\"1\"; path=\"/acme\"; Port=\"80, 8000\"; Secure; Discard;"
+              <> " Comment=\"Caf\195\169\"; CommentURL=\"HTTP://[::1]:8080/acme?x=1\";"
+              <> " Domain=\"example.test\"; Max-Age=\"18446744073709551616\"; X-Note=\"a\\\"\255\", "
+              <> "Locale=da; Version=2; Port"
+          second = "Secure=\"\"; Version=0001"
+          entries =
+            SC2.Cookie2Definition
+              "Customer"
+              "A, B"
+              1
+              [ SC2.Cookie2Path "/acme"
+              , SC2.Cookie2Port (Just (80 :| [8000]))
+              , SC2.Cookie2Secure
+              , SC2.Cookie2Discard
+              , SC2.Cookie2Comment "Café"
+              , SC2.Cookie2CommentURL "HTTP://[::1]:8080/acme?x=1"
+              , SC2.Cookie2Domain "example.test"
+              , SC2.Cookie2MaxAge 18446744073709551616
+              , SC2.Cookie2Extension "X-Note" (Just "a\"\255")
+              ]
+              :| [SC2.Cookie2Definition "Locale" "da" 2 [SC2.Cookie2Port Nothing]]
+      responseEntries [first, second] `shouldBe` Right (Just [entries, SC2.Cookie2Definition "Secure" "" 1 [] :| []])
+      case lookupHeader @SC2.SetCookie2s (headerMapFromList [("Set-Cookie2", first), ("Set-Cookie2", second)]) of
+        Right (Just header) ->
+          lookupRawHeader hSetCookie2 (setHeader header (headerMapFromList [])) `shouldBe` Just (first :| [second])
+        result -> expectationFailure (show result)
+      M.toStrictByteString (SC2.renderSetCookie2 (SC2.SetCookie2 "Customer=\"WILE_E_COYOTE\"; Version=\"1\"; Path=\"/acme\""))
+        `shouldBe` "Customer=\"WILE_E_COYOTE\"; Version=\"1\"; Path=\"/acme\""
+    it "projects the first matching attribute without losing duplicate wire bytes" $ do
+      let wire = "id=x; version=1; Version=ignored; Path=\"/a\"; path=\"/b,c\"; Feature; FEATURE=x"
+          expected = SC2.Cookie2Definition "id" "x" 1 [SC2.Cookie2Path "/a", SC2.Cookie2Extension "Feature" Nothing]
+      responseEntries [wire] `shouldBe` Right (Just [expected :| []])
+      case lookupHeader @SC2.SetCookie2s (headerMapFromList [("Set-Cookie2", wire)]) of
+        Right (Just header) ->
+          lookupRawHeader hSetCookie2 (setHeader header (headerMapFromList [])) `shouldBe` Just (wire :| [])
+        result -> expectationFailure (show result)
+    it "checks numeric bounds, quoted URL syntax, member boundaries and required attributes" $ do
+      responseEntries ["id=x; Version=1; CommentURL=\"http://example.test\"; Port=\", 0, 65535,\""]
+        `shouldBe` Right (Just [SC2.Cookie2Definition "id" "x" 1 [SC2.Cookie2CommentURL "http://example.test", SC2.Cookie2Port (Just (0 :| [65535]))] :| []])
+      forM_
+        [ ""
+        , ", ,"
+        , "id=x"
+        , "id=; Version=1"
+        , "$Reserved=x; Version=1"
+        , "id=x; Version=-1"
+        , "id=x; Version=+1"
+        , "id=x; Version=1; Port=80"
+        , "id=x; Version=1; Port=\"\""
+        , "id=x; Version=1; Port=\"65536\""
+        , "id=x; Version=1; Port=\"+1\""
+        , "id=x; Version=1; Max-Age=-1"
+        , "id=x; Version=1; Secure=true"
+        , "id=x; Version=1; CommentURL=\"/relative\""
+        , "id=x; Version=1; CommentURL=\"ftp://example.test/\""
+        , "id=x; Version=1; CommentURL=\"http://example.test/#fragment\""
+        , "id=x; Version=1; CommentURL=\"http:///path\""
+        , "id=x; Version=1; Comment=\"\255\""
+        , "id=x; Version=1; x=\"bad\r\""
+        , "id=x; Version=1, other=x; Path=\"/b\""
+        ]
+        $ \wire -> responseEntries [wire] `shouldSatisfy` isLeft
+    it "round-trips ordered cookies and opaque values through typed authoring" propSetCookie2

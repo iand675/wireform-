@@ -21,12 +21,12 @@ module Network.HTTP.Headers.XRealIP (
   renderXRealIP,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXRealIP)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.IPAddress (IPAddress, ipAddressParser, renderIPAddress)
+import Network.IPAddress (IPAddress (..), ipv4Parser, ipv6Parser, parseBareIPv4, parseBareIPv6, renderIPAddress)
 
 
 -- | The single client IP address reported by the proxy.
@@ -40,11 +40,10 @@ instance KnownHeader XRealIP where
   type Direction XRealIP = 'Request
 
 
-  parseFromHeaders _ headers = case runParser xRealIPParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing X-Real-IP header: " <> show rest
-    Fail -> Left "Failed to parse X-Real-IP header"
-    Err e -> Left e
+  parseFromHeaders _ (wire :| [])
+    | Just address <- parseBareIPv4 wire = Right (XRealIP (IPv4Address address))
+    | Just address <- parseBareIPv6 wire = Right (XRealIP (IPv6Address address))
+  parseFromHeaders _ fields = parseSingleFieldLine "X-Real-IP" xRealIPParser fields
 
 
   renderToHeaders _ = M.toStrictByteString . renderXRealIP
@@ -54,7 +53,7 @@ instance KnownHeader XRealIP where
 
 
 xRealIPParser :: ParserT st String XRealIP
-xRealIPParser = XRealIP <$> ipAddressParser
+xRealIPParser = XRealIP <$> ((IPv4Address <$> ipv4Parser) <|> (IPv6Address <$> ipv6Parser))
 
 
 renderXRealIP :: XRealIP -> M.Builder

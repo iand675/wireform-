@@ -45,6 +45,7 @@ module Network.HTTP1.StreamingReader (
   -- * Body / line readers (used by Connection)
   readHeaderBlock,
   readHeaderBlockFrom,
+  defaultHeaderBlockCap,
   readChunkSizeLine,
   readChunkSizeLineFrom,
   readUpTo,
@@ -460,10 +461,11 @@ readChunkSizeLineFrom t startPos = do
               let !lineLen = idx
                   !line = ringSlice ring startPos lineLen
                   !nextPos = startPos + fromIntegral (lineLen + 2)
-              receiveAdvanceTail t nextPos
-              pure $ case Classic.parseChunkSize line of
-                Right n -> Right (n, nextPos)
-                Left e -> Left (ReadParse e)
+              case Classic.parseChunkSize line of
+                Right n -> do
+                  receiveAdvanceTail t nextPos
+                  pure (Right (n, nextPos))
+                Left e -> pure (Left (ReadParse e))
         Nothing
           -- No CRLF yet. If we've already buffered more than the
           -- cap without finding one, the size line is either
@@ -556,7 +558,7 @@ data StrictLine
     StrictLine !ByteString
 
 
-{- | Read one strict CRLF-terminated line.  Returns the slice (no
+{- | Read one strict CRLF-terminated line. Returns an owned copy (no
 trailing CRLF), or 'Nothing' on EOF / oversize.  A bare LF
 between the current position and the next CRLF is surfaced as
 'StrictBareLf' (smuggling guard for the chunked-TE trailer
@@ -566,7 +568,7 @@ readUntilCRLFStrict
   :: ReceiveTransport
   -> Word64
   -> Int
-  -- ^ hard byte cap
+  -- ^ Maximum line length in bytes, excluding CRLF.
   -> IO (Either ReadError (Maybe StrictLine, Word64))
 readUntilCRLFStrict t startPos cap = do
   let !ring = receiveRing t
@@ -577,19 +579,21 @@ readUntilCRLFStrict t startPos cap = do
     loop !ring !base !msk !scanFrom = do
       h <- receiveLoadHead t
       let !avail = fromIntegral (h - startPos) :: Int
-      if avail > cap
-        then pure (Right (Nothing, startPos))
-        else do
-          outcome <- scanCrlfOrBareLf base msk startPos scanFrom avail
-          case outcome of
-            ScanBareLf -> pure (Right (Just StrictBareLf, startPos))
-            ScanFoundCrlf idx -> do
-              let !lineLen = idx
-                  !line = ringSlice ring startPos lineLen
-                  !nextPos = startPos + fromIntegral (lineLen + 2)
+          !scanBytes = if avail - 1 > cap then cap + 2 else avail
+      outcome <- scanCrlfOrBareLf base msk startPos scanFrom scanBytes
+      case outcome of
+        ScanBareLf -> pure (Right (Just StrictBareLf, startPos))
+        ScanFoundCrlf idx
+          | idx > cap -> pure (Right (Nothing, startPos))
+          | otherwise -> do
+              let !line = BS.copy (ringSlice ring startPos idx)
+                  !nextPos = startPos + fromIntegral (idx + 2)
               receiveAdvanceTail t nextPos
               pure (Right (Just (StrictLine line), nextPos))
-            ScanNeedMore -> do
+        ScanNeedMore
+          -- A CR at the line limit can be waiting for its LF.
+          | avail - 1 > cap -> pure (Right (Nothing, startPos))
+          | otherwise -> do
               let !nextScan = max 0 (avail - 1)
               r <- receiveWaitData t h
               case r of

@@ -16,11 +16,9 @@ The parser is /strict/ about RFC 9112 § 3.5 \"robustness\":
 
 * multiple @Content-Length@ values that disagree -> 'ParseLengthConflict'
 * a non-numeric @Content-Length@ -> 'ParseInvalidLength'
-* both @Content-Length@ and @Transfer-Encoding@ on the same message ->
-  'ParseLengthAndTransferEncoding' (RFC 9112 § 6.3 requires
-  'Transfer-Encoding' to take precedence; we accept and re-frame on
-  TE, but flag this so the application can reject it if it's behind a
-  cache that's known to be ambiguous).
+* both @Content-Length@ and @Transfer-Encoding@ on a request ->
+  'ParseLengthAndTransferEncoding'. Transfer-Encoding takes precedence
+  on responses (RFC 9112 § 6.3).
 * a @Transfer-Encoding@ chain that doesn't end with @chunked@ on a
   request -> 'ParseChunkedNotFinal'.
 * CR \/ LF \/ NUL inside a header value -> 'ParseInvalidHeaderValue'
@@ -44,6 +42,7 @@ module Network.HTTP1.Parser (
   parseResponseLower,
   parseHeaderBlock,
   parseHeaderBlockLower,
+  parseHeaderLine,
   parseRequestLine,
   parseStatusLine,
 
@@ -73,12 +72,14 @@ module Network.HTTP1.Parser (
 -- audited) request-smuggling guards.
 
 import Control.DeepSeq (NFData)
-import Data.Bits ((.&.))
+import Data.Bits ((.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Unsafe qualified as BSU
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Word (Word64, Word8)
 import Foreign.C.Types (CInt (..), CPtrdiff (..), CSize (..))
 import Foreign.ForeignPtr (withForeignPtr)
@@ -86,9 +87,16 @@ import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peek)
 import GHC.Generics (Generic)
+import Network.HTTP.Grammar.Authority (portNumber, uriHostBytes)
+import Network.HTTP.Grammar.Parser (boundedDecimalWord64, withShortDecimal)
+import Network.HTTP.Headers (defaultHeaderSettings, parseFromHeaders)
+import Network.HTTP.Headers.Host (hostParser)
+import Network.HTTP.Headers.TransferEncoding (transferEncodingEndsInChunked)
 import Network.HTTP1.Internal.Ascii (asciiIeq)
 import Network.HTTP1.Types
 import System.IO.Unsafe (unsafePerformIO)
+import Wireform.Parser (empty, eof, word8)
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- Types re-exports Method, Version, Status, Headers; we import
@@ -151,14 +159,9 @@ data ParseError
   | ParseUnexpectedEof
   | -- | HTTP\/1.1 request without a @Host@ header (RFC 9112 § 3.2).
     ParseMissingHost
-  | {- | HTTP\/1.1 request with more than one @Host@ header (RFC 9112
-    § 3.2).
-    -}
+  | -- | A request has more than one @Host@ field line (RFC 9112 § 3.2).
     ParseMultipleHosts
-  | {- | The @Host@ header value is structurally invalid (contains
-    userinfo, a path, NUL, whitespace, or is empty). RFC 9112 § 3.2:
-    "Host = uri-host [ ":" port ]" — no @user\@@ prefix, no slashes.
-    -}
+  | -- | A @Host@ field line does not match the authority grammar.
     ParseInvalidHost
   | {- | The request target contains forbidden bytes (NUL, CR, LF,
     non-ASCII octets in origin\/absolute form, …). Common
@@ -207,8 +210,7 @@ findNonFieldValue bs off = unsafePerformIO $
 ['ContentLength']  Body length is a fixed number of octets.
 ['Chunked']        Body uses @Transfer-Encoding: chunked@. Must be
                    delimited by the terminating zero-size chunk.
-['CloseDelimited'] HTTP\/1.0 response without explicit length; body
-                   runs until the peer closes the connection.
+['CloseDelimited'] Response body runs until the peer closes the connection.
 -}
 data Framing
   = NoBody
@@ -272,6 +274,15 @@ parseHeaderBlockLower raw = go 0 []
           let !nameEnd = findNonToken raw off
           in unsafePerformIO (lowercaseInPlace raw off nameEnd) `seq`
                parseOneHeader raw off >>= \(hdr, off') -> go off' (hdr : acc)
+
+
+-- | Parse one complete field line without its terminating CRLF.
+parseHeaderLine :: ByteString -> Either ParseError Header
+parseHeaderLine raw = do
+  (header, end) <- parseOneHeader raw 0
+  if end == BS.length raw && (end < 2 || BSU.unsafeIndex raw (end - 1) /= 0x0a)
+    then Right header
+    else Left ParseInvalidHeaderValue
 
 
 parseOneHeader :: ByteString -> Int -> Either ParseError (Header, Int)
@@ -514,44 +525,36 @@ parseRequestLower block = do
   Right (Request meth tgt ver hdrs BodyEmpty (pure []), framing)
 
 
-{- | RFC 9112 § 3.2: HTTP\/1.1 requests MUST contain exactly one Host
-header. We also validate the value: no userinfo (@user\@host@), no
-path (@host\/foo@), no NUL, no whitespace, non-empty.
+{- | RFC 9112 § 3.2 requires a Host field on HTTP\/1.1 requests.
+When present, the field must be valid and appear on a single line.
 -}
 validateHost :: Version -> Headers -> Either ParseError ()
-validateHost HTTP_1_0 _ = Right ()
-validateHost HTTP_1_1 hdrs = case hLookupAll "host" hdrs of
-  [] -> Left ParseMissingHost
-  [_]
-    | Just v <- findHost hdrs ->
-        if validHostValue v then Right () else Left ParseInvalidHost
-    | otherwise -> Right ()
-  vs
-    -- Some smuggling attacks send a single "Host: a, b" header as one
-    -- value containing a comma — treat that as multiple too.
-    | any commaInValue vs -> Left ParseMultipleHosts
-    | otherwise -> Left ParseMultipleHosts
+validateHost ver = findFirst
   where
-    commaInValue v = BS.elem 0x2c v
+    findFirst []
+      | ver == HTTP_1_1 = Left ParseMissingHost
+      | otherwise = Right ()
+    findFirst ((name, value) : rest)
+      | not (headerNameIeq name "host") = findFirst rest
+      | hHas "host" rest = Left ParseMultipleHosts
+      | validHostValue value = Right ()
+      | otherwise = Left ParseInvalidHost
 
 
-{- | RFC 9112 § 3.2: @Host = uri-host [ \":\" port ]@. We accept any
-non-empty sequence of bytes that does not include @\/@ (path),
-@\@@ (userinfo), NUL, SP, HTAB, or any control byte.
--}
+-- An empty Host or a plain reg-name needs no typed host allocation.
+-- The Host codec handles ports, escapes, IP literals and the full grammar.
 validHostValue :: ByteString -> Bool
-validHostValue v
-  | BS.null v = False
-  | otherwise = BS.all goodByte v
+validHostValue value =
+  BS.all plainHostByte value || case parseByteString (hostParser <* eof) value of
+    Right _ -> True
+    Left _ -> False
   where
-    goodByte b =
-      b /= 0x00
-        && b /= 0x2f -- '/'
-        && b /= 0x40 -- '@'
-        && b /= 0x20 -- SP
-        && b /= 0x09 -- HTAB
-        && b > 0x1f
-        && b /= 0x7f
+    plainHostByte byte =
+      let lower = byte .|. 0x20
+      in (lower >= 0x61 && lower <= 0x7a)
+           || (byte >= 0x30 && byte <= 0x39)
+           || byte == 0x2d
+           || byte == 0x2e
 
 
 {- | Reject request targets that carry obviously-bad bytes (NUL, CR,
@@ -561,10 +564,7 @@ built from URI bytes only.
 Per-method extra constraints (RFC 9112 § 3.2.4 / § 3.2.3):
 
   * Asterisk-form (@\"*\"@) is restricted to OPTIONS.
-  * CONNECT MUST use authority-form (@host:port@); no scheme, no
-    path, no asterisk. We don't fully URI-parse, just enforce that
-    a colon-separated host:port shape with no '\/' and no '?' is
-    present.
+  * CONNECT MUST use authority-form (@host:port@) with an explicit port.
 -}
 validateTarget :: Method -> RawTarget -> Either ParseError ()
 validateTarget meth tgt
@@ -584,18 +584,12 @@ validateTarget meth tgt
         || b > 0x7f -- non-ASCII octet
 
 
-{- | CONNECT authority-form: @host \":\" port@. No scheme, no path, no
-query. We check for the presence of @:port@ and the absence of
-characters that would indicate a different request-target form.
--}
+-- | CONNECT requires a nonempty URI host and an explicit, valid port.
 validateAuthorityForm :: ByteString -> Either ParseError ()
-validateAuthorityForm tgt
-  | BS.elem 0x2f tgt = Left ParseInvalidTarget -- '/'
-  | BS.elem 0x3f tgt = Left ParseInvalidTarget -- '?'
-  | BS.elem 0x23 tgt = Left ParseInvalidTarget -- '#'
-  | BS.elem 0x40 tgt = Left ParseInvalidTarget -- '@' (userinfo)
-  | not (BS.elem 0x3a tgt) = Left ParseInvalidTarget -- need :port
-  | otherwise = Right ()
+validateAuthorityForm target =
+  case parseByteString (uriHostBytes *> word8 0x3a *> portNumber <* eof) target of
+    Right _ -> Right ()
+    Left _ -> Left ParseInvalidTarget
 
 
 -- | Parse a single HTTP\/1.x response out of a header-block slice.
@@ -635,32 +629,15 @@ splitFirstLine bs =
 -- Framing rules
 ------------------------------------------------------------------------
 
-{- | Derive a request body framing from headers, per RFC 9112 § 6.3.
-
-The smuggling guards here are what defines this as a "conformant"
-parser rather than a permissive one — these are the exact checks
-that h2o, nghttp2, and Hyper run.
--}
+-- | Derive request body framing from the field lines, per RFC 9112 § 6.3.
 requestFraming :: Method -> Version -> Headers -> Either ParseError Framing
-requestFraming meth _ver hdrs
-  | not (methodBodyAllowedInRequest meth) = Right NoBody
-  | otherwise = do
-      let mTE = findTransferEncoding hdrs
-          cls = hLookupAll "content-length" hdrs
-      case (mTE, cls) of
-        (Just te, []) -> teFraming te
-        (Just _, _ : _) -> Left ParseLengthAndTransferEncoding
-        (Nothing, []) -> Right NoBody
-        (Nothing, [v]) -> singleContentLength v
-        (Nothing, v : vs)
-          | all (== v) vs -> singleContentLength v
-          | otherwise -> Left ParseLengthConflict
+requestFraming _ = messageFraming RequestBody
 
 
 {- | Derive a response body framing per RFC 9112 § 6.3.
 
-The "what method was the request" parameter matters: HEAD and CONNECT
-responses never carry a body regardless of headers.
+HEAD responses, successful CONNECT responses, and certain status codes
+have no HTTP message body regardless of framing fields.
 -}
 responseFraming :: Method -> Version -> Status -> Headers -> Either ParseError Framing
 responseFraming HEAD _ _ _ = Right NoBody
@@ -668,49 +645,75 @@ responseFraming _ _ (Status sc) _
   | sc == 204 || sc == 304 || (sc >= 100 && sc < 200) = Right NoBody
 responseFraming CONNECT _ (Status sc) _
   | sc >= 200 && sc < 300 = Right NoBody -- tunnel takes over
-responseFraming _ ver _ hdrs = do
-  let mTE = findTransferEncoding hdrs
-      cls = hLookupAll "content-length" hdrs
-  case (mTE, cls) of
-    (Just te, _) -> teFraming te
-    (Nothing, []) ->
-      -- RFC 9112 § 6.3: an HTTP/1.0 response without explicit framing
-      -- is close-delimited; an HTTP/1.1 response without one is
-      -- zero-length (the spec specifically forbids close-delimited
-      -- here so receivers know when they've seen the full message).
-      Right (if ver == HTTP_1_1 then NoBody else CloseDelimited)
-    (Nothing, [v]) -> singleContentLength v
-    (Nothing, v : vs)
-      | all (== v) vs -> singleContentLength v
-      | otherwise -> Left ParseLengthConflict
+responseFraming _ ver _ hdrs = messageFraming ResponseBody ver hdrs
 
 
-{-# INLINE singleContentLength #-}
-singleContentLength :: ByteString -> Either ParseError Framing
-singleContentLength v = case parseDecimalW64 (trimAll v) of
+data FramingSide = RequestBody | ResponseBody
+  deriving stock (Eq)
+
+
+-- Locate both framing fields in one pass. Length equality needs no order,
+-- while transfer codings are reversed back into received order on use.
+messageFraming :: FramingSide -> Version -> Headers -> Either ParseError Framing
+messageFraming side ver = collect [] []
+  where
+    collect lengths encodings ((name, value) : rest)
+      | headerNameIeq name "content-length" = collect (value : lengths) encodings rest
+      | headerNameIeq name "transfer-encoding" = collect lengths (value : encodings) rest
+      | otherwise = collect lengths encodings rest
+    collect lengths [] [] = contentLengthFraming fallback lengths
+    collect lengths (first : rest) []
+      | side == RequestBody && not (null lengths) = Left ParseLengthAndTransferEncoding
+      | null rest = transferFraming ver nonChunked (first :| [])
+      | otherwise = transferFraming ver nonChunked (NE.reverse (first :| rest))
+
+    fallback = case side of
+      RequestBody -> NoBody
+      ResponseBody -> CloseDelimited
+
+    nonChunked = case side of
+      RequestBody -> Left ParseChunkedNotFinal
+      ResponseBody -> Right CloseDelimited
+{-# INLINE messageFraming #-}
+
+
+-- The canonical singleton bypasses list construction. Hermes validates
+-- the full ordered coding list, including quoted parameters, otherwise.
+transferFraming :: Version -> Either ParseError Framing -> NonEmpty ByteString -> Either ParseError Framing
+transferFraming HTTP_1_0 _ _ = Left ParseInvalidHeaderValue
+transferFraming _ _ (wire :| [])
+  | asciiIeq (trimAll wire) "chunked" = Right Chunked
+transferFraming _ other fields = case parseFromHeaders defaultHeaderSettings fields of
+  Left _ -> Left ParseInvalidHeaderValue
+  Right codings
+    | transferEncodingEndsInChunked codings -> Right Chunked
+    | otherwise -> other
+
+
+contentLengthFraming :: Framing -> [ByteString] -> Either ParseError Framing
+contentLengthFraming fallback [] = Right fallback
+contentLengthFraming _ fields@[wire] = case parseDecimalW64 (trimAll wire) of
   Just n -> Right (ContentLength n)
-  Nothing -> Left ParseInvalidLength
+  Nothing
+    | BS.elem 0x2c wire -> combinedLengths fields
+    | otherwise -> Left ParseInvalidLength
+contentLengthFraming _ fields = combinedLengths fields
 
 
-{- | Parse a @Transfer-Encoding@ value into a framing decision. We
-accept the codings the RFC requires us to recognise (@chunked@,
-@identity@) and reject anything that puts a non-@chunked@ coding
-last (per RFC 9112 § 6.1, chunked MUST be the final coding so the
-recipient can frame).
--}
-teFraming :: ByteString -> Either ParseError Framing
-teFraming raw =
-  let
-    parts = map BSC.strip (BSC.split ',' raw)
-    nonempty = filter (not . BS.null) parts
-  in
-    case nonempty of
-      [] -> Right NoBody
-      xs ->
-        let lastCoding = last xs
-        in if asciiIeq lastCoding "chunked"
-             then Right Chunked
-             else Left ParseChunkedNotFinal
+-- RFC 9112 § 6.3 allows recovery from repeated equal decimal values.
+combinedLengths :: [ByteString] -> Either ParseError Framing
+combinedLengths fields = case filter (not . BS.null) (map trimAll (concatMap (BSC.split ',') fields)) of
+  [] -> Left ParseInvalidLength
+  first : rest -> case parseDecimalW64 first of
+    Nothing -> Left ParseInvalidLength
+    Just expected -> check expected rest
+  where
+    check expected [] = Right (ContentLength expected)
+    check expected (wire : rest) = case parseDecimalW64 wire of
+      Nothing -> Left ParseInvalidLength
+      Just actual
+        | actual == expected -> check expected rest
+        | otherwise -> Left ParseLengthConflict
 
 
 {-# INLINE trimAll #-}
@@ -724,26 +727,11 @@ trimAll = BSC.dropWhile isSp . BSC.dropWhileEnd isSp
 anything that isn't 1+ ASCII digits.
 -}
 parseDecimalW64 :: ByteString -> Maybe Word64
-parseDecimalW64 bs
-  | BS.null bs = Nothing
-  | otherwise = go 0 0
-  where
-    !len = BS.length bs
-    go !i !acc
-      | i >= len = Just acc
-      | otherwise =
-          let !b = BSU.unsafeIndex bs i
-          in if b < 0x30 || b > 0x39
-               then Nothing
-               else
-                 let !d = fromIntegral (b - 0x30) :: Word64
-                     !acc' = acc * 10 + d
-                 in -- overflow guard: max Word64 = 1844...; checking
-                    -- acc * 10 + 9 < acc (i.e. acc > maxBound `div` 10)
-                    -- is cheap and conservative.
-                    if acc > 1844674407370955160 || (acc == 1844674407370955160 && d > 5)
-                      then Nothing
-                      else go (i + 1) acc'
+parseDecimalW64 wire = withShortDecimal wire (Just . fromIntegral) $
+  case parseByteString (boundedDecimalWord64 empty <* eof) wire of
+    Right n -> Just n
+    Left _ -> Nothing
+{-# INLINE parseDecimalW64 #-}
 
 
 ------------------------------------------------------------------------

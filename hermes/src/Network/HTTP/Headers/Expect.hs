@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 {- |
 The @Expect@ request header field tells the server about expectations the
@@ -15,9 +16,8 @@ extension token with an optional @=value@ and optional parameters.
   parameter   = parameter-name "=" parameter-value
 @
 
-This module models that list faithfully, preserving each expectation's raw
-token, optional value (verbatim, including quoting), and parameters, rather
-than fabricating semantics for the (essentially unused) extension space.
+The codec retains token and quoted spelling. Quoted values use a
+one-to-one Latin-1 mapping for wire octets.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-10.1.1>
 
@@ -26,22 +26,27 @@ See also: "Network.HTTP.Headers.ContentLength", "Network.HTTP.Headers.TE", "Netw
 module Network.HTTP.Headers.Expect (
   Expect (..),
   Expectation (..),
+  expectationList,
+  hasContinueExpectation,
   expectParser,
   renderExpect,
 ) where
 
+import Data.ByteString (ByteString)
+import qualified Data.CaseInsensitive as CI
 import qualified Data.List.NonEmpty as NE
-import Data.Maybe (catMaybes)
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hExpect)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (renderHttpWordValue, renderSeparated, shortText)
 
 
--- | An @Expect@ header value: a non-empty list of expectations.
-newtype Expect = Expect {expectExpectations :: NE.NonEmpty Expectation}
+-- | An @Expect@ header value, including the explicit empty list.
+data Expect
+  = Expect {expectExpectations :: NE.NonEmpty Expectation}
+  | ExpectEmpty
   deriving stock (Eq, Show)
 
 
@@ -63,55 +68,82 @@ instance KnownHeader Expect where
   type Direction Expect = 'Request
 
 
-  parseFromHeaders _ headers = case runParser expectParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Expect header: " <> show rest
-    Fail -> Left "Failed to parse Expect header"
-    Err e -> Left e
+  parseFromHeaders _ (wire NE.:| [])
+    | wire == continueWire = Right continueExpectation
+  parseFromHeaders _ fields = parseExpectFields fields
+  {-# INLINE parseFromHeaders #-}
 
 
-  renderToHeaders _ = M.toStrictByteString . renderExpect
+  renderToHeaders _ (Expect (Expectation "100-continue" Nothing [] NE.:| [])) = "100-continue"
+  renderToHeaders _ value = M.toStrictByteString (renderExpect value)
 
 
   headerName _ = hExpect
 
 
 expectParser :: ParserT st String Expect
-expectParser = do
-  first <- expectationParser
-  rest <- many (ows *> $(char ',') *> ows *> expectationParser)
-  pure $ Expect (first NE.:| rest)
+expectParser = fromExpectations <$> httpList expectationParser
+
+
+parseExpectFields :: NE.NonEmpty ByteString -> Either String Expect
+parseExpectFields fields = parseFieldLine "Expect" expectParser (combineFieldLines ", " fields)
+{-# NOINLINE parseExpectFields #-}
+
+
+continueWire :: ByteString
+continueWire = "100-continue"
+
+
+continueExpectation :: Expect
+continueExpectation = Expect (Expectation "100-continue" Nothing [] NE.:| [])
+
+
+fromExpectations :: [Expectation] -> Expect
+fromExpectations = maybe ExpectEmpty Expect . NE.nonEmpty
+
+
+-- | All expectations in field order, including an empty field.
+expectationList :: Expect -> [Expectation]
+expectationList ExpectEmpty = []
+expectationList (Expect entries) = NE.toList entries
+
+
+-- | Test the combined field for the bare, case-insensitive
+-- @100-continue@ expectation.
+hasContinueExpectation :: [ByteString] -> Bool
+hasContinueExpectation [wire]
+  | wire == continueWire = True
+hasContinueExpectation fields = case parseExpectFields <$> NE.nonEmpty fields of
+  Just (Right (Expect entries)) -> any continues entries
+  _ -> False
+  where
+    continues (Expectation name Nothing []) =
+      name == "100-continue" || CI.foldCase (ST.toByteString name) == "100-continue"
+    continues _ = False
 
 
 expectationParser :: ParserT st String Expectation
 expectationParser = do
   name <- rfc9110Token
-  val <- optional ($(char '=') *> shortASCIIFromParser_ (quotedString <|> rfc9110Token))
-  params <- catMaybes <$> many parameterParser
-  pure $ Expectation name val params
-
-
--- | One iteration of @OWS ";" OWS [ parameter ]@; the parameter itself is optional.
-parameterParser :: ParserT st String (Maybe (ST.ShortText, Maybe ST.ShortText))
-parameterParser = ows *> $(char ';') *> ows *> optional parameterKV
+  branch $(char '=') (Expectation name . Just <$> httpWordValue <*> parameters) (pure (Expectation name Nothing []))
   where
-    parameterKV = do
-      pn <- rfc9110Token
-      pv <- optional ($(char '=') *> shortASCIIFromParser_ (quotedString <|> rfc9110Token))
-      pure (pn, pv)
+    parameters =
+      withOption (skipSome (ows *> $(char ';') *> ows)) (const nextParameter) (pure [])
+    nextParameter = withOption parameter (\first -> (first :) <$> parameters) (pure [])
+    parameter = (,) <$> (rfc9110Token <* $(char '=')) <*> (Just <$> httpWordValue)
 
 
 renderExpect :: Expect -> M.Builder
-renderExpect (Expect es) = M.intersperse ", " $ map renderExpectation $ NE.toList es
+renderExpect ExpectEmpty = mempty
+renderExpect (Expect es) = renderSeparated ", " renderExpectation (NE.toList es)
 
 
 renderExpectation :: Expectation -> M.Builder
-renderExpectation (Expectation name val params) =
-  shortText name
-    <> maybe mempty (\v -> M.char7 '=' <> shortText v) val
-    <> foldMap renderParameter params
+renderExpectation (Expectation name Nothing _) = shortText name
+renderExpectation (Expectation name (Just value) params) =
+  shortText name <> M.char7 '=' <> renderHttpWordValue value <> foldMap renderParameter params
 
 
 renderParameter :: (ST.ShortText, Maybe ST.ShortText) -> M.Builder
-renderParameter (pn, pv) =
-  M.char7 ';' <> shortText pn <> maybe mempty (\v -> M.char7 '=' <> shortText v) pv
+renderParameter (name, Just value) = M.char7 ';' <> shortText name <> M.char7 '=' <> renderHttpWordValue value
+renderParameter (_, Nothing) = mempty

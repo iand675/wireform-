@@ -240,6 +240,7 @@ message TestAllTypesProto3 {
 
   reserved 501 to 510;
   reserved 999999;
+  reserved "reserved_field";
 }
 
 message ForeignMessage {

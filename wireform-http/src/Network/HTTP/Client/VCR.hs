@@ -405,7 +405,8 @@ toRawResponse r = do
   pure
     RawResponse
       { statusCode = S.Status (fromIntegral (rrsStatus r))
-      , headers = map headerFromRec (rrsHeaders r)
+      -- The cassette stores the header section and body only.
+      , headers = filter ((/= H.hTrailer) . fst) (map headerFromRec (rrsHeaders r))
       , bodyPopper = popper
       , protocolInfo = HTTP1_1
       }

@@ -4,10 +4,14 @@ module Test.Hermes.CalDav (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Short as SBS
+import Data.Either (isLeft)
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
 import qualified Network.HTTP.Headers.CalDAVTimezones as CTZ
 import qualified Network.HTTP.Headers.CalManagedID as CMI
 import qualified Network.HTTP.Headers.IfScheduleTagMatch as ISTM
@@ -46,7 +50,7 @@ genIdText =
 
 genVersion :: Gen ST.ShortText
 genVersion = do
-  major <- Gen.int (Range.linear 1 9)
+  major <- Gen.int (Range.linear 2 99)
   minor <- Gen.int (Range.linear 0 99)
   pure (ST.fromString (show major <> "." <> show minor))
 
@@ -206,6 +210,57 @@ prop_oslcCoreVersion = property $ do
   parseAll OCV.oslcCoreVersionParser (renderOCV v) === Right v
 
 
+typedSchedulingFields :: Spec
+typedSchedulingFields = describe "typed scheduling fields" $ do
+  it "retains opaque Schedule-Tag bodies for exact forwarding in preconditions" $ do
+    let body = " space\t\\a\\\"\\\\" <> BS.pack [0x80, 0xff]
+        wire = "\"" <> body <> "\""
+        tag = STg.ScheduleTagBytes (SBS.toShort body)
+        condition = ISTM.IfScheduleTagMatch tag
+        incoming name = headerMapFromList [(name, " \t" <> wire <> "\t ")]
+    lookupHeader @STg.ScheduleTag (incoming "Schedule-Tag") `shouldBe` Right (Just tag)
+    lookupHeader @ISTM.IfScheduleTagMatch (incoming "If-Schedule-Tag-Match") `shouldBe` Right (Just condition)
+    headerMapToList (setHeader condition (headerMapFromList [])) `shouldBe` [("if-schedule-tag-match", wire)]
+
+  it "rejects weak validators, dangling quoted pairs, and repeated scheduling tags" $ do
+    let scheduled wire = ("Schedule-Tag", wire)
+        precondition wire = ("If-Schedule-Tag-Match", wire)
+        readTag = lookupHeader @STg.ScheduleTag . headerMapFromList
+        readPrecondition = lookupHeader @ISTM.IfScheduleTagMatch . headerMapFromList
+    readTag [scheduled "\"one\"", scheduled "\"two\""] `shouldSatisfy` isLeft
+    readPrecondition [precondition "\"one\"", precondition "\"two\""] `shouldSatisfy` isLeft
+    mapM_
+      ( \wire -> do
+          readTag [scheduled wire] `shouldSatisfy` isLeft
+          readPrecondition [precondition wire] `shouldSatisfy` isLeft
+      )
+      ["W/\"weak\"", "*", "no-quotes", "\"one\", \"two\"", "\"slash\\\"", "\"" <> BS.singleton 127 <> "\"", "\"\\\""]
+
+  it "validates the managed attachment identifier's UTF-8 and paramtext grammar" $ do
+    let field bytes = ("Cal-Managed-ID", bytes)
+        typed = lookupHeader @CMI.CalManagedID . headerMapFromList
+        wire = TE.encodeUtf8 "café\tattachment"
+        value = CMI.CalManagedID "café\tattachment"
+    typed [field (" \t" <> wire <> " ")] `shouldBe` Right (Just value)
+    headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("cal-managed-id", wire)]
+    typed [field "", field "abc"] `shouldSatisfy` isLeft
+    mapM_
+      (\bytes -> typed [field bytes] `shouldSatisfy` isLeft)
+      ["x:y", "x;y", "x,y", "\"x\"", BS.singleton 0xff, BS.pack [0xe0, 0x80, 0xaf], "x" <> BS.singleton 127]
+
+  it "parses case-insensitive flags with field whitespace and rejects repeats" $ do
+    let reply wire = ("Schedule-Reply", wire)
+        tz wire = ("CalDAV-Timezones", wire)
+        readReply = lookupHeader @SR.ScheduleReply . headerMapFromList
+        readTimezones = lookupHeader @CTZ.CalDAVTimezones . headerMapFromList
+    readReply [reply " \tf "] `shouldBe` Right (Just (SR.ScheduleReply False))
+    readTimezones [tz " t\t "] `shouldBe` Right (Just (CTZ.CalDAVTimezones True))
+    readReply [reply "T", reply "T"] `shouldSatisfy` isLeft
+    readTimezones [tz "T", tz "F"] `shouldSatisfy` isLeft
+    readReply [reply "false"] `shouldSatisfy` isLeft
+    readTimezones [tz "T, F"] `shouldSatisfy` isLeft
+
+
 tests :: Spec
 tests =
   describe "CalDav" $
@@ -228,4 +283,5 @@ tests =
       , unit_oslcCoreVersion_parse
       , unit_oslcCoreVersion_render
       , it "OSLC-Core-Version round-trip" prop_oslcCoreVersion
+      , typedSchedulingFields
       ]

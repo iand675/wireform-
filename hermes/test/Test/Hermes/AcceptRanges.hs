@@ -6,6 +6,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
 import qualified Network.HTTP.Headers.AcceptRanges as AR
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -50,6 +51,16 @@ unit_render_units =
     in render v `shouldBe` "bytes, rows"
 
 
+unit_field_lines :: Spec
+unit_field_lines = it "preserves the spelling and order of advertised units through typed rendering" $ do
+  let parse = lookupHeader @AR.AcceptRanges . headerMapFromList
+      value = AR.AcceptRangesUnits ("ByTeS" :| ["rows", "pages"])
+  parse [("Accept-Ranges", " , ByTeS ,rows"), ("Accept-Ranges", "\t,pages, ")]
+    `shouldBe` Right (Just value)
+  headerMapToList (setHeader value (headerMapFromList []))
+    `shouldBe` [("accept-ranges", "ByTeS, rows, pages")]
+
+
 tests :: Spec
 tests =
   describe "AcceptRanges" $
@@ -57,4 +68,5 @@ tests =
       [ unit_none
       , unit_units
       , unit_render_units
+      , unit_field_lines
       ]

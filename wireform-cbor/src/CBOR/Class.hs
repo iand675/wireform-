@@ -41,6 +41,7 @@ import CBOR.Decode qualified as CD
 import CBOR.Encode qualified as CE
 import CBOR.Encoding (Encoding)
 import CBOR.Encoding qualified as Enc
+import CBOR.Internal (bignumMagnitude, integerValue)
 import CBOR.Value qualified as CV
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BSL
@@ -174,10 +175,23 @@ intToCBOR n
   | otherwise = CV.NInt (fromIntegral (negate n - 1))
 
 
-cborToInt :: CV.Value -> Either String Int64
-cborToInt (CV.UInt n) = Right (fromIntegral n)
-cborToInt (CV.NInt n) = Right (negate (fromIntegral n) - 1)
-cborToInt _ = Left "FromCBOR: expected UInt or NInt"
+cborToSigned :: forall a. (Bounded a, Integral a) => CV.Value -> Either String a
+cborToSigned (CV.UInt n)
+  | n <= fromIntegral (maxBound @a) = Right (fromIntegral n)
+  | otherwise = Left "FromCBOR: integer out of range"
+cborToSigned (CV.NInt n)
+  | n <= fromIntegral (maxBound @a) = Right (-1 - fromIntegral n)
+  | otherwise = Left "FromCBOR: integer out of range"
+cborToSigned _ = Left "FromCBOR: expected UInt or NInt"
+{-# INLINE cborToSigned #-}
+
+
+cborToUnsigned :: forall a. (Bounded a, Integral a) => CV.Value -> Either String a
+cborToUnsigned (CV.UInt n)
+  | n <= fromIntegral (maxBound @a) = Right (fromIntegral n)
+  | otherwise = Left "FromCBOR: unsigned integer out of range"
+cborToUnsigned _ = Left "FromCBOR: expected UInt"
+{-# INLINE cborToUnsigned #-}
 
 
 instance ToCBOR Bool where
@@ -196,7 +210,7 @@ instance ToCBOR Int where
 
 
 instance FromCBOR Int where
-  fromCBOR v = fromIntegral <$> cborToInt v
+  fromCBOR = cborToSigned
 
 
 instance ToCBOR Int8 where
@@ -205,7 +219,7 @@ instance ToCBOR Int8 where
 
 
 instance FromCBOR Int8 where
-  fromCBOR v = fromIntegral <$> cborToInt v
+  fromCBOR = cborToSigned
 
 
 instance ToCBOR Int16 where
@@ -214,7 +228,7 @@ instance ToCBOR Int16 where
 
 
 instance FromCBOR Int16 where
-  fromCBOR v = fromIntegral <$> cborToInt v
+  fromCBOR = cborToSigned
 
 
 instance ToCBOR Int32 where
@@ -223,7 +237,7 @@ instance ToCBOR Int32 where
 
 
 instance FromCBOR Int32 where
-  fromCBOR v = fromIntegral <$> cborToInt v
+  fromCBOR = cborToSigned
 
 
 instance ToCBOR Int64 where
@@ -232,7 +246,7 @@ instance ToCBOR Int64 where
 
 
 instance FromCBOR Int64 where
-  fromCBOR = cborToInt
+  fromCBOR = cborToSigned
 
 
 instance ToCBOR Word where
@@ -241,8 +255,7 @@ instance ToCBOR Word where
 
 
 instance FromCBOR Word where
-  fromCBOR (CV.UInt n) = Right (fromIntegral n)
-  fromCBOR v = fromIntegral <$> cborToInt v
+  fromCBOR = cborToUnsigned
 
 
 instance ToCBOR Word8 where
@@ -251,8 +264,7 @@ instance ToCBOR Word8 where
 
 
 instance FromCBOR Word8 where
-  fromCBOR (CV.UInt n) = Right (fromIntegral n)
-  fromCBOR _ = Left "FromCBOR Word8: expected UInt"
+  fromCBOR = cborToUnsigned
 
 
 instance ToCBOR Word16 where
@@ -261,8 +273,7 @@ instance ToCBOR Word16 where
 
 
 instance FromCBOR Word16 where
-  fromCBOR (CV.UInt n) = Right (fromIntegral n)
-  fromCBOR _ = Left "FromCBOR Word16: expected UInt"
+  fromCBOR = cborToUnsigned
 
 
 instance ToCBOR Word32 where
@@ -271,8 +282,7 @@ instance ToCBOR Word32 where
 
 
 instance FromCBOR Word32 where
-  fromCBOR (CV.UInt n) = Right (fromIntegral n)
-  fromCBOR _ = Left "FromCBOR Word32: expected UInt"
+  fromCBOR = cborToUnsigned
 
 
 instance ToCBOR Word64 where
@@ -281,8 +291,7 @@ instance ToCBOR Word64 where
 
 
 instance FromCBOR Word64 where
-  fromCBOR (CV.UInt n) = Right n
-  fromCBOR _ = Left "FromCBOR Word64: expected UInt"
+  fromCBOR = cborToUnsigned
 
 
 instance ToCBOR Float where
@@ -396,24 +405,27 @@ instance (Ord k, FromCBOR k, FromCBOR v) => FromCBOR (Map k v) where
 -- Aeson-parity instances ---------------------------------------------------
 
 instance ToCBOR Integer where
-  toCBOR n
-    | n >= 0 = CV.UInt (fromInteger n)
-    | otherwise = CV.NInt (fromInteger (negate n - 1))
+  toCBOR = integerValue
+  toEncoding = Enc.integer
 
 
 instance FromCBOR Integer where
   fromCBOR (CV.UInt n) = Right (toInteger n)
-  fromCBOR (CV.NInt n) = Right (negate (toInteger n) - 1)
-  fromCBOR _ = Left "FromCBOR Integer: expected UInt or NInt"
+  fromCBOR (CV.NInt n) = Right (-1 - toInteger n)
+  fromCBOR (CV.Tag 2 (CV.ByteString magnitude)) = Right (bignumMagnitude magnitude)
+  fromCBOR (CV.Tag 3 (CV.ByteString magnitude)) = Right (-1 - bignumMagnitude magnitude)
+  fromCBOR _ = Left "FromCBOR Integer: expected an integer or bignum"
 
 
 instance ToCBOR Natural where
-  toCBOR = CV.UInt . fromIntegral
+  toCBOR = integerValue . toInteger
+  toEncoding = Enc.integer . toInteger
 
 
 instance FromCBOR Natural where
   fromCBOR (CV.UInt n) = Right (fromIntegral n)
-  fromCBOR _ = Left "FromCBOR Natural: expected UInt"
+  fromCBOR (CV.Tag 2 (CV.ByteString magnitude)) = Right (fromInteger (bignumMagnitude magnitude))
+  fromCBOR _ = Left "FromCBOR Natural: expected an unsigned integer or positive bignum"
 
 
 instance ToCBOR TL.Text where

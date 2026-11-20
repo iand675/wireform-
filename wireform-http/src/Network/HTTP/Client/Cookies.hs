@@ -4,12 +4,9 @@
 
 {- | Cookie jar and middleware.
 
-Implements a small subset of RFC 6265: scheme, host, path, expiry,
-and the 'secure' flag are honoured for matching. @SameSite@ and
-@Partitioned@ flags are parsed but not enforced (they exist for
-browsers — an HTTP client doesn't have a top-level navigation
-context to compare against). 'HttpOnly' is also parsed but
-ignored, again because it's a browser-context restriction.
+Implements RFC 6265 scheme, host, path and expiry matching. The
+jar stores @SameSite@ and @HttpOnly@ as metadata. Request matching
+has no top-level navigation or non-HTTP context.
 
 The jar is intentionally stored in an 'STM.TVar' for cheap
 concurrent reads.
@@ -41,6 +38,7 @@ module Network.HTTP.Client.Cookies (
 ) where
 
 import Control.Concurrent.STM
+import Control.Monad (guard)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
@@ -49,7 +47,6 @@ import Data.List qualified as List
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text.Encoding qualified as TE
-import Data.Text.Encoding.Error qualified as TE
 import Data.Text.Short qualified as ST
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Network.HTTP.Client.Request
@@ -57,9 +54,10 @@ import Network.HTTP.Client.Response
 import Network.HTTP.Client.Transport
 import Network.HTTP.Client.URI
 import Network.HTTP.Headers.Cookie qualified as Hermes
-import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Grammar.Parser (Result (..), cookieValueBytes, eof, runParser)
 import Network.HTTP.Headers.SetCookie qualified as Hermes
 import Network.HTTP.Types.Header qualified as H
+import Network.IPAddress (ipv4Parser)
 import Wireform.Builder qualified as WB
 
 
@@ -248,21 +246,11 @@ validateCookieName bs
         || w == 0x7E
 
 
-{- | RFC 6265bis cookie-octet: %x21 \/ %x23-2B \/ %x2D-3A \/ %x3C-5B \/
-%x5D-7E (anything printable ASCII minus CTL, whitespace, double
-quote, comma, semicolon, and backslash).
--}
+-- | Validate an RFC 6265 cookie value, including an optional pair of quotes.
 validateCookieValue :: ByteString -> Either CookieError ()
-validateCookieValue bs
-  | BS.all isCookieOctet bs = Right ()
-  | otherwise = Left (CookieValueInvalid bs)
-  where
-    isCookieOctet w =
-      w == 0x21
-        || (w >= 0x23 && w <= 0x2B)
-        || (w >= 0x2D && w <= 0x3A)
-        || (w >= 0x3C && w <= 0x5B)
-        || (w >= 0x5D && w <= 0x7E)
+validateCookieValue bs = case runParser (cookieValueBytes <* eof) bs of
+  OK () _ -> Right ()
+  _ -> Left (CookieValueInvalid bs)
 
 
 validateCookie :: CookieJar -> Cookie -> Either CookieError ()
@@ -344,11 +332,12 @@ withCookies jar inner = Transport $ \req -> do
                       (Network.HTTP.Client.Request.headers req)
                 }
       raw <- sendRaw inner req'
+      receivedAt <- getCurrentTime
       let setCookies =
             [ c
             | c <-
                 parseSetCookieHeaders
-                  now
+                  receivedAt
                   resolved
                   (Network.HTTP.Client.Response.headers raw)
             , -- Drop cookies whose Domain is a public suffix; this is the
@@ -359,8 +348,10 @@ withCookies jar inner = Transport $ \req -> do
             Right () <- [validateCookieName (cookieName c)]
             , Right () <- [validateCookieValue (cookieValue c)]
             ]
-      atomically $ modifyTVar' (cjStore jar) $ \m ->
-        List.foldl' (\acc c -> Map.insert (cookieKey c) c acc) m setCookies
+      let store acc c
+            | notExpired receivedAt c = Map.insert (cookieKey c) c acc
+            | otherwise = Map.delete (cookieKey c) acc
+      atomically $ modifyTVar' (cjStore jar) $ \m -> List.foldl' store m setCookies
       pure raw
 
 
@@ -401,7 +392,7 @@ matchCookies now uri_ = filter ok
     secureReq = uriScheme uri_ == SchemeHttps
     ok c =
       notExpired now c
-        && domainMatches host (cookieDomain c)
+        && (if cookieDomainExplicit c then domainMatches host (cookieDomain c) else host == cookieDomain c)
         && pathMatches pathBytes (cookiePath c)
         && (not (cookieSecure c) || secureReq)
 
@@ -409,10 +400,13 @@ matchCookies now uri_ = filter ok
 domainMatches :: ByteString -> ByteString -> Bool
 domainMatches host dom
   | host == dom = True
+  | BS.null dom = False
   | BS.length host > BS.length dom + 1
   , dom `BS.isSuffixOf` host
   , BS.index host (BS.length host - BS.length dom - 1) == 0x2E =
-      True
+      not (isIPv6Host host) && case runParser (ipv4Parser <* eof) host of
+        OK _ _ -> False
+        _ -> True
   | otherwise = False
 
 
@@ -421,7 +415,7 @@ pathMatches reqPath cookiePathBs
   | reqPath == cookiePathBs = True
   | cookiePathBs `BS.isPrefixOf` reqPath
   , BS.length reqPath > BS.length cookiePathBs
-  , BS.index reqPath (BS.length cookiePathBs) == 0x2F =
+  , "/" `BS.isSuffixOf` cookiePathBs || BS.index reqPath (BS.length cookiePathBs) == 0x2F =
       True
   | cookiePathBs == "/" = True
   | otherwise = False
@@ -441,20 +435,21 @@ parseSetCookieHeaders now ctx hdrs =
 
 
 {- | Parse a single @Set-Cookie@ header value via
-'Hermes.setCookieParser' and project the result into the
+'Hermes.parseSetCookieField' and project the result into the
 wireform 'Cookie' shape, applying the RFC 6265 defaults for any
 attributes the response omitted.
 -}
 parseSetCookie :: UTCTime -> URI -> ByteString -> Maybe Cookie
-parseSetCookie now ctx raw =
-  case runParser Hermes.setCookieParser raw of
-    OK sc _ -> Just (fromHermesSetCookie now ctx sc)
-    _ -> Nothing
+parseSetCookie now ctx raw = do
+  parsed <- either (const Nothing) Just (Hermes.parseSetCookieField raw)
+  let cookie = fromHermesSetCookie now ctx parsed
+  guard (domainMatches (BS8.map toLower (uriHost ctx)) (cookieDomain cookie))
+  pure cookie
 
 
 fromHermesSetCookie :: UTCTime -> URI -> Hermes.SetCookie -> Cookie
 fromHermesSetCookie now ctx sc =
-  let stBytes = TE.encodeUtf8 . ST.toText
+  let stBytes = ST.toByteString
       hasDomain = case Hermes.setCookieDomain sc of
         Just _ -> True
         Nothing -> False
@@ -463,11 +458,9 @@ fromHermesSetCookie now ctx sc =
           (BS8.map toLower (uriHost ctx))
           (BS8.map toLower . stripLeadingDot . stBytes)
           (Hermes.setCookieDomain sc)
-      pathBytes =
-        maybe
-          (defaultPath (uriPath ctx))
-          stBytes
-          (Hermes.setCookiePath sc)
+      pathBytes = case stBytes <$> Hermes.setCookiePath sc of
+        Just path | "/" `BS.isPrefixOf` path -> path
+        _ -> defaultPath (uriPath ctx)
       -- RFC 6265 §5.2.2: when both Expires and Max-Age are given,
       -- Max-Age wins. Hermes parses both into separate fields, so we
       -- combine here.
@@ -493,14 +486,10 @@ fromHermesSetCookie now ctx sc =
 
 defaultPath :: ByteString -> ByteString
 defaultPath p
-  | BS.null p = "/"
-  | not ("/" `BS.isPrefixOf` p) = "/"
-  | otherwise =
-      let stripped = BS.reverse (BS.dropWhile (/= 0x2F) (BS.reverse p))
-          cleaned = if BS.null stripped then "/" else stripped
-      in if BS.length cleaned > 1
-           then BS.reverse (BS.dropWhile (== 0x2F) (BS.reverse cleaned))
-           else cleaned
+  | "/" `BS.isPrefixOf` p
+  , Just lastSlash <- BS.elemIndexEnd 0x2F p
+  , lastSlash > 0 = BS.take lastSlash p
+  | otherwise = "/"
 
 
 stripLeadingDot :: ByteString -> ByteString

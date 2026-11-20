@@ -9,7 +9,16 @@ and the per-cookie size limit.
 module Test.Cookies (tests) where
 
 import Data.ByteString qualified as BS
+import Network.HTTP.Client.BodyStream (emptyStream)
 import Network.HTTP.Client.Cookies
+import Network.HTTP.Client.Protocol (ProtocolInfo (HTTP1_1))
+import Network.HTTP.Client.Request qualified as Req
+import Network.HTTP.Client.Response qualified as Resp
+import Network.HTTP.Client.Transport (Transport (..))
+import Network.HTTP.Client.URI (staticURI)
+import Network.HTTP.Types.Header qualified as H
+import Network.HTTP.Types.Method (mGet)
+import Network.HTTP.Types.Status (status200)
 import Test.Syd
 
 
@@ -52,6 +61,8 @@ tests =
             , it "value with comma rejected" $
                 validateCookieValue "has,comma"
                   `shouldBe` Left (CookieValueInvalid "has,comma")
+            , it "quoted cookie value is accepted without changing its bytes" $
+                validateCookieValue "\"abc/def==\"" `shouldBe` Right ()
             ]
       , describe "insertCookieChecked" $
           sequence_
@@ -114,4 +125,29 @@ tests =
                   Left CookieTooLarge {} -> pure ()
                   other -> error (show other)
             ]
+      , it "stores, scopes, sends and expires cookies through middleware" $ withJarThat $ \jar -> do
+          let requestAt url = Req.request mGet (staticURI url) emptyStream
+              respond fields = Resp.RawResponse status200 fields (pure "") HTTP1_1
+              receive fields url =
+                sendRaw (withCookies jar (Transport (\_ -> pure (respond fields)))) (requestAt url)
+              echo url = do
+                response <- sendRaw (withCookies jar (Transport (pure . respond . Req.headers))) (requestAt url)
+                pure (H.lookupHeader H.hCookie (Resp.headers response))
+              origin = "https://example.com/account/login"
+          _ <- receive
+            [ (H.hSetCookie, "session=\"ab+c/def==\"; path=/account/; secure; samesite=lax")
+            , (H.hSetCookie, "malformed=value with whitespace; Path=/")
+            , (H.hSetCookie, "unrelated=value; Domain=other.example; Path=/")
+            ]
+            origin
+          map cookieValue <$> getCookies jar `shouldReturn` ["\"ab+c/def==\""]
+          echo "https://example.com/account/profile" `shouldReturn` Just "session=\"ab+c/def==\""
+          echo "https://example.com/accounts/profile" `shouldReturn` Nothing
+          echo "https://sub.example.com/account/profile" `shouldReturn` Nothing
+          echo "https://other.example/account/profile" `shouldReturn` Nothing
+          _ <- receive [(H.hSetCookie, "ip=value; Domain=0.0.1; Path=/")] "https://127.0.0.1/"
+          echo "https://127.0.0.1/" `shouldReturn` Nothing
+          _ <- receive [(H.hSetCookie, "session=; Path=/account/; Max-Age=0")] origin
+          getCookies jar `shouldReturn` []
+          echo "https://example.com/account/profile" `shouldReturn` Nothing
       ]

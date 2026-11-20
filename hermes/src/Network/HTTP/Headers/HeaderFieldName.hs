@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-
 module Network.HTTP.Headers.HeaderFieldName (
   HeaderFieldName,
   fromHeaderFieldName,
@@ -279,29 +277,32 @@ import qualified Data.Text as T
 import qualified Data.Text.Array as A
 import qualified Data.Text.Encoding as TE
 import Data.Text.Internal (Text (..))
-import Symbolize
+import Symbolize (Symbol, intern, unintern)
 import Text.Read
 
 
--- | The type of a header field name.
-newtype HeaderFieldName = HeaderFieldName {fromHeaderFieldName :: Symbol}
+{- | The type of a header field name. Equality and hashing use the bytes so
+a parsed name can match a constant regardless of interning and GC.
+-}
+newtype HeaderFieldName = HeaderFieldName SBS.ShortByteString
   deriving newtype (Binary, NFData, Eq, Ord, Hashable)
 
 
+-- | Intern a name for callers using the Symbolize API.
+fromHeaderFieldName :: HeaderFieldName -> Symbol
+fromHeaderFieldName = intern . headerNameToShortByteString
+
+
 instance Read HeaderFieldName where
-  readPrec = do
-    str <- readPrec @String
-    return $ HeaderFieldName $ intern $ fmap toLower str
+  readPrec = fromString <$> readPrec @String
 
 
 instance Show HeaderFieldName where
-  showsPrec _ (HeaderFieldName symbol) =
-    let !str = unintern @String symbol
-    in shows str
+  showsPrec _ = shows . T.unpack . toText
 
 
 instance IsString HeaderFieldName where
-  fromString = HeaderFieldName . fromString . fmap toLower
+  fromString = HeaderFieldName . textNameBytes . T.pack . fmap toLower
 
 
 newtype InvalidHeaderFieldName = InvalidHeaderFieldName Text
@@ -312,51 +313,39 @@ instance Exception InvalidHeaderFieldName
 
 
 toText :: HeaderFieldName -> Text
-toText (HeaderFieldName name) = unintern name
+toText = nameText . headerNameToShortByteString
 
 
 toCIByteString :: HeaderFieldName -> CI ByteString
-toCIByteString = unsafeMk . TE.encodeUtf8 . toText
+toCIByteString = unsafeMk . SBS.fromShort . headerNameToShortByteString
 
 
-{- | Construct a 'HeaderFieldName' from a text input.
-
-This function will intern the text for fast comparisons,
-which makes it efficient for lookups on well-known header field names
-and other frequently used headers.
--}
+-- | Lowercase and intern an ASCII header name, sharing storage for repeats.
 cachedHeaderFieldName :: Text -> HeaderFieldName
 cachedHeaderFieldName txt
-  | T.isAscii txt = HeaderFieldName $ intern $ T.toLower txt
+  | T.isAscii txt = HeaderFieldName $ unintern @SBS.ShortByteString $ intern $ T.toLower txt
   | otherwise = throw $ InvalidHeaderFieldName txt
 {-# INLINE cachedHeaderFieldName #-}
 
 
-{- | Construct a 'HeaderFieldName' from a text input.
-
-If the input is cached, this function will return the cached value.
-If the input is not cached, will return a new 'HeaderFieldName' that is not cached.
-
-This function is therefore suitable for arbitrary user input while reducing the
-number of allocations and comparisons for well-known header field names.
--}
+-- | Construct an ASCII header name from already case-folded text.
 headerFieldName :: Text -> HeaderFieldName
 headerFieldName txt
-  | T.isAscii txt = HeaderFieldName $ intern txt
+  | T.isAscii txt = HeaderFieldName (textNameBytes txt)
   | otherwise = throw $ InvalidHeaderFieldName txt
 {-# INLINE headerFieldName #-}
 
 
 {- | Construct a 'HeaderFieldName' from a bytestring input that is a well-formed, case-folded header.
 
-This function will interns the text, so it is not suitable for arbitrary user input.
+This function interns the bytes to share storage for repeated names.
 
 __Warning__: This function is unsafe because it does not check if the input is valid ASCII,
 a valid header field name according to the HTTP spec, and it does not fold the input to
 lowercase.
 -}
 unsafeCachedHeaderFromBytestring :: ByteString -> HeaderFieldName
-unsafeCachedHeaderFromBytestring = HeaderFieldName . intern
+unsafeCachedHeaderFromBytestring = HeaderFieldName . unintern @SBS.ShortByteString . intern
 {-# INLINE unsafeCachedHeaderFromBytestring #-}
 
 
@@ -369,17 +358,29 @@ a valid header field name according to the HTTP spec, and it does not fold the i
 lowercase.
 -}
 unsafeUnknownHeaderFromBytestring :: ByteString -> HeaderFieldName
-unsafeUnknownHeaderFromBytestring = HeaderFieldName . intern
+unsafeUnknownHeaderFromBytestring = HeaderFieldName . SBS.toShort
 {-# INLINE unsafeUnknownHeaderFromBytestring #-}
 
 
 -- | Convert a 'HeaderFieldName' to a 'ShortByteString'.
 headerNameToShortByteString :: HeaderFieldName -> SBS.ShortByteString
-headerNameToShortByteString (HeaderFieldName sym) = unintern sym
+headerNameToShortByteString (HeaderFieldName bytes) = bytes
 
 
 headerNameFromShortByteString :: SBS.ShortByteString -> HeaderFieldName
-headerNameFromShortByteString sbs@(SBS.SBS arr) = headerFieldName $ Text (A.ByteArray arr) 0 (SBS.length sbs)
+headerNameFromShortByteString bytes
+  | T.isAscii name = HeaderFieldName bytes
+  | otherwise = throw (InvalidHeaderFieldName name)
+  where
+    name = nameText bytes
+
+
+textNameBytes :: Text -> SBS.ShortByteString
+textNameBytes = SBS.toShort . TE.encodeUtf8
+
+
+nameText :: SBS.ShortByteString -> Text
+nameText bytes@(SBS.SBS arr) = Text (A.ByteArray arr) 0 (SBS.length bytes)
 
 
 {- | @A-IM@ HTTP Header
@@ -781,7 +782,7 @@ hClientCertChain = "Client-Cert-Chain"
 {- | @Close@ HTTP Header
 Permanent: [RFC9112, Section 9.6: HTTP/1.1](https://datatracker.ietf.org/doc/html/rfc9112#section-9.6) (reserved)
 
-See "Network.HTTP.Headers.Close" for the typed codec.
+The @close@ option is carried in @Connection@. See "Network.HTTP.Headers.Close".
 -}
 hClose :: HeaderFieldName
 hClose = "Close"

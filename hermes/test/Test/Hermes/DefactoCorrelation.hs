@@ -2,15 +2,22 @@
 
 module Test.Hermes.DefactoCorrelation (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Ratio ((%))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers
+import Network.HTTP.Headers.HeaderFieldName
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
 import qualified Network.HTTP.Headers.XCorrelationID as XC
+import qualified Network.HTTP.Headers.XPoweredBy as XP
 import qualified Network.HTTP.Headers.XRequestID as XR
 import qualified Network.HTTP.Headers.XRequestStart as XS
 import qualified Network.HTTP.Headers.XTraceID as XT
@@ -133,6 +140,47 @@ prop_traceID = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+unit_opaqueWire :: Spec
+unit_opaqueWire = describe "opaque field bytes" $ do
+  it "checks all 256 octets through typed lookup and checked construction" $
+    forM_ [0 .. 255] $ \byte -> do
+      let wire = " \ttrace-" <> BS.singleton byte <> "\t\255 "
+          expected = byte == 9 || (byte >= 32 && byte /= 127)
+          headers name = headerMapFromList [(name, wire)]
+          check result =
+            if expected then result `shouldBe` Right (Just wire) else result `shouldSatisfy` isLeft
+      check (fmap (fmap XR.xRequestIDBytes) (lookupHeader @XR.XRequestID (headers "X-Request-ID")))
+      check (fmap (fmap XC.xCorrelationIDBytes) (lookupHeader @XC.XCorrelationID (headers "X-Correlation-ID")))
+      check (fmap (fmap XT.xTraceIDBytes) (lookupHeader @XT.XTraceID (headers "X-Trace-ID")))
+      check (fmap (fmap XP.xPoweredByBytes) (lookupHeader @XP.XPoweredBy (headers "X-Powered-By")))
+      check (fmap (Just . XR.xRequestIDBytes) (XR.xRequestIDFromBytes wire))
+      check (fmap (Just . XC.xCorrelationIDBytes) (XC.xCorrelationIDFromBytes wire))
+      check (fmap (Just . XT.xTraceIDBytes) (XT.xTraceIDFromBytes wire))
+      check (fmap (Just . XP.xPoweredByBytes) (XP.xPoweredByFromBytes wire))
+  it "retains the original bytes in both rendering paths" $ do
+    let wire = "\t\255/abc \t"
+        empty = headerMapFromList []
+        request = either error id (XR.xRequestIDFromBytes wire)
+        correlation = either error id (XC.xCorrelationIDFromBytes wire)
+        trace = either error id (XT.xTraceIDFromBytes wire)
+        poweredBy = either error id (XP.xPoweredByFromBytes wire)
+    lookupRawHeader hXRequestID (setHeader request empty) `shouldBe` Just (wire :| [])
+    lookupRawHeader hXCorrelationID (setHeader correlation empty) `shouldBe` Just (wire :| [])
+    lookupRawHeader hXTraceID (setHeader trace empty) `shouldBe` Just (wire :| [])
+    lookupRawHeader hXPoweredBy (setHeader poweredBy empty) `shouldBe` Just (wire :| [])
+    M.toStrictByteString (XR.renderXRequestID request) `shouldBe` wire
+    M.toStrictByteString (XC.renderXCorrelationID correlation) `shouldBe` wire
+    M.toStrictByteString (XT.renderXTraceID trace) `shouldBe` wire
+    M.toStrictByteString (XP.renderXPoweredBy poweredBy) `shouldBe` wire
+    XR.xRequestID request `shouldBe` ST.fromString "\t\255/abc \t"
+  it "rejects ambiguous duplicate singleton fields" $ do
+    let headers name = headerMapFromList [(name, "one"), (name, "two")]
+    lookupHeader @XR.XRequestID (headers "X-Request-ID") `shouldSatisfy` isLeft
+    lookupHeader @XC.XCorrelationID (headers "X-Correlation-ID") `shouldSatisfy` isLeft
+    lookupHeader @XT.XTraceID (headers "X-Trace-ID") `shouldSatisfy` isLeft
+    lookupHeader @XP.XPoweredBy (headers "X-Powered-By") `shouldSatisfy` isLeft
+
+
 ------------------------------------------------------------------------
 -- X-Request-Start
 ------------------------------------------------------------------------
@@ -174,9 +222,40 @@ prop_requestStart = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+unit_requestStartEpoch :: Spec
+unit_requestStartEpoch = do
+  it "reads exact decimal values across documented units and floating-point forms" $ do
+    let readEpoch bytes = fmap toRational (XS.xRequestStartFromBytes bytes >>= XS.xRequestStartEpoch)
+    readEpoch "t=1700000000.123" `shouldBe` Right (1700000000123 % 1000)
+    readEpoch "1700000000123" `shouldBe` Right 1700000000123
+    readEpoch "t=1700000000123456" `shouldBe` Right 1700000000123456
+    readEpoch "\tt=+0017.000E+8 \t" `shouldBe` Right 1700000000
+    readEpoch "-0.00001e-2" `shouldBe` Right (-1 % 10000000)
+    readEpoch "18446744073709551616.00000000000000000001"
+      `shouldBe` Right (1844674407370955161600000000000000000001 % 100000000000000000000)
+  it "preserves wire spelling and can author an exact timestamp" $ do
+    let wire = "\t t=0001700000000.12300 \t"
+        readHeader = lookupHeader @XS.XRequestStart (headerMapFromList [("X-Request-Start", wire)])
+    case readHeader of
+      Right (Just parsed) -> do
+        XS.xRequestStartTPrefixed parsed `shouldBe` True
+        XS.xRequestStartTimestamp parsed `shouldBe` "0001700000000.12300"
+        lookupRawHeader hXRequestStart (setHeader parsed (headerMapFromList [])) `shouldBe` Just (wire :| [])
+        M.toStrictByteString (XS.renderXRequestStart parsed) `shouldBe` wire
+        let authored = XS.xRequestStartFromEpoch True <$> XS.xRequestStartEpoch parsed
+        (authored >>= XS.xRequestStartFromBytes . XS.xRequestStartBytes >>= XS.xRequestStartEpoch) `shouldBe` XS.xRequestStartEpoch parsed
+      other -> expectationFailure (show other)
+  it "rejects incomplete, malformed, out-of-range and repeated timestamps" $ do
+    forM_ ["", "t=", "t= ", "t=123 45", "+", "t=1.", "1..2", "1.1a", "1e", "1e+", "NaN", "0xff", "1e999999999999999999999", "1e-999999999999999999999", "1\255", "1\n"] $ \wire -> do
+      XS.xRequestStartFromBytes wire `shouldSatisfy` isLeft
+      parseFull XS.xRequestStartParser wire `shouldSatisfy` isLeft
+    lookupHeader @XS.XRequestStart (headerMapFromList [("X-Request-Start", "1"), ("X-Request-Start", "2")]) `shouldSatisfy` isLeft
+
+
 tests :: Spec
 tests =
   describe "DefactoCorrelation" $ do
+    unit_opaqueWire
     describe "X-Request-ID" $
       sequence_
         [ unit_requestID_parse
@@ -195,7 +274,8 @@ tests =
         , unit_traceID_render
         , it "round-trip" prop_traceID
         ]
-    describe "X-Request-Start" $
+    describe "X-Request-Start" $ do
+      unit_requestStartEpoch
       sequence_
         [ unit_requestStart_parse_nginx
         , unit_requestStart_parse_heroku

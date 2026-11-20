@@ -21,7 +21,9 @@ module Network.HTTP.Headers.XForwardedPort (
   renderXForwardedPort,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Word (Word16)
+import Network.HTTP.Grammar.Authority (portNumber)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXForwardedPort)
 import qualified Network.HTTP.Headers.Mason as M
@@ -39,11 +41,14 @@ instance KnownHeader XForwardedPort where
   type Direction XForwardedPort = 'Request
 
 
-  parseFromHeaders _ headers = case runParser xForwardedPortParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing X-Forwarded-Port header: " <> show rest
-    Fail -> Left "Failed to parse X-Forwarded-Port header"
-    Err e -> Left e
+  parseFromHeaders _ fields = case fields of
+    wire :| [] -> withShortDecimal wire port fallback
+    _ -> fallback
+    where
+      port n
+        | n <= fromIntegral (maxBound :: Word16) = Right (XForwardedPort (fromIntegral n))
+        | otherwise = Left "Port exceeds 65535"
+      fallback = parseSingleFieldLine "X-Forwarded-Port" xForwardedPortParser fields
 
 
   renderToHeaders _ = M.toStrictByteString . renderXForwardedPort
@@ -53,7 +58,7 @@ instance KnownHeader XForwardedPort where
 
 
 xForwardedPortParser :: ParserT st String XForwardedPort
-xForwardedPortParser = XForwardedPort <$> anyAsciiDecimalWord
+xForwardedPortParser = XForwardedPort . fromIntegral <$> portNumber
 
 
 renderXForwardedPort :: XForwardedPort -> M.Builder

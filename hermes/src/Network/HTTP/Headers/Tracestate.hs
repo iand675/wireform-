@@ -1,4 +1,7 @@
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE UnboxedTuples #-}
 
 {- |
 @tracestate@ request\/response header — W3C Trace Context.
@@ -7,16 +10,15 @@ Carries vendor-specific trace identification data as an ordered,
 comma-separated list of opaque @key=value@ members:
 
 @
-tracestate  = list-member *( OWS \",\" OWS list-member )
-list-member = key \"=\" value
-key         = lcalpha *( lcalpha / DIGIT / \"_\" / \"-\" / \"*\" / \"/\" / \"@\" )
-value       = *chr       ; printable US-ASCII excluding \",\" and \"=\"
+tracestate  = list-member 0*31( OWS \",\" OWS list-member )
+list-member = key \"=\" value / OWS
+key         = simple-key / tenant-id \"@\" system-id
+value       = 0*255(chr) nblk-chr
 @
 
-Members are preserved in order: the leftmost member is the most
-recently updated trace state. Keys and values are surfaced as raw
-text; the spec's internal-whitespace allowance in @value@ is not
-emitted so members serialize unambiguously.
+Members from repeated field lines are combined in received order.
+Values retain leading and internal spaces. Blank members are accepted
+and omitted from the canonical serialization.
 
 Spec: <https://www.w3.org/TR/trace-context/#tracestate-header>.
 
@@ -26,21 +28,25 @@ See also: "Network.HTTP.Headers.Traceparent", "Network.HTTP.Headers.XTraceID",
 module Network.HTTP.Headers.Tracestate (
   Tracestate (..),
   TracestateMember (..),
+  tracestateMemberList,
   tracestateParser,
   renderTracestate,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
-import Data.CharSet (CharSet)
-import qualified Data.CharSet as CharSet
-import Data.CharSet.Posix.Ascii (digit)
+import Data.Bits (complement, xor, (.&.), (.|.))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
+import qualified Data.Set as Set
 import qualified Data.Text.Short as ST
+import GHC.Exts (Addr#, eqAddr#, indexWord8OffAddr#, indexWord8OffAddrAsWord64#, isTrue#, minusAddr#, plusAddr#, (<=#))
+import GHC.Word (Word64 (W64#), Word8 (W8#))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTracestate)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Parser.Internal (Parser (..), pattern Err#, pattern Fail#, pattern OK#)
 
 
 -- | A single @key=value@ list member.
@@ -51,8 +57,10 @@ data TracestateMember = TracestateMember
   deriving stock (Eq, Show)
 
 
--- | The ordered, non-empty list of @tracestate@ members.
-newtype Tracestate = Tracestate {tracestateMembers :: NE.NonEmpty TracestateMember}
+-- | The ordered @tracestate@ members, or a present but empty field.
+data Tracestate
+  = Tracestate {tracestateMembers :: !(NE.NonEmpty TracestateMember)}
+  | TracestateEmpty
   deriving stock (Eq, Show)
 
 
@@ -62,11 +70,11 @@ instance KnownHeader Tracestate where
   type Direction Tracestate = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser tracestateParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Tracestate header: " <> show rest
-    Fail -> Left "Failed to parse Tracestate header"
-    Err e -> Left e
+  parseFromHeaders _ (wire NE.:| []) = parseFieldLine "tracestate" tracestateParser wire
+  parseFromHeaders _ fields
+    | withinMemberLimit 32 (NE.toList fields) =
+        parseListFieldLines "tracestate" tracestateList fields >>= verifyMembers
+    | otherwise = Left "Tracestate exceeds 32 list members"
 
 
   renderToHeaders _ = M.toStrictByteString . renderTracestate
@@ -75,34 +83,156 @@ instance KnownHeader Tracestate where
   headerName _ = hTracestate
 
 
--- | @key@ characters: @lcalpha@, @DIGIT@ and @_-*\/\@@.
-keyCharSet :: CharSet
-keyCharSet = CharSet.range 'a' 'z' <> digit <> CharSet.fromList "_-*/@"
-
-
-{- | @value@ characters: printable US-ASCII (@0x21-0x7E@) excluding
-comma (@0x2C@) and equals (@0x3D@).
--}
-valueCharSet :: CharSet
-valueCharSet =
-  CharSet.range '\x21' '\x2B'
-    <> CharSet.range '\x2D' '\x3C'
-    <> CharSet.range '\x3E' '\x7E'
+-- | The ordered members of either a populated or an empty field.
+tracestateMemberList :: Tracestate -> [TracestateMember]
+tracestateMemberList TracestateEmpty = []
+tracestateMemberList (Tracestate members) = NE.toList members
 
 
 tracestateParser :: ParserT st String Tracestate
-tracestateParser = Tracestate <$> (memberParser `sepBy1` (ows *> $(char ',') *> ows))
+tracestateParser = tracestateList >>= either err pure . verifyMembers
+
+
+tracestateList :: ParserT st String [TracestateMember]
+tracestateList = ows *> members (32 :: Int)
   where
-    memberParser = do
-      key <- shortASCIIFromParser_ (skipSome (skipSatisfyAscii (`CharSet.member` keyCharSet)))
-      $(char '=')
-      value <- shortASCIIFromParser_ (skipSome (skipSatisfyAscii (`CharSet.member` valueCharSet)))
-      pure (TracestateMember key value)
+    comma = $(char ',') *> ows
+    members 0 = err "Tracestate exceeds 32 list members"
+    members slots = branch comma (members (slots - 1)) (populated <|> pure [])
+      where
+        populated = do
+          member <- tracestateMember <* ows
+          rest <- withOption comma (const (members (slots - 1))) (pure [])
+          pure (member : rest)
+
+
+-- Each line contributes one member even when blank. Commas inside values
+-- are forbidden, so there is no quoting to account for when counting.
+withinMemberLimit :: Int -> [ByteString] -> Bool
+withinMemberLimit _ [] = True
+withinMemberLimit slots (wire : rest) =
+  let commas = BS.count 44 wire
+  in commas < slots && withinMemberLimit (slots - commas - 1) rest
+
+
+verifyMembers :: [TracestateMember] -> Either String Tracestate
+verifyMembers [] = Right TracestateEmpty
+verifyMembers members@(first : rest)
+  | distinct members = Right (Tracestate (first NE.:| rest))
+  | otherwise = Left "Duplicate tracestate key"
+  where
+    distinct [_] = True
+    distinct [a, b] = tracestateKey a /= tracestateKey b
+    distinct entries = Set.size (Set.fromList (map tracestateKey entries)) == length entries
+
+
+tracestateMember :: ParserT st String TracestateMember
+tracestateMember = TracestateMember <$> stateKey <*> ($(char '=') *> stateValue)
+
+
+stateKey :: ParserT st String ST.ShortText
+stateKey = shortASCIIFromParser_ $ Parser $ \_ end start st ->
+  let invalid = (# st, Fail# #)
+      byteAt addr = W8# (indexWord8OffAddr# addr 0#)
+      simpleKey first stop =
+        if lowerByte first && isTrue# (minusAddr# stop start <=# 256#)
+          then (# st, OK# () stop #)
+          else invalid
+      systemId begin
+        | not (isTrue# (eqAddr# begin end)) && lowerByte (byteAt begin) =
+            let stop = scanStateRun keyByte end (plusAddr# begin 1#)
+            in if isTrue# (minusAddr# stop begin <=# 14#)
+                 then (# st, OK# () stop #)
+                 else invalid
+        | otherwise = invalid
+  in if isTrue# (eqAddr# start end)
+       then invalid
+       else
+         let first = byteAt start
+         in if lowerByte first || digitByte first
+              then
+                let stop = scanStateRun keyByte end (plusAddr# start 1#)
+                in if not (isTrue# (eqAddr# stop end)) && byteAt stop == 64
+                     then
+                       if isTrue# (minusAddr# stop start <=# 241#)
+                         then systemId (plusAddr# stop 1#)
+                         else invalid
+                     else simpleKey first stop
+              else invalid
+{-# INLINE stateKey #-}
+
+
+keyByte :: Word8 -> Bool
+keyByte b = lowerByte b || digitByte b || b == 95 || b == 45 || b == 42 || b == 47
+{-# INLINE keyByte #-}
+
+
+lowerByte :: Word8 -> Bool
+lowerByte b = b - 97 <= 25
+{-# INLINE lowerByte #-}
+
+
+digitByte :: Word8 -> Bool
+digitByte b = b - 48 <= 9
+{-# INLINE digitByte #-}
+
+
+-- Capture just the value. The list parser's OWS consumes the trimmed
+-- spaces, so there is no second ByteString slice to keep or copy.
+stateValue :: ParserT st String ST.ShortText
+stateValue = shortASCIIFromParser_ $ Parser $ \_ end start st ->
+  let scan cur
+        | isTrue# (8# <=# minusAddr# end cur)
+        , valueWord (W64# (indexWord8OffAddrAsWord64# cur 0#)) =
+            scan (plusAddr# cur 8#)
+        | otherwise = scanStateRun valueByte end cur
+      stop = scan start
+      trim cur
+        | isTrue# (eqAddr# cur start) = cur
+        | W8# (indexWord8OffAddr# cur (-1#)) == 32 = trim (plusAddr# cur (-1#))
+        | otherwise = cur
+      trimmed = trim stop
+  in if isTrue# (eqAddr# stop start)
+       then (# st, Fail# #)
+       else
+         if isTrue# (eqAddr# trimmed start) || not (isTrue# (minusAddr# trimmed start <=# 256#))
+           then (# st, Err# "Invalid tracestate value length" #)
+           else (# st, OK# () trimmed #)
+  where
+    valueByte b = b >= 32 && b <= 126 && b /= 44 && b /= 61
+{-# INLINE stateValue #-}
+
+
+-- Check printable ASCII in parallel, then exclude comma and equals.
+-- The high bit bias prevents cross-byte borrows in the range comparisons.
+valueWord :: Word64 -> Bool
+valueWord bytes =
+  rangeBits .&. complement bytes .&. high == high
+    && excludes 0x2c2c_2c2c_2c2c_2c2c
+    && excludes 0x3d3d_3d3d_3d3d_3d3d
+  where
+    high = 0x8080_8080_8080_8080
+    low = bytes .&. complement high
+    rangeBits = ((bytes .|. high) - 0x2020_2020_2020_2020) .&. (0xfefe_fefe_fefe_fefe - low)
+    excludes repeated =
+      let diff = bytes `xor` repeated
+      in (diff - 0x0101_0101_0101_0101) .&. complement diff .&. high == 0
+{-# INLINE valueWord #-}
+
+
+scanStateRun :: (Word8 -> Bool) -> Addr# -> Addr# -> Addr#
+scanStateRun predicate end = scan
+  where
+    scan cur
+      | isTrue# (eqAddr# cur end) = cur
+      | predicate (W8# (indexWord8OffAddr# cur 0#)) = scan (plusAddr# cur 1#)
+      | otherwise = cur
+{-# INLINE scanStateRun #-}
 
 
 renderTracestate :: Tracestate -> M.Builder
-renderTracestate (Tracestate members) =
-  M.intersperse "," (map renderMember (NE.toList members))
+renderTracestate state =
+  M.intersperse "," (map renderMember (tracestateMemberList state))
   where
     renderMember (TracestateMember key value) =
       shortText key <> M.char7 '=' <> shortText value

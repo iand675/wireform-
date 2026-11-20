@@ -55,8 +55,13 @@ module Parquet.Thrift.Schema (
   pattern FileMetadata_Schema,
   pattern FileMetadata_NumRows,
   pattern FileMetadata_RowGroups,
+  pattern FileMetadata_KeyValueMetadata,
+  pattern KeyValue_Key,
+  pattern KeyValue_Value,
   pattern FileMetadata_CreatedBy,
   pattern FileMetadata_ColumnOrders,
+  pattern FileMetadata_EncryptionAlgorithm,
+  pattern FileMetadata_FooterSigningKeyMetadata,
 
   -- * SchemaElement
 
@@ -90,6 +95,7 @@ module Parquet.Thrift.Schema (
 
   -- * RowGroup
   pattern RowGroup_Columns,
+  pattern RowGroup_Ordinal,
   pattern RowGroup_TotalByteSize,
   pattern RowGroup_NumRows,
   pattern RowGroup_SortingColumns,
@@ -101,6 +107,8 @@ module Parquet.Thrift.Schema (
 
   -- ** ColumnOrder union variants
   columnOrderTypeDefined,
+  columnOrderIeee754Total,
+  columnOrderInt96Timestamp,
 
   -- * ColumnChunk
   pattern ColumnChunk_FilePath,
@@ -110,6 +118,12 @@ module Parquet.Thrift.Schema (
   pattern ColumnChunk_OffsetIndexLength,
   pattern ColumnChunk_ColumnIndexOffset,
   pattern ColumnChunk_ColumnIndexLength,
+  pattern ColumnChunk_CryptoMetadata,
+  pattern ColumnCryptoMetaData_EncryptionWithFooterKey,
+  pattern ColumnCryptoMetaData_EncryptionWithColumnKey,
+  pattern EncryptionWithColumnKey_PathInSchema,
+  pattern EncryptionWithColumnKey_KeyMetadata,
+  pattern ColumnChunk_EncryptedColumnMetadata,
 
   -- * ColumnMetaData
   pattern ColumnMetaData_Type,
@@ -140,6 +154,9 @@ module Parquet.Thrift.Schema (
   pattern Statistics_DistinctCount,
   pattern Statistics_MaxValue,
   pattern Statistics_MinValue,
+  pattern Statistics_NanCount,
+  pattern Statistics_MinValueExact,
+  pattern Statistics_MaxValueExact,
 
   -- * PageHeader
 
@@ -161,6 +178,7 @@ module Parquet.Thrift.Schema (
   pattern PageHeader_Type,
   pattern PageHeader_UncompressedSize,
   pattern PageHeader_CompressedSize,
+  pattern PageHeader_Crc,
   pattern PageHeader_DataPageHeader,
   pattern PageHeader_DictionaryPageHeader,
   pattern PageHeader_DataPageHeaderV2,
@@ -199,6 +217,7 @@ module Parquet.Thrift.Schema (
   pattern ColumnIndex_MaxValues,
   pattern ColumnIndex_BoundaryOrder,
   pattern ColumnIndex_NullCounts,
+  pattern ColumnIndex_NanCounts,
   pattern ColumnIndex_RepetitionLevelHistograms,
   pattern ColumnIndex_DefinitionLevelHistograms,
 
@@ -218,10 +237,12 @@ module Parquet.Thrift.Schema (
 
   -- | Only the @AES_GCM_V1@ branch is used by the footer writer.
   pattern EncryptionAlgorithm_AesGcmV1,
+  pattern EncryptionAlgorithm_AesGcmCtrV1,
 
   -- * AesGcmV1
   pattern AesGcmV1_AadPrefix,
   pattern AesGcmV1_AadFileUnique,
+  pattern AesGcmV1_SupplyAadPrefix,
 ) where
 
 import Data.ByteString (ByteString)
@@ -284,6 +305,22 @@ pattern FileMetadata_Schema elems <- (2, TV.List _ elems)
     FileMetadata_Schema elems = (2, TV.List TT_STRUCT elems)
 
 
+-- FileMetaData.key_value_metadata is field 5. KeyValue uses the Thrift
+-- string wire type; Value exposes both decoded Text and opaque bytes.
+pattern FileMetadata_KeyValueMetadata :: Vector TV.Value -> (Int16, TV.Value)
+pattern FileMetadata_KeyValueMetadata xs <- (5, TV.List _ xs)
+  where
+    FileMetadata_KeyValueMetadata xs = (5, TV.List TT_STRUCT xs)
+
+
+pattern KeyValue_Key :: TV.Value -> (Int16, TV.Value)
+pattern KeyValue_Key value = (1, value)
+
+
+pattern KeyValue_Value :: TV.Value -> (Int16, TV.Value)
+pattern KeyValue_Value value = (2, value)
+
+
 pattern FileMetadata_NumRows :: Int64 -> (Int16, TV.Value)
 pattern FileMetadata_NumRows v = (3, TV.I64 v)
 
@@ -314,6 +351,14 @@ pattern FileMetadata_ColumnOrders :: Vector TV.Value -> (Int16, TV.Value)
 pattern FileMetadata_ColumnOrders xs <- (7, TV.List _ xs)
   where
     FileMetadata_ColumnOrders xs = (7, TV.List TT_STRUCT xs)
+
+
+pattern FileMetadata_EncryptionAlgorithm :: Vector (Int16, TV.Value) -> (Int16, TV.Value)
+pattern FileMetadata_EncryptionAlgorithm fs = (8, TV.Struct fs)
+
+
+pattern FileMetadata_FooterSigningKeyMetadata :: ByteString -> (Int16, TV.Value)
+pattern FileMetadata_FooterSigningKeyMetadata v = (9, TV.Binary v)
 
 
 -- ============================================================
@@ -376,6 +421,10 @@ pattern RowGroup_Columns elems <- (1, TV.List _ elems)
     RowGroup_Columns elems = (1, TV.List TT_STRUCT elems)
 
 
+pattern RowGroup_Ordinal :: Int16 -> (Int16, TV.Value)
+pattern RowGroup_Ordinal v = (7, TV.I16 v)
+
+
 pattern RowGroup_TotalByteSize :: Int64 -> (Int16, TV.Value)
 pattern RowGroup_TotalByteSize v = (2, TV.I64 v)
 
@@ -413,16 +462,17 @@ pattern SortingColumn_NullsFirst b = (3, TV.Bool b)
 -- ============================================================
 -- ColumnOrder
 -- ============================================================
--- The parquet.thrift @ColumnOrder@ union has one variant
--- today: @{1: TypeDefinedOrder TYPE_ORDER}@ where
--- @TypeDefinedOrder@ is itself an empty struct.
-
-{- | The single ColumnOrder variant. The @TYPE_ORDER@ payload
-is an empty struct, so callers identify the variant by the
-field number alone (1).
--}
+-- All three ColumnOrder union variants carry an empty struct.
 columnOrderTypeDefined :: TV.Value
 columnOrderTypeDefined = TV.Struct (V.singleton (1, TV.Struct V.empty))
+
+
+columnOrderIeee754Total :: TV.Value
+columnOrderIeee754Total = TV.Struct (V.singleton (2, TV.Struct V.empty))
+
+
+columnOrderInt96Timestamp :: TV.Value
+columnOrderInt96Timestamp = TV.Struct (V.singleton (3, TV.Struct V.empty))
 
 
 -- ============================================================
@@ -455,6 +505,32 @@ pattern ColumnChunk_ColumnIndexOffset v = (6, TV.I64 v)
 
 pattern ColumnChunk_ColumnIndexLength :: Int32 -> (Int16, TV.Value)
 pattern ColumnChunk_ColumnIndexLength v = (7, TV.I32 v)
+
+
+pattern ColumnChunk_CryptoMetadata :: Vector (Int16, TV.Value) -> (Int16, TV.Value)
+pattern ColumnChunk_CryptoMetadata fs = (8, TV.Struct fs)
+
+
+pattern ColumnCryptoMetaData_EncryptionWithFooterKey :: Vector (Int16, TV.Value) -> (Int16, TV.Value)
+pattern ColumnCryptoMetaData_EncryptionWithFooterKey fs = (1, TV.Struct fs)
+
+
+pattern ColumnCryptoMetaData_EncryptionWithColumnKey :: Vector (Int16, TV.Value) -> (Int16, TV.Value)
+pattern ColumnCryptoMetaData_EncryptionWithColumnKey fs = (2, TV.Struct fs)
+
+
+pattern EncryptionWithColumnKey_PathInSchema :: Vector TV.Value -> (Int16, TV.Value)
+pattern EncryptionWithColumnKey_PathInSchema values <- (1, TV.List _ values)
+  where
+    EncryptionWithColumnKey_PathInSchema values = (1, TV.List TT_STRING values)
+
+
+pattern EncryptionWithColumnKey_KeyMetadata :: ByteString -> (Int16, TV.Value)
+pattern EncryptionWithColumnKey_KeyMetadata value = (2, TV.Binary value)
+
+
+pattern ColumnChunk_EncryptedColumnMetadata :: ByteString -> (Int16, TV.Value)
+pattern ColumnChunk_EncryptedColumnMetadata value = (9, TV.Binary value)
 
 
 -- ============================================================
@@ -543,6 +619,10 @@ pattern Statistics_Min :: ByteString -> (Int16, TV.Value)
 pattern Statistics_Min v = (2, TV.Binary v)
 
 
+pattern Statistics_NanCount :: Int64 -> (Int16, TV.Value)
+pattern Statistics_NanCount v = (9, TV.I64 v)
+
+
 pattern Statistics_NullCount :: Int64 -> (Int16, TV.Value)
 pattern Statistics_NullCount v = (3, TV.I64 v)
 
@@ -559,6 +639,14 @@ pattern Statistics_MinValue :: ByteString -> (Int16, TV.Value)
 pattern Statistics_MinValue v = (6, TV.Binary v)
 
 
+pattern Statistics_MaxValueExact :: Bool -> (Int16, TV.Value)
+pattern Statistics_MaxValueExact v = (7, TV.Bool v)
+
+
+pattern Statistics_MinValueExact :: Bool -> (Int16, TV.Value)
+pattern Statistics_MinValueExact v = (8, TV.Bool v)
+
+
 -- ============================================================
 -- PageHeader
 -- ============================================================
@@ -573,6 +661,10 @@ pattern PageHeader_UncompressedSize v = (2, TV.I32 v)
 
 pattern PageHeader_CompressedSize :: Int32 -> (Int16, TV.Value)
 pattern PageHeader_CompressedSize v = (3, TV.I32 v)
+
+
+pattern PageHeader_Crc :: Int32 -> (Int16, TV.Value)
+pattern PageHeader_Crc v = (4, TV.I32 v)
 
 
 pattern PageHeader_DataPageHeader
@@ -729,6 +821,12 @@ pattern ColumnIndex_NullCounts elems <- (5, TV.List _ elems)
     ColumnIndex_NullCounts elems = (5, TV.List TT_I64 elems)
 
 
+pattern ColumnIndex_NanCounts :: Vector TV.Value -> (Int16, TV.Value)
+pattern ColumnIndex_NanCounts elems <- (8, TV.List _ elems)
+  where
+    ColumnIndex_NanCounts elems = (8, TV.List TT_I64 elems)
+
+
 pattern ColumnIndex_RepetitionLevelHistograms
   :: Vector TV.Value -> (Int16, TV.Value)
 pattern ColumnIndex_RepetitionLevelHistograms elems <- (6, TV.List _ elems)
@@ -803,6 +901,11 @@ pattern EncryptionAlgorithm_AesGcmV1
 pattern EncryptionAlgorithm_AesGcmV1 fs = (1, TV.Struct fs)
 
 
+pattern EncryptionAlgorithm_AesGcmCtrV1
+  :: Vector (Int16, TV.Value) -> (Int16, TV.Value)
+pattern EncryptionAlgorithm_AesGcmCtrV1 fs = (2, TV.Struct fs)
+
+
 -- ============================================================
 -- AesGcmV1
 -- ============================================================
@@ -813,3 +916,7 @@ pattern AesGcmV1_AadPrefix v = (1, TV.Binary v)
 
 pattern AesGcmV1_AadFileUnique :: ByteString -> (Int16, TV.Value)
 pattern AesGcmV1_AadFileUnique v = (2, TV.Binary v)
+
+
+pattern AesGcmV1_SupplyAadPrefix :: Bool -> (Int16, TV.Value)
+pattern AesGcmV1_SupplyAadPrefix v = (3, TV.Bool v)

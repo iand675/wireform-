@@ -5,15 +5,9 @@
 embedding of cross-origin resources into the document, the server side
 of cross-origin isolation.
 
-The value is an RFC 8941 structured-field item: a bare token naming the
-policy, optionally followed by a @report-to@ parameter naming a reporting
-endpoint.
-
-@
-Cross-Origin-Embedder-Policy = sf-token *( \";\" parameter )
-sf-token                     = \"unsafe-none\" / \"require-corp\" / \"credentialless\"
-parameter                    = \"report-to\" \"=\" sf-string
-@
+The value is a Structured Fields Item whose bare value is a policy token.
+The string parameter @report-to@ names a reporting endpoint. Other
+parameters are validated and ignored.
 
 Spec: WHATWG HTML, <https://html.spec.whatwg.org/multipage/browsers.html#coep>
 (see also <https://fetch.spec.whatwg.org/#cross-origin-embedder-policy-header>).
@@ -30,7 +24,7 @@ module Network.HTTP.Headers.CrossOriginEmbedderPolicy (
   renderCrossOriginEmbedderPolicy,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hCrossOriginEmbedderPolicy)
 import qualified Network.HTTP.Headers.Mason as M
@@ -64,14 +58,11 @@ instance KnownHeader CrossOriginEmbedderPolicy where
   type Direction CrossOriginEmbedderPolicy = 'Response
 
 
-  parseFromHeaders _ headers = case runParser crossOriginEmbedderPolicyParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Cross-Origin-Embedder-Policy header: " <> show rest
-    Fail -> Left "Failed to parse Cross-Origin-Embedder-Policy header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Cross-Origin-Embedder-Policy" crossOriginEmbedderPolicyParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderCrossOriginEmbedderPolicy
+  renderToHeaders _ (CrossOriginEmbedderPolicy directive Nothing) = coepDirectiveBytes directive
+  renderToHeaders _ value = M.toStrictByteString (renderCrossOriginEmbedderPolicy value)
 
 
   headerName _ = hCrossOriginEmbedderPolicy
@@ -80,34 +71,22 @@ instance KnownHeader CrossOriginEmbedderPolicy where
 coepDirectiveParser :: ParserT st String CoepDirective
 coepDirectiveParser =
   $( switch
-      [|
-        case _ of
-          "unsafe-none" -> pure CoepUnsafeNone
-          "require-corp" -> pure CoepRequireCorp
-          "credentialless" -> pure CoepCredentialless
-        |]
+       [|
+         case _ of
+           "unsafe-none" -> pure CoepUnsafeNone
+           "require-corp" -> pure CoepRequireCorp
+           "credentialless" -> pure CoepCredentialless
+         |]
    )
 
 
--- | Parse the optional @;report-to="endpoint"@ structured-field parameter.
-reportToParam :: ParserT st String RFC8941String
-reportToParam = do
-  $(char ';')
-  ows
-  $(string "report-to")
-  $(char '=')
-  rfc8941String
-
-
 crossOriginEmbedderPolicyParser :: ParserT st String CrossOriginEmbedderPolicy
-crossOriginEmbedderPolicyParser = do
-  d <- coepDirectiveParser
-  rt <- optional reportToParam
-  pure (CrossOriginEmbedderPolicy d rt)
+crossOriginEmbedderPolicyParser =
+  CrossOriginEmbedderPolicy <$> coepDirectiveParser <*> structuredFieldStringParameter "report-to"
 
 
-renderCoepDirective :: CoepDirective -> M.Builder
-renderCoepDirective = \case
+coepDirectiveBytes :: CoepDirective -> ByteString
+coepDirectiveBytes = \case
   CoepUnsafeNone -> "unsafe-none"
   CoepRequireCorp -> "require-corp"
   CoepCredentialless -> "credentialless"
@@ -115,5 +94,5 @@ renderCoepDirective = \case
 
 renderCrossOriginEmbedderPolicy :: CrossOriginEmbedderPolicy -> M.Builder
 renderCrossOriginEmbedderPolicy (CrossOriginEmbedderPolicy d rt) =
-  renderCoepDirective d
-    <> R.rfc8941Parameter R.ExcludeIfEmpty R.rfc8941String "report-to" rt
+  M.byteString (coepDirectiveBytes d)
+    <> foldMap (\endpoint -> ";report-to=" <> R.rfc8941String endpoint) rt

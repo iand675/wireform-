@@ -142,7 +142,8 @@ recordSchemaE c = do
   rootE <-
     [|
       PT.SchemaElement
-        { PT.seName = T.pack "schema"
+        { PT.seTypeLength = Nothing
+        , PT.seName = T.pack "schema"
         , PT.seRepetition = Nothing
         , PT.seType = Nothing
         , PT.seNumChildren = Just $nLit
@@ -172,7 +173,8 @@ fieldSchemaE (FieldInfo mSel ty) = do
           else [|Just PT.Required|]
   [|
     PT.SchemaElement
-      { PT.seName = $(pure keyExp)
+      { PT.seTypeLength = Nothing
+      , PT.seName = $(pure keyExp)
       , PT.seRepetition = $repExp
       , PT.seType = Just $(pure ptExp)
       , PT.seNumChildren = Nothing

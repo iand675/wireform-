@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Access-Control-Allow-Methods@ (WHATWG Fetch / W3C CORS) response header
 specifying the HTTP methods allowed when accessing the resource, returned in
@@ -9,7 +7,7 @@ requests without credentials.
 == Grammar
 
 @
-Access-Control-Allow-Methods = "*" / 1#method
+Access-Control-Allow-Methods = #method
 method                       = token
 @
 
@@ -38,6 +36,7 @@ data AccessControlAllowMethods
     AllowMethodsWildcard
   | -- | An explicit, comma-separated list of method tokens.
     AllowMethods !(NE.NonEmpty ST.ShortText)
+  | AllowMethodsEmpty
   deriving stock (Eq, Show)
 
 
@@ -47,11 +46,7 @@ instance KnownHeader AccessControlAllowMethods where
   type Direction AccessControlAllowMethods = 'Response
 
 
-  parseFromHeaders _ headers = case runParser accessControlAllowMethodsParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Access-Control-Allow-Methods header: " <> show rest
-    Fail -> Left "Failed to parse Access-Control-Allow-Methods header"
-    Err e -> Left e
+  parseFromHeaders _ = fmap fromEntries . parseListFieldLines "Access-Control-Allow-Methods" (httpList rfc9110Token)
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccessControlAllowMethods
@@ -61,16 +56,17 @@ instance KnownHeader AccessControlAllowMethods where
 
 
 accessControlAllowMethodsParser :: ParserT st String AccessControlAllowMethods
-accessControlAllowMethodsParser = wildcard <|> list
-  where
-    wildcard = AllowMethodsWildcard <$ $(char '*')
-    list = do
-      first <- rfc9110Token
-      rest <- many (ows *> $(char ',') *> ows *> rfc9110Token)
-      pure $ AllowMethods (first NE.:| rest)
+accessControlAllowMethodsParser = fromEntries <$> httpList rfc9110Token
+
+
+fromEntries :: [ST.ShortText] -> AccessControlAllowMethods
+fromEntries [] = AllowMethodsEmpty
+fromEntries ["*"] = AllowMethodsWildcard
+fromEntries (first : rest) = AllowMethods (first NE.:| rest)
 
 
 renderAccessControlAllowMethods :: AccessControlAllowMethods -> M.Builder
 renderAccessControlAllowMethods = \case
+  AllowMethodsEmpty -> mempty
   AllowMethodsWildcard -> "*"
   AllowMethods methods -> M.intersperse ", " (map shortText (NE.toList methods))

@@ -36,12 +36,14 @@ module Network.HTTP1.Headers (
   findHost,
   findConnection,
   findExpect,
+  expectsContinue,
   findUpgrade,
   findTrailer,
 
   -- * Connection-token parsing
   ConnectionOption (..),
   parseConnection,
+  connectionOptions,
 
   -- * Case-insensitive helpers
   headerNameIeq,
@@ -51,6 +53,7 @@ import Control.DeepSeq (NFData (..))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
+import Network.HTTP.Headers.Expect qualified as Expect
 import Network.HTTP1.Internal.Ascii (asciiIeq)
 
 
@@ -140,6 +143,12 @@ findExpect = hLookup "expect"
 {-# INLINE findExpect #-}
 
 
+-- | Interpret every Expect field line as the combined expectation list.
+expectsContinue :: Headers -> Bool
+expectsContinue = Expect.hasContinueExpectation . hLookupAll "expect"
+{-# INLINE expectsContinue #-}
+
+
 findUpgrade :: Headers -> Maybe HeaderValue
 findUpgrade = hLookup "upgrade"
 {-# INLINE findUpgrade #-}
@@ -194,3 +203,8 @@ parseConnection raw =
       | asciiIeq t "close" = ConnClose
       | asciiIeq t "keep-alive" = ConnKeepAlive
       | otherwise = ConnOption t
+
+
+-- | Read connection options across all field lines in wire order.
+connectionOptions :: Headers -> [ConnectionOption]
+connectionOptions = concatMap parseConnection . hLookupAll "connection"

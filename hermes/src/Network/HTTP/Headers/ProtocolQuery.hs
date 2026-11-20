@@ -1,54 +1,83 @@
-{- |
-@Protocol-Query@ — deprecated protocol-negotiation header from the Joint
-Electronic Payment Initiative (JEPI). Its value is host-specific with no live,
-interoperable grammar, so it is preserved verbatim as an opaque string.
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
-Spec: JEPI / PEP (August 1996) header family — <https://www.w3.org/TR/NOTE-jepi-970519 White Paper: Joint Electronic Payment Initiative>; deprecated per RFC 4229.
+{- | @Protocol-Query@ queries extension availability in an HTTP request or response.
 
-See also: "Network.HTTP.Headers.ProtocolInfo", "Network.HTTP.Headers.Protocol", "Network.HTTP.Headers.ProtocolRequest", "Network.HTTP.Headers.PEP".
+Spec: <https://www.w3.org/TR/WD-jepi-uppflow> and <https://www.w3.org/TR/WD-http-pep-960820.html>.
+
+See also: "Network.HTTP.Headers.ProtocolInfo", "Network.HTTP.Headers.PEP", "Network.HTTP.Headers.PICSLabel".
 -}
 module Network.HTTP.Headers.ProtocolQuery (
-  ProtocolQuery (..),
+  ProtocolQuery (ProtocolQuery, protocolQueryValue),
+  protocolQueryEntries,
+  protocolQueryFromEntries,
   protocolQueryParser,
   renderProtocolQuery,
 ) where
 
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.LegacyProtocol
+import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hProtocolQuery)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import qualified Network.HTTP.Headers.RetainedList as R
 
 
--- | Opaque, raw-preserving @Protocol-Query@ value.
-newtype ProtocolQuery = ProtocolQuery {protocolQueryValue :: ST.ShortText}
-  deriving stock (Eq, Show)
+newtype ProtocolQuery = ProtocolQueryList (R.RetainedList LegacyDirective)
+  deriving stock (Eq)
+
+
+-- | Legacy wire spelling. Use 'protocolQueryFromEntries' for checked authoring.
+pattern ProtocolQuery :: ST.ShortText -> ProtocolQuery
+pattern ProtocolQuery {protocolQueryValue} <- (fieldText -> protocolQueryValue)
+  where
+    ProtocolQuery text = ProtocolQueryList (R.RawList text)
+
+
+{-# COMPLETE ProtocolQuery #-}
+
+
+instance Show ProtocolQuery where
+  showsPrec precedence (ProtocolQuery text) =
+    showParen (precedence > 10) $ showString "ProtocolQuery {protocolQueryValue = " . shows text . showChar '}'
+
+
+fieldText :: ProtocolQuery -> ST.ShortText
+fieldText (ProtocolQueryList entries) = R.legacyText entries
+
+
+protocolQueryEntries :: ProtocolQuery -> Either String (NE.NonEmpty LegacyDirective)
+protocolQueryEntries (ProtocolQueryList entries) = R.listEntries "Protocol-Query" entriesParser entries
+
+
+protocolQueryFromEntries :: NE.NonEmpty LegacyDirective -> Either String ProtocolQuery
+protocolQueryFromEntries = fmap ProtocolQueryList . R.listFromEntries "Protocol-Query" entriesParser renderLegacyDirective
 
 
 instance KnownHeader ProtocolQuery where
   type ParseFailure ProtocolQuery = String
-  type Cardinality ProtocolQuery = 'ZeroOrOne
-  type Direction ProtocolQuery = 'Request
+  type Cardinality ProtocolQuery = 'ZeroOrMore
+  type Direction ProtocolQuery = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser protocolQueryParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Protocol-Query header: " <> show rest
-    Fail -> Left "Failed to parse Protocol-Query header"
-    Err e -> Left e
+  parseFromHeaders _ fields = ProtocolQueryList <$> R.decodeList "Protocol-Query" entriesParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderProtocolQuery
+  renderToHeaders _ (ProtocolQueryList entries) = NE.toList (R.fieldLines entries)
 
 
   headerName _ = hProtocolQuery
 
 
 protocolQueryParser :: ParserT st String ProtocolQuery
-protocolQueryParser = ProtocolQuery <$> takeRestShortText
+protocolQueryParser = ProtocolQueryList <$> R.listParser "Protocol-Query" entriesParser
 
 
 renderProtocolQuery :: ProtocolQuery -> M.Builder
-renderProtocolQuery = shortText . protocolQueryValue
+renderProtocolQuery (ProtocolQueryList entries) = R.renderList entries
+
+
+entriesParser :: ParserT st String [LegacyDirective]
+entriesParser = legacyProtocolList (legacyDirectiveParser LegacyQuery)

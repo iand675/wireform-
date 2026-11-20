@@ -2,12 +2,15 @@
 
 module Test.Hermes.Alpn (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
 import qualified Network.HTTP.Headers.ALPN as A
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -76,5 +79,32 @@ tests =
     sequence_
       [ unit_parse
       , unit_render
+      , it "combines ordered lines and skips empty members through typed lookup" $ do
+          let fields = headerMapFromList [("ALPN", ",h2, "), ("ALPN", "\t ,"), ("ALPN", "http%2F1.1, h2 ")]
+              expected = A.ALPN (E.alpnHttp2 :| [E.alpnHttp11, E.alpnHttp2])
+          lookupHeader @A.ALPN fields `shouldBe` Right (Just expected)
+          lookupRawHeader "ALPN" (setHeader expected (headerMapFromList []))
+            `shouldBe` Just ("h2, http%2F1.1, h2" :| [])
+      , it "requires at least one member and canonical percent escapes on every line" $ do
+          forM_ ["", ", ,", "h%32", "http%2f1.1", "%2B", "%", "%0", "%Q0", "%0G", "http/1.1", "h\0"] $ \wire -> do
+            parseOk wire `shouldSatisfy` isLeft
+            lookupHeader @A.ALPN (headerMapFromList [("ALPN", wire)]) `shouldSatisfy` isLeft
+          lookupHeader @A.ALPN (headerMapFromList [("ALPN", "h2"), ("ALPN", "%68")]) `shouldSatisfy` isLeft
+      , it "round-trips every opaque protocol octet in its canonical form" $
+          forM_ [0 .. 255] $ \byte -> do
+            let protocol = A.ALPN (E.mkALPNProtocol (BS.singleton byte) :| [])
+                alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$&'*+-.^`_|~"
+                hex = BS.index "0123456789ABCDEF" . fromIntegral
+                (high, low) = byte `quotRem` 16
+                wire = if byte `BS.elem` alphabet then BS.singleton byte else BS.pack [37, hex high, hex low]
+            parseOk wire `shouldBe` Right protocol
+            render protocol `shouldBe` wire
+      , it "bounds protocol names by their decoded size" $ do
+          let wire = BS.concat (replicate 255 "%FF")
+              value = A.ALPN (E.mkALPNProtocol (BS.replicate 255 255) :| [])
+          parseOk wire `shouldBe` Right value
+          parseOk (wire <> "a") `shouldSatisfy` isLeft
+          parseOk (BS.replicate 255 65) `shouldBe` Right (A.ALPN (E.mkALPNProtocol (BS.replicate 255 65) :| []))
+          lookupHeader @A.ALPN (headerMapFromList [("ALPN", BS.replicate 256 65)]) `shouldSatisfy` isLeft
       , it "round-trips arbitrary protocol-id octet sequences" prop_roundtrip
       ]

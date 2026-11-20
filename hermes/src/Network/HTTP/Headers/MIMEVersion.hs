@@ -2,8 +2,8 @@
 
 {- |
 @MIME-Version@ — declares the version of the MIME protocol used to construct
-the message, as a @major.minor@ pair. Standard HTTP/MIME messages use the
-literal @1.0@.
+the message, as a @major.minor@ pair. RFC 2045 defines @1.0@ and requires
+recipients to ignore comments between lexical elements.
 
 == Grammar
 
@@ -11,7 +11,8 @@ literal @1.0@.
 version := \"MIME-Version\" \":\" 1*DIGIT \".\" 1*DIGIT
 @
 
-Spec: <https://www.rfc-editor.org/rfc/rfc2045#section-4>
+Spec: <https://www.rfc-editor.org/rfc/rfc2045#section-4>,
+<https://www.rfc-editor.org/rfc/rfc9112.html#appendix-B.1>
 
 See also: "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.ContentEncoding", "Network.HTTP.Headers.ContentDisposition".
 -}
@@ -21,17 +22,19 @@ module Network.HTTP.Headers.MIMEVersion (
   renderMIMEVersion,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Unsafe as BSU
+import Data.List.NonEmpty (NonEmpty (..))
+import Network.HTTP.Grammar.Parser
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hMIMEVersion)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
 
 
--- | A MIME protocol version: @major.minor@ (e.g. @1.0@).
+-- | A MIME protocol version with nonnegative components in the range of 'Int'.
 data MIMEVersion = MIMEVersion
-  { mimeVersionMajor :: !Int
-  , mimeVersionMinor :: !Int
+  { mimeVersionMajor :: {-# UNPACK #-} !Int
+  , mimeVersionMinor :: {-# UNPACK #-} !Int
   }
   deriving stock (Eq, Show)
 
@@ -42,14 +45,18 @@ instance KnownHeader MIMEVersion where
   type Direction MIMEVersion = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser mimeVersionParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing MIME-Version header: " <> show rest
-    Fail -> Left "Failed to parse MIME-Version header"
-    Err e -> Left e
+  -- Match the standard 1.0 spelling without setting up the comment parser.
+  parseFromHeaders _ (wire :| [])
+    | BS.length wire == 3
+    , BSU.unsafeIndex wire 0 == 49
+    , BSU.unsafeIndex wire 1 == 46
+    , BSU.unsafeIndex wire 2 == 48 =
+        Right (MIMEVersion 1 0)
+  parseFromHeaders _ headers = parseSingleFieldLine "MIME-Version" mimeVersionParser headers
 
 
-  renderToHeaders _ = M.toStrictByteString . renderMIMEVersion
+  renderToHeaders _ (MIMEVersion 1 0) = "1.0"
+  renderToHeaders _ value = M.toStrictByteString (renderMIMEVersion value)
 
 
   headerName _ = hMIMEVersion
@@ -57,13 +64,17 @@ instance KnownHeader MIMEVersion where
 
 mimeVersionParser :: ParserT st String MIMEVersion
 mimeVersionParser = do
-  ows
-  major <- anyAsciiDecimalInt
-  ows
+  spacing
+  major <- component
+  spacing
   $(char '.')
-  ows
-  minor <- anyAsciiDecimalInt
+  spacing
+  minor <- component
+  spacing
   pure MIMEVersion {mimeVersionMajor = major, mimeVersionMinor = minor}
+  where
+    spacing = skipMany (rws <|> skipComment)
+    component = fromIntegral <$> boundedDecimalWord (fromIntegral (maxBound :: Int)) (err "MIME-Version component exceeds Int")
 
 
 renderMIMEVersion :: MIMEVersion -> M.Builder

@@ -1,0 +1,8 @@
+syntax = "proto3";
+package collision.alpha;
+
+import "my__file.proto";
+
+message CollisionOuter {
+  .collision.beta.CollisionInner child = 1;
+}

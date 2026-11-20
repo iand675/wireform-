@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Status-URI@ (RFC 2518 §9.7) — response header used with the
 @102 (Processing)@ status code to report, to a client, the status of
@@ -10,7 +8,7 @@ Status-URI = \"Status-URI\" \":\" *(Status-Code Coded-URL)
 Coded-URL  = \"\<\" absoluteURI \"\>\"
 @
 
-@Status-Code@ is a 3-digit HTTP status code; @Coded-URL@ is an absolute
+@Status-Code@ is a 3-digit HTTP status code in the range 100–599; @Coded-URL@ is an absolute
 URI wrapped in angle brackets. Each pair couples a status code with the
 resource it applies to.
 
@@ -25,9 +23,9 @@ module Network.HTTP.Headers.StatusURI (
   renderStatusURI,
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.List.NonEmpty as NE
+import Data.Char (ord)
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (codedURL)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hStatusURI)
 import qualified Network.HTTP.Headers.Mason as M
@@ -56,11 +54,7 @@ instance KnownHeader StatusURI where
   type Direction StatusURI = 'Response
 
 
-  parseFromHeaders _ headers = case runParser statusURIParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Status-URI header: " <> show rest
-    Fail -> Left "Failed to parse Status-URI header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Status-URI" statusURIValue
 
 
   renderToHeaders _ = M.toStrictByteString . renderStatusURI
@@ -70,19 +64,24 @@ instance KnownHeader StatusURI where
 
 
 statusURIParser :: ParserT st String StatusURI
-statusURIParser = do
-  ows
-  entries <- statusURIEntry `sepBy` rws
-  ows
-  pure (StatusURI entries)
+statusURIParser = ows *> statusURIValue <* ows
+
+
+statusURIValue :: ParserT st String StatusURI
+statusURIValue = StatusURI <$> many (statusURIEntry <* ows)
   where
-    statusURIEntry = do
-      code <- anyAsciiDecimalInt
-      rws
-      $(char '<')
-      ref <- shortASCIIFromParser_ (skipSome (skipSatisfyAscii (/= '>')))
-      $(char '>')
-      pure (StatusURIEntry code ref)
+    statusURIEntry = StatusURIEntry <$> statusCode <*> (ows *> codedURL)
+
+
+statusCode :: ParserT st String Int
+statusCode = do
+  hundreds <- withSatisfyAscii (\c -> '1' <= c && c <= '5') digit
+  tens <- withSatisfyAscii isDigit digit
+  ones <- withSatisfyAscii isDigit digit
+  pure (hundreds * 100 + tens * 10 + ones)
+  where
+    digit = pure . subtract (ord '0') . ord
+{-# INLINE statusCode #-}
 
 
 renderStatusURI :: StatusURI -> M.Builder

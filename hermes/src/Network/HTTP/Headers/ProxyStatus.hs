@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Proxy-Status@ — response header by which an intermediary (forward or
 reverse proxy, CDN, load balancer) reports how it handled the response:
@@ -22,9 +20,8 @@ The first member represents the intermediary closest to the origin
 server and the last the one closest to the user agent.  Registered
 parameters include @error@, @next-hop@, @next-protocol@,
 @received-status@, and @details@; all parameters are surfaced
-generically (as RFC 8941 'ItemValue's) and in document order so the
-field round-trips and callers can interpret the parameters they
-recognise.
+generically in wire order so extensions round-trip. Use
+'proxyInfoParameters' for a typed view of the registered parameters.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9209#section-2>
 
@@ -34,14 +31,17 @@ See also: "Network.HTTP.Headers.Via", "Network.HTTP.Headers.Forwarded",
 module Network.HTTP.Headers.ProxyStatus (
   ProxyStatus (..),
   ProxyInfo (..),
+  ProxyStatusParameters (..),
+  proxyInfoParameters,
   proxyStatusParser,
   renderProxyStatus,
 ) where
 
-import Control.Monad.Combinators (sepBy)
+import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Short as SBS
 import Data.Text.Short (ShortText)
+import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hProxyStatus)
 import qualified Network.HTTP.Headers.Mason as M
@@ -64,6 +64,63 @@ data ProxyInfo = ProxyInfo
   deriving stock (Eq, Show)
 
 
+-- | The parameters defined in RFC 9209 section 2.1.
+data ProxyStatusParameters = ProxyStatusParameters
+  { proxyError :: !(Maybe RFC8941Token)
+  , proxyNextHop :: !(Maybe (Either RFC8941Token RFC8941String))
+  , proxyNextProtocol :: !(Maybe (Either RFC8941Token ByteString))
+  , proxyReceivedStatus :: !(Maybe Int)
+  , proxyDetails :: !(Maybe RFC8941String)
+  }
+  deriving stock (Eq, Show)
+
+
+{- | Validate and project the registered parameters. Extension parameters
+remain available through 'proxyParams'. The ALPN projection uses the
+Token form whenever the protocol identifier fits its ASCII grammar.
+-}
+proxyInfoParameters :: ProxyInfo -> Either String ProxyStatusParameters
+proxyInfoParameters info =
+  ProxyStatusParameters
+    <$> get "error" asToken
+    <*> get "next-hop" asIdentifier
+    <*> get "next-protocol" asProtocol
+    <*> get "received-status" asStatus
+    <*> get "details" asString
+  where
+    parameters = orderedFieldEntries fst (proxyParams info)
+    get :: ShortText -> (ItemValue -> Maybe a) -> Either String (Maybe a)
+    get key convert = case lookup key parameters of
+      Nothing -> Right Nothing
+      Just (Just value) | Just projected <- convert value -> Right (Just projected)
+      Just _ -> Left ("Invalid Proxy-Status parameter " <> show key)
+
+    asToken (Token value) = Just value
+    asToken _ = Nothing
+    asIdentifier (Token value) = Just (Left value)
+    asIdentifier (String value) = Just (Right value)
+    asIdentifier _ = Nothing
+    asProtocol (Token value)
+      | validProtocolLength (SBS.length (ST.toShortByteString (unsafeToRFC8941Token value))) = Just (Left value)
+    asProtocol (Binary value)
+      | validProtocolLength (B.length value) = Just (maybe (Right value) Left (alpnToken value))
+    asProtocol _ = Nothing
+    asStatus (Integer value) | value >= 100 && value <= 599 = Just value
+    asStatus _ = Nothing
+    asString (String value) = Just value
+    asString _ = Nothing
+
+
+validProtocolLength :: Int -> Bool
+validProtocolLength n = n >= 1 && n <= 255
+
+
+alpnToken :: ByteString -> Maybe RFC8941Token
+alpnToken bytes = case runParser (rfc8941Token <* eof) bytes of
+  OK token _ -> Just token
+  _ -> Nothing
+
+
 -- | The @Proxy-Status@ header value: the list of intermediary members.
 newtype ProxyStatus = ProxyStatus
   { proxyStatusEntries :: [ProxyInfo]
@@ -77,21 +134,15 @@ instance KnownHeader ProxyStatus where
   type Direction ProxyStatus = 'Response
 
 
-  parseFromHeaders _ headers = do
-    entryss <- traverse parseOne (NE.toList headers)
-    pure (ProxyStatus (concat entryss))
-    where
-      parseOne hdr = case runParser proxyStatusParser hdr of
-        OK (ProxyStatus es) leftover
-          | B.null (dropOws leftover) -> Right es
-          | otherwise ->
-              Left ("Unconsumed input after parsing Proxy-Status: " <> show leftover)
-        Fail -> Left "Failed to parse Proxy-Status header"
-        Err err -> Left err
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = parseStructuredFieldLines "Proxy-Status" proxyStatusParser
 
 
+  renderToHeaders _ (ProxyStatus []) = []
   renderToHeaders _ ps = [M.toStrictByteString (renderProxyStatus ps)]
+
+
+  omitHeaderValue = null . proxyStatusEntries
+  {-# INLINE omitHeaderValue #-}
 
 
   headerName _ = hProxyStatus
@@ -103,18 +154,14 @@ instance KnownHeader ProxyStatus where
 
 -- | Parse a @Proxy-Status@ value: a comma-separated list of members.
 proxyStatusParser :: ParserT st String ProxyStatus
-proxyStatusParser = do
-  ows
-  es <- proxyInfoParser `sepBy` (ows *> $(char ',') *> ows)
-  ows
-  pure (ProxyStatus es)
+proxyStatusParser = ProxyStatus <$> structuredFieldList proxyInfoParser
 
 
 -- | Parse one member: a Token\/String identifier plus its parameters.
 proxyInfoParser :: ParserT st String ProxyInfo
 proxyInfoParser = do
-  pid <- (Token <$> rfc8941Token) <|> (String <$> rfc8941String)
-  ProxyInfo pid <$> rfc8941Parameters
+  pid <- either Token String <$> structuredFieldTokenOrString
+  ProxyInfo pid . structuredFieldParameterPairs <$> structuredFieldParameters
 
 
 -- ---------------------------------------------------------------------------
@@ -128,7 +175,11 @@ renderProxyStatus (ProxyStatus es) =
 
 renderProxyInfo :: ProxyInfo -> M.Builder
 renderProxyInfo (ProxyInfo pid params) =
-  R.rfc8941ItemValue pid <> mconcat (map renderParam params)
+  R.rfc8941ItemValue pid <> foldMap renderParam (orderedFieldEntries fst params)
   where
     renderParam (k, mv) =
-      R.rfc8941Parameter R.IncludeIfEmpty R.rfc8941ItemValue k mv
+      R.renderStructuredFieldParameter k (canonicalValue k mv)
+    canonicalValue "next-protocol" (Just (Binary bytes))
+      | validProtocolLength (B.length bytes)
+      , Just token <- alpnToken bytes = Token token
+    canonicalValue _ value = maybe (Boolean True) id value

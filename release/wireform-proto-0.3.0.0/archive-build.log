@@ -1,0 +1,971 @@
+Warning: The package list for 'hackage.haskell.org' is 24 days old.
+Run 'cabal update' to get the latest list of available packages.
+Resolving dependencies...
+Build profile: -w ghc-9.10.3 -O2
+In order, the following will be built (use -v for more details):
+ - wireform-proto-0.3.0.0 (lib) (first run)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-test) (first run)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-regression-test) (first run)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-derive-test) (first run)
+ - wireform-proto-0.3.0.0 (exe:wireform-conformance-runner) (first run)
+ - wireform-proto-0.3.0.0 (exe:regen-wkt) (first run)
+ - wireform-proto-0.3.0.0 (exe:protoc-gen-wireform) (first run)
+ - wireform-proto-0.3.0.0 (test:protobuf-conformance-test) (first run)
+Configuring library for wireform-proto-0.3.0.0...
+Preprocessing library for wireform-proto-0.3.0.0...
+Building library for wireform-proto-0.3.0.0...
+[ 1 of 70] Compiling Paths_wireform_proto ( /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/autogen/Paths_wireform_proto.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Paths_wireform_proto.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Paths_wireform_proto.dyn_o )
+[ 2 of 70] Compiling Proto.IDL.AST.Span ( src/Proto/IDL/AST/Span.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/AST/Span.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/AST/Span.dyn_o )
+src/Proto/IDL/AST/Span.hs:94:25: warning: [GHC-39567] [-Wstar-is-type]
+    Using ‘*’ (or its Unicode variant) to mean ‘Data.Kind.Type’
+    relies on the StarIsType extension, which will become
+    deprecated in the future.
+    Suggested fix: Use ‘Type’ from ‘Data.Kind’ instead.
+   |
+94 | type family XNode (p :: *)
+   |                         ^
+
+[ 3 of 70] Compiling Proto.IDL.AST    ( src/Proto/IDL/AST.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/AST.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/AST.dyn_o )
+[ 4 of 70] Compiling Proto.IDL.Annotations ( src/Proto/IDL/Annotations.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Annotations.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Annotations.dyn_o )
+[ 5 of 70] Compiling Proto.IDL.Inspect ( src/Proto/IDL/Inspect.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Inspect.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Inspect.dyn_o )
+[ 6 of 70] Compiling Proto.Compat     ( src/Proto/Compat.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Compat.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Compat.dyn_o )
+[ 7 of 70] Compiling Proto.IDL.Options ( src/Proto/IDL/Options.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Options.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Options.dyn_o )
+[ 8 of 70] Compiling Proto.IDL.Options.Custom ( src/Proto/IDL/Options/Custom.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Options/Custom.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Options/Custom.dyn_o )
+[ 9 of 70] Compiling Proto.CodeGen.Hooks ( src/Proto/CodeGen/Hooks.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Hooks.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Hooks.dyn_o )
+src/Proto/CodeGen/Hooks.hs:173:56: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘emptyCustomOptionRegistry, extractExtensionOptions,
+                   registerCustomOption’
+    from module ‘Proto.IDL.Options.Custom’ is redundant
+    |
+173 | import Proto.IDL.Options.Custom (CustomOptionRegistry, emptyCustomOptionRegistry, extractExtensionOptions, registerCustomOption)
+    |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[10 of 70] Compiling Proto.IDL.Parser.Error ( src/Proto/IDL/Parser/Error.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Error.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Error.dyn_o )
+[11 of 70] Compiling Proto.IDL.Parser.Lexer ( src/Proto/IDL/Parser/Lexer.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Lexer.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Lexer.dyn_o )
+src/Proto/IDL/Parser/Lexer.hs:374:9: warning: [GHC-53633] [-Woverlapping-patterns]
+    Pattern match is redundant
+    In a case alternative: [] -> ...
+    |
+374 |         [] -> IntMap.empty
+    |         ^^^^^^^^^^^^^^^^^^
+
+[12 of 70] Compiling Proto.IDL.Parser ( src/Proto/IDL/Parser.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser.dyn_o )
+src/Proto/IDL/Parser.hs:25:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.IDL.AST.Span’ is redundant
+      except perhaps to import instances from ‘Proto.IDL.AST.Span’
+    To import instances alone, use: import Proto.IDL.AST.Span()
+   |
+25 | import Proto.IDL.AST.Span (Span, SrcSpan (..), mkSpan)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/IDL/Parser.hs:815:11: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘between’ shadows the existing binding
+      imported from ‘Text.Megaparsec’ at src/Proto/IDL/Parser.hs:28:1-38
+      (and originally defined in ‘parser-combinators-1.3.1:Control.Applicative.Combinators’)
+    |
+815 |           between = filter (\lc -> lcLine lc > afterLine && lcLine lc < startLine) unclaimed
+    |           ^^^^^^^
+
+src/Proto/IDL/Parser.hs:886:11: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘between’ shadows the existing binding
+      imported from ‘Text.Megaparsec’ at src/Proto/IDL/Parser.hs:28:1-38
+      (and originally defined in ‘parser-combinators-1.3.1:Control.Applicative.Combinators’)
+    |
+886 |           between = filter (\lc -> lcLine lc > afterLine && lcLine lc < startLine) unclaimed
+    |           ^^^^^^^
+
+[13 of 70] Compiling Proto.IDL.Parser.Resolver ( src/Proto/IDL/Parser/Resolver.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Resolver.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Resolver.dyn_o )
+[14 of 70] Compiling Proto.IDL.Print  ( src/Proto/IDL/Print.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Print.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Print.dyn_o )
+[15 of 70] Compiling Proto.Internal.CodeGen.Combinators ( src/Proto/Internal/CodeGen/Combinators.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/CodeGen/Combinators.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/CodeGen/Combinators.dyn_o )
+[16 of 70] Compiling Proto.CodeGen.Service ( src/Proto/CodeGen/Service.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Service.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Service.dyn_o )
+[17 of 70] Compiling Proto.Internal.Either ( src/Proto/Internal/Either.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Either.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Either.dyn_o )
+[18 of 70] Compiling Proto.Internal.FieldPresence ( src/Proto/Internal/FieldPresence.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/FieldPresence.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/FieldPresence.dyn_o )
+[19 of 70] Compiling Proto.Internal.GrowList ( src/Proto/Internal/GrowList.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/GrowList.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/GrowList.dyn_o )
+[20 of 70] Compiling Proto.Internal.JSON.Number ( src/Proto/Internal/JSON/Number.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/Number.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/Number.dyn_o )
+[21 of 70] Compiling Proto.Internal.JSON ( src/Proto/Internal/JSON.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON.dyn_o )
+src/Proto/Internal/JSON.hs:434:25: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: Eq k
+    In the type signature for:
+         parseHashMapFromJSON :: forall k v.
+                                 (Eq k, Hashable k, Aeson.FromJSON k, Aeson.FromJSON v) =>
+                                 Aeson.Value -> Aeson.Parser (HM.HashMap k v)
+    |
+434 | parseHashMapFromJSON :: (Eq k, Hashable k, Aeson.FromJSON k, Aeson.FromJSON v) => Aeson.Value -> Aeson.Parser (HM.HashMap k v)
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[22 of 70] Compiling Proto.Internal.Maybe ( src/Proto/Internal/Maybe.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Maybe.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Maybe.dyn_o )
+[23 of 70] Compiling Proto.Internal.Wire ( src/Proto/Internal/Wire.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire.dyn_o )
+[24 of 70] Compiling Proto.Internal.Wire.Decode ( src/Proto/Internal/Wire/Decode.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire/Decode.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire/Decode.dyn_o )
+[25 of 70] Compiling Proto.Internal.Wire.Encode ( src/Proto/Internal/Wire/Encode.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire/Encode.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire/Encode.dyn_o )
+src/Proto/Internal/Wire/Encode.hs:60:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.ByteString.Lazy’ is redundant
+      except perhaps to import instances from ‘Data.ByteString.Lazy’
+    To import instances alone, use: import Data.ByteString.Lazy()
+   |
+60 | import Data.ByteString.Lazy qualified as BL
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[26 of 70] Compiling Proto.Internal.SizedBuilder ( src/Proto/Internal/SizedBuilder.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/SizedBuilder.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/SizedBuilder.dyn_o )
+[27 of 70] Compiling Proto.Internal.Encode.Archetype ( src/Proto/Internal/Encode/Archetype.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Encode/Archetype.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Encode/Archetype.dyn_o )
+src/Proto/Internal/Encode/Archetype.hs:60:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text.Encoding’ is redundant
+      except perhaps to import instances from ‘Data.Text.Encoding’
+    To import instances alone, use: import Data.Text.Encoding()
+   |
+60 | import Data.Text.Encoding qualified as TE
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Internal/Encode/Archetype.hs:71:3: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘zigZag32, zigZag64’
+    from module ‘Proto.Internal.Wire.Encode’ is redundant
+   |
+71 |   zigZag32,
+   |   ^^^^^^^^^...
+
+[28 of 70] Compiling Proto.Encode     ( src/Proto/Encode.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Encode.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Encode.dyn_o )
+src/Proto/Encode.hs:126:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Vector’ is redundant
+      except perhaps to import instances from ‘Data.Vector’
+    To import instances alone, use: import Data.Vector()
+    |
+126 | import Data.Vector qualified as V
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Encode.hs:130:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Foreign.ForeignPtr’ is redundant
+      except perhaps to import instances from ‘Foreign.ForeignPtr’
+    To import instances alone, use: import Foreign.ForeignPtr()
+    |
+130 | import Foreign.ForeignPtr (withForeignPtr)
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Encode.hs:132:36: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘sizeOf’ from module ‘Foreign.Storable’ is redundant
+    |
+132 | import Foreign.Storable (Storable, sizeOf)
+    |                                    ^^^^^^
+
+[29 of 70] Compiling Proto.Decode     ( src/Proto/Decode.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Decode.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Decode.dyn_o )
+src/Proto/Decode.hs:136:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.List’ is redundant
+      except perhaps to import instances from ‘Data.List’
+    To import instances alone, use: import Data.List()
+    |
+136 | import Data.List (foldl')
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Decode.hs:149:29: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Tag’ from module ‘Proto.Internal.Wire’ is redundant
+    |
+149 | import Proto.Internal.Wire (Tag (..), WireType (..))
+    |                             ^^^^^^^^
+
+[30 of 70] Compiling Proto.Google.Protobuf.Descriptor ( src/Proto/Google/Protobuf/Descriptor.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Descriptor.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Descriptor.dyn_o )
+[31 of 70] Compiling Proto.IDL.Descriptor ( src/Proto/IDL/Descriptor.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Descriptor.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Descriptor.dyn_o )
+[32 of 70] Compiling Proto.CodeGen    ( src/Proto/CodeGen.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen.dyn_o )
+[33 of 70] Compiling Proto.CodeGen.Types ( src/Proto/CodeGen/Types.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Types.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Types.dyn_o )
+[34 of 70] Compiling Proto.CodeGen.Encode ( src/Proto/CodeGen/Encode.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Encode.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Encode.dyn_o )
+[35 of 70] Compiling Proto.CodeGen.Decode ( src/Proto/CodeGen/Decode.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Decode.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Decode.dyn_o )
+[36 of 70] Compiling Proto.Google.Protobuf.Compiler.Plugin ( src/Proto/Google/Protobuf/Compiler/Plugin.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Compiler/Plugin.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Compiler/Plugin.dyn_o )
+src/Proto/Google/Protobuf/Compiler/Plugin.hs:22:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.ByteString’ is redundant
+      except perhaps to import instances from ‘Data.ByteString’
+    To import instances alone, use: import Data.ByteString()
+   |
+22 | import Data.ByteString (ByteString)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[37 of 70] Compiling Proto.Extension  ( src/Proto/Extension.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Extension.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Extension.dyn_o )
+[38 of 70] Compiling Proto.Internal.JSON.Extension ( src/Proto/Internal/JSON/Extension.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/Extension.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/Extension.dyn_o )
+[39 of 70] Compiling Proto.Decode.Stream ( src/Proto/Decode/Stream.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Decode/Stream.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Decode/Stream.dyn_o )
+[40 of 70] Compiling Proto.Conformance ( src/Proto/Conformance.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Conformance.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Conformance.dyn_o )
+[41 of 70] Compiling Proto.JSONSchema ( src/Proto/JSONSchema.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/JSONSchema.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/JSONSchema.dyn_o )
+[42 of 70] Compiling Proto.Repr       ( src/Proto/Repr.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Repr.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Repr.dyn_o )
+src/Proto/Repr.hs:218:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.List’ is redundant
+      except perhaps to import instances from ‘Data.List’
+    To import instances alone, use: import Data.List()
+    |
+218 | import Data.List (foldl')
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[43 of 70] Compiling Proto.Schema     ( src/Proto/Schema.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Schema.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Schema.dyn_o )
+[44 of 70] Compiling Proto.Registry   ( src/Proto/Registry.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Registry.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Registry.dyn_o )
+src/Proto/Registry.hs:91:60: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Name’ from module ‘Language.Haskell.TH’ is redundant
+   |
+91 | import Language.Haskell.TH (Dec (..), Exp (..), Info (..), Name, Q, Type (..), mkName, reify)
+   |                                                            ^^^^
+
+src/Proto/Registry.hs:240:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: IsMessage a
+    In the type signature for:
+         lookupDecoder :: forall a.
+                          (Typeable a, IsMessage a) =>
+                          Text -> TypeRegistry -> Maybe (ByteString -> Either DecodeError a)
+    |
+240 |    . (Typeable a, IsMessage a)
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[45 of 70] Compiling Proto.Lens       ( src/Proto/Lens.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Lens.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Lens.dyn_o )
+[46 of 70] Compiling Proto.Internal.Derive ( src/Proto/Internal/Derive.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Derive.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Derive.dyn_o )
+src/Proto/Internal/Derive.hs:87:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Internal.Wire’ is redundant
+      except perhaps to import instances from ‘Proto.Internal.Wire’
+    To import instances alone, use: import Proto.Internal.Wire()
+   |
+87 | import Proto.Internal.Wire (Tag)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Internal/Derive.hs:92:39: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘BytesRep, MapAdapter, StringRep’
+    from module ‘Proto.Repr’ is redundant
+   |
+92 | import Proto.Repr (BytesAdapter (..), BytesRep (..), MapAdapter (..), RepeatedAdapter (..), StringAdapter (..), StringRep (..))
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[47 of 70] Compiling Proto.Google.Protobuf.Wrappers ( src/Proto/Google/Protobuf/Wrappers.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Wrappers.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Wrappers.dyn_o )
+[48 of 70] Compiling Proto.Google.Protobuf.Wrappers.Util ( src/Proto/Google/Protobuf/Wrappers/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Wrappers/Util.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Wrappers/Util.dyn_o )
+[49 of 70] Compiling Proto.Google.Protobuf.Timestamp ( src/Proto/Google/Protobuf/Timestamp.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Timestamp.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Timestamp.dyn_o )
+src/Proto/Google/Protobuf/Timestamp.hs:215:82: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Timestamp.hs:215:82-85
+        (Num p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Timestamp.hs:215:82-85
+    • In the first argument of ‘dropTrailingZeros’, namely
+        ‘(pad9 (fromIntegral n))’
+      In the second argument of ‘(<>)’, namely
+        ‘dropTrailingZeros (pad9 (fromIntegral n))’
+      In the expression:
+        T.pack "." <> dropTrailingZeros (pad9 (fromIntegral n))
+    |
+215 |         nanoStr = if n == 0 then T.pack "" else T.pack "." <> dropTrailingZeros (pad9 (fromIntegral n))
+    |                                                                                  ^^^^
+
+src/Proto/Google/Protobuf/Timestamp.hs:220:16: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:220:16-19
+        (Num p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:220:16-19
+    • In the first argument of ‘(<>)’, namely ‘pad2 (fromIntegral m)’
+      In the second argument of ‘(<>)’, namely
+        ‘pad2 (fromIntegral m)
+           <>
+             T.pack "-"
+               <>
+                 pad2 (fromIntegral d)
+                   <>
+                     T.pack "T"
+                       <>
+                         pad2 hours
+                           <>
+                             T.pack ":"
+                               <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+      In the second argument of ‘(<>)’, namely
+        ‘T.pack "-"
+           <>
+             pad2 (fromIntegral m)
+               <>
+                 T.pack "-"
+                   <>
+                     pad2 (fromIntegral d)
+                       <>
+                         T.pack "T"
+                           <>
+                             pad2 hours
+                               <>
+                                 T.pack ":"
+                                   <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+    |
+220 |             <> pad2 (fromIntegral m)
+    |                ^^^^
+
+src/Proto/Google/Protobuf/Timestamp.hs:222:16: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:222:16-19
+        (Num p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:222:16-19
+    • In the first argument of ‘(<>)’, namely ‘pad2 (fromIntegral d)’
+      In the second argument of ‘(<>)’, namely
+        ‘pad2 (fromIntegral d)
+           <>
+             T.pack "T"
+               <>
+                 pad2 hours
+                   <>
+                     T.pack ":"
+                       <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+      In the second argument of ‘(<>)’, namely
+        ‘T.pack "-"
+           <>
+             pad2 (fromIntegral d)
+               <>
+                 T.pack "T"
+                   <>
+                     pad2 hours
+                       <>
+                         T.pack ":"
+                           <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+    |
+222 |             <> pad2 (fromIntegral d)
+    |                ^^^^
+
+[50 of 70] Compiling Proto.Google.Protobuf.Struct ( src/Proto/Google/Protobuf/Struct.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Struct.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Struct.dyn_o )
+[51 of 70] Compiling Proto.Google.Protobuf.Struct.Util ( src/Proto/Google/Protobuf/Struct/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Struct/Util.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Struct/Util.dyn_o )
+[52 of 70] Compiling Proto.Google.Protobuf.SourceContext ( src/Proto/Google/Protobuf/SourceContext.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/SourceContext.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/SourceContext.dyn_o )
+[53 of 70] Compiling Proto.Google.Protobuf.FieldMask ( src/Proto/Google/Protobuf/FieldMask.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/FieldMask.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/FieldMask.dyn_o )
+[54 of 70] Compiling Proto.Google.Protobuf.FieldMask.Util ( src/Proto/Google/Protobuf/FieldMask/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/FieldMask/Util.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/FieldMask/Util.dyn_o )
+src/Proto/Google/Protobuf/FieldMask/Util.hs:41:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Set’ is redundant
+      except perhaps to import instances from ‘Data.Set’
+    To import instances alone, use: import Data.Set()
+   |
+41 | import Data.Set (Set)
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+[55 of 70] Compiling Proto.Google.Protobuf.Empty ( src/Proto/Google/Protobuf/Empty.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Empty.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Empty.dyn_o )
+[56 of 70] Compiling Proto.Google.Protobuf.Duration ( src/Proto/Google/Protobuf/Duration.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Duration.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Duration.dyn_o )
+src/Proto/Google/Protobuf/Duration.hs:199:82: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Duration.hs:199:82-85
+        (Num p0)
+          arising from a use of ‘abs’
+          at src/Proto/Google/Protobuf/Duration.hs:199:88-90
+    • In the first argument of ‘dropTrailingZeros’, namely
+        ‘(pad9 (abs (fromIntegral n)))’
+      In the second argument of ‘(<>)’, namely
+        ‘dropTrailingZeros (pad9 (abs (fromIntegral n)))’
+      In the expression:
+        T.pack "." <> dropTrailingZeros (pad9 (abs (fromIntegral n)))
+    |
+199 |         nanoStr = if n == 0 then T.pack "" else T.pack "." <> dropTrailingZeros (pad9 (abs (fromIntegral n)))
+    |                                                                                  ^^^^
+
+[57 of 70] Compiling Proto.Google.Protobuf.Timestamp.Util ( src/Proto/Google/Protobuf/Timestamp/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Timestamp/Util.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Timestamp/Util.dyn_o )
+src/Proto/Google/Protobuf/Timestamp/Util.hs:32:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+32 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:84:10: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+84 |         (fromIntegral (timestampSeconds ts) * nanosPerSecond + fromIntegral (timestampNanos ts))
+   |          ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:85:14: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+85 |           + (fromIntegral (durationSeconds dur) * nanosPerSecond + fromIntegral (durationNanos dur))
+   |              ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:96:16: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+96 |   let aNanos = fromIntegral (timestampSeconds a) * nanosPerSecond + fromIntegral (timestampNanos a)
+   |                ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:97:16: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+97 |       bNanos = fromIntegral (timestampSeconds b) * nanosPerSecond + fromIntegral (timestampNanos b)
+   |                ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:129:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Ord Timestamp
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+    |
+129 | instance Ord Timestamp where
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[58 of 70] Compiling Proto.Google.Protobuf.Duration.Util ( src/Proto/Google/Protobuf/Duration/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Duration/Util.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Duration/Util.dyn_o )
+src/Proto/Google/Protobuf/Duration/Util.hs:40:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+40 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Google/Protobuf/Duration/Util.hs:183:8: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘a0’ to type ‘Integer’ in the following constraints
+        (Num a0)
+          arising from a use of ‘signsAgree’
+          at src/Proto/Google/Protobuf/Duration/Util.hs:183:8-17
+        (Ord a0)
+          arising from a use of ‘signsAgree’
+          at src/Proto/Google/Protobuf/Duration/Util.hs:183:8-17
+    • In the second argument of ‘(&&)’, namely
+        ‘signsAgree
+           (durationSeconds dur) (fromIntegral (durationNanos dur))’
+      In the second argument of ‘(&&)’, namely
+        ‘abs (fromIntegral (durationNanos dur) :: Int64) <= 999999999
+           &&
+             signsAgree
+               (durationSeconds dur) (fromIntegral (durationNanos dur))’
+      In the expression:
+        abs (durationSeconds dur) <= 315576000000
+          &&
+            abs (fromIntegral (durationNanos dur) :: Int64) <= 999999999
+              &&
+                signsAgree (durationSeconds dur) (fromIntegral (durationNanos dur))
+    |
+183 |     && signsAgree (durationSeconds dur) (fromIntegral (durationNanos dur))
+    |        ^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Duration/Util.hs:195:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Ord Duration
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+    |
+195 | instance Ord Duration where
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[59 of 70] Compiling Proto.Google.Protobuf.Any ( src/Proto/Google/Protobuf/Any.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Any.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Any.dyn_o )
+[60 of 70] Compiling Proto.Internal.JSON.WellKnown ( src/Proto/Internal/JSON/WellKnown.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/WellKnown.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/WellKnown.dyn_o )
+[61 of 70] Compiling Proto.Google.Protobuf.Any.Util ( src/Proto/Google/Protobuf/Any/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Any/Util.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Any/Util.dyn_o )
+[62 of 70] Compiling Proto.Dynamic    ( src/Proto/Dynamic.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Dynamic.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Dynamic.dyn_o )
+src/Proto/Dynamic.hs:60:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+60 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Dynamic.hs:79:3: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘getDouble, getFloat, getText’
+    from module ‘Proto.Internal.Wire.Decode’ is redundant
+   |
+79 |   getDouble,
+   |   ^^^^^^^^^^...
+
+src/Proto/Dynamic.hs:298:7: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘nFields’ shadows the existing binding
+      bound at src/Proto/Dynamic.hs:320:5
+    |
+298 |       nFields = length fieldList'
+    |       ^^^^^^^
+
+[63 of 70] Compiling Proto.Decode.Collect ( src/Proto/Decode/Collect.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Decode/Collect.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Decode/Collect.dyn_o )
+[64 of 70] Compiling Proto            ( src/Proto.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto.dyn_o )
+[65 of 70] Compiling Proto.Setup      ( src/Proto/Setup.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Setup.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/Setup.dyn_o )
+src/Proto/Setup.hs:72:34: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘ProtoFile'’ from module ‘Proto.IDL.AST’ is redundant
+   |
+72 | import Proto.IDL.AST (ProtoFile, ProtoFile' (..))
+   |                                  ^^^^^^^^^^^^^^^
+
+[66 of 70] Compiling Proto.TH.Derive  ( src/Proto/TH/Derive.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH/Derive.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH/Derive.dyn_o )
+src/Proto/TH/Derive.hs:7:1: warning: [GHC-42044] [-Wunrecognised-pragmas]
+    Unrecognised pragma: HLINT
+  |
+7 | {-# HLINT ignore "Unused LANGUAGE pragma" #-}
+  | ^^^^^^^^^
+
+src/Proto/TH/Derive.hs:114:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text’ is redundant
+      except perhaps to import instances from ‘Data.Text’
+    To import instances alone, use: import Data.Text()
+    |
+114 | import Data.Text qualified as T
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Derive.hs:548:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘stripMaybe’
+    |
+548 | stripMaybe (AppT (ConT n) t) | n == ''Maybe = t
+    | ^^^^^^^^^^
+
+[67 of 70] Compiling Proto.TH.Metadata ( src/Proto/TH/Metadata.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH/Metadata.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH/Metadata.dyn_o )
+src/Proto/TH/Metadata.hs:2221:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘scalarValueToJSON’
+     |
+2221 | scalarValueToJSON _ _ =
+     | ^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2287:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: Ord k
+    In the type signature for:
+         scalarMapToJSON :: forall k v.
+                            (AesonT.ToJSON k, AesonT.ToJSON v, Ord k) =>
+                            JsonScalar -> JsonScalar -> Map.Map k v -> AesonT.Value
+     |
+2287 |    . (Aeson.ToJSON k, Aeson.ToJSON v, Ord k)
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2357:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: AesonT.FromJSON k
+    In the type signature for:
+         parseScalarMapMaybe :: forall k v.
+                                (Ord k, AesonT.FromJSON k, AesonT.FromJSONKey k,
+                                 AesonT.FromJSON v) =>
+                                JsonScalar
+                                -> JsonScalar
+                                -> AesonT.Object
+                                -> Text
+                                -> AesonT.Parser (Maybe (Map.Map k v))
+     |
+2357 |    . (Ord k, Aeson.FromJSON k, Aeson.FromJSONKey k, Aeson.FromJSON v)
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2726:23: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘conE’ shadows the existing binding
+      imported from ‘Language.Haskell.TH’ at src/Proto/TH/Metadata.hs:92:1-26
+      (and originally defined in ‘Language.Haskell.TH.Lib.Internal’)
+     |
+2726 | oneofScalarParserE sc conE valE =
+     |                       ^^^^
+
+[68 of 70] Compiling Proto.TH         ( src/Proto/TH.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH.dyn_o )
+src/Proto/TH.hs:609:28: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘fields’ shadows the existing binding
+      bound at src/Proto/TH.hs:585:5
+    |
+609 |             MEExtend owner fields -> extendToDecls (scPackage childScope) owner fields
+    |                            ^^^^^^
+
+[69 of 70] Compiling Proto.TH.QQ      ( src/Proto/TH/QQ.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH/QQ.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TH/QQ.dyn_o )
+src/Proto/TH/QQ.hs:29:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.IDL.AST’ is redundant
+      except perhaps to import instances from ‘Proto.IDL.AST’
+    To import instances alone, use: import Proto.IDL.AST()
+   |
+29 | import Proto.IDL.AST (stripSpans)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[70 of 70] Compiling Proto.TextFormat ( src/Proto/TextFormat.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TextFormat.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/Proto/TextFormat.dyn_o )
+Configuring test suite 'wireform-proto-test' for wireform-proto-0.3.0.0...
+Configuring test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+Preprocessing test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+[1 of 4] Compiling Generated.Edition2023 ( test-regression/Generated/Edition2023.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Generated/Edition2023.o )
+Preprocessing test suite 'wireform-proto-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-test' for wireform-proto-0.3.0.0...
+[ 1 of 19] Compiling Test.CodeGen     ( test-integration/Test/CodeGen.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/CodeGen.o )
+[ 2 of 19] Compiling Test.Collect     ( test-integration/Test/Collect.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Collect.o )
+[ 3 of 19] Compiling Test.Compat      ( test-integration/Test/Compat.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Compat.o )
+[ 4 of 19] Compiling Test.Hooks       ( test-integration/Test/Hooks.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Hooks.o )
+test-integration/Test/Hooks.hs:7:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.CodeGen.Hooks’ is redundant
+      except perhaps to import instances from ‘Proto.CodeGen.Hooks’
+    To import instances alone, use: import Proto.CodeGen.Hooks()
+  |
+7 | import Proto.CodeGen.Hooks
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/Hooks.hs:251:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h1’
+    |
+251 |                 let h1 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:252:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h2’
+    |
+252 |                     h2 = mempty :: THHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:256:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h1’
+    |
+256 |                 let h1 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:257:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h2’
+    |
+257 |                     h2 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:258:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘combined’
+    |
+258 |                     combined = h1 <> h2
+    |                     ^^^^^^^^
+
+test-integration/Test/Hooks.hs:261:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+261 |                 let hook = thOnMessageAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+test-integration/Test/Hooks.hs:265:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+265 |                 let hook = thOnEnumAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+test-integration/Test/Hooks.hs:269:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+269 |                 let hook = thOnFileAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+[ 5 of 19] Compiling Test.JSON        ( test-integration/Test/JSON.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/JSON.o )
+test-integration/Test/JSON.hs:211:27: warning: [GHC-62161] [-Wincomplete-uni-patterns]
+    Pattern match(es) are non-exhaustive
+    In a pattern binding:
+        Patterns of type ‘AesonT.Value’ not matched:
+            AesonT.Array _
+            AesonT.String _
+            AesonT.Number _
+            AesonT.Bool _
+            ...
+    |
+211 |                           Aeson.Object o = ordMapToJSON m
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/JSON.hs:238:27: warning: [GHC-62161] [-Wincomplete-uni-patterns]
+    Pattern match(es) are non-exhaustive
+    In a pattern binding:
+        Patterns of type ‘AesonT.Value’ not matched:
+            AesonT.Array _
+            AesonT.String _
+            AesonT.Number _
+            AesonT.Bool _
+            ...
+    |
+238 |                           Aeson.Object o = hashMapToJSON m
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/JSON.hs:290:16: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraints: (Show a, Eq a)
+    In the type signature for:
+         runParserOK :: forall a. (Show a, Eq a) => AesonT.Parser a -> IO a
+    |
+290 | runParserOK :: (Show a, Eq a) => AesonT.Parser a -> IO a
+    |                ^^^^^^^^^^^^^^
+
+[ 6 of 19] Compiling Test.Lens        ( test-integration/Test/Lens.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Lens.o )
+[ 7 of 19] Compiling Test.Options     ( test-integration/Test/Options.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Options.o )
+test-integration/Test/Options.hs:158:32: warning: [GHC-63394] [-Wx-partial]
+    In the use of ‘head’
+    (imported from Prelude, but defined in GHC.Internal.List):
+    "This is a partial function, it throws an error on empty lists. Use pattern matching, 'Data.List.uncons' or 'Data.Maybe.listToMaybe' instead. Consider refactoring to use "Data.List.NonEmpty"."
+    |
+158 |                     fieldName (head deps) `shouldBe` "old"
+    |                                ^^^^
+
+[ 8 of 19] Compiling Test.Parser      ( test-integration/Test/Parser.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Parser.o )
+[ 9 of 19] Compiling Test.PrintInspect ( test-integration/Test/PrintInspect.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/PrintInspect.o )
+test-integration/Test/PrintInspect.hs:310:30: warning: [GHC-63394] [-Wx-partial]
+    In the use of ‘head’
+    (imported from Prelude, but defined in GHC.Internal.List):
+    "This is a partial function, it throws an error on empty lists. Use pattern matching, 'Data.List.uncons' or 'Data.Maybe.listToMaybe' instead. Consider refactoring to use "Data.List.NonEmpty"."
+    |
+310 |                     svcName (head svcs) `shouldBe` "PersonService"
+    |                              ^^^^
+
+test-integration/Test/PrintInspect.hs:338:34: warning: [GHC-63394] [-Wx-partial]
+    In the use of ‘head’
+    (imported from Prelude, but defined in GHC.Internal.List):
+    "This is a partial function, it throws an error on empty lists. Use pattern matching, 'Data.List.uncons' or 'Data.Maybe.listToMaybe' instead. Consider refactoring to use "Data.List.NonEmpty"."
+    |
+338 |                       oneofName (head oneofs) `shouldBe` "contact"
+    |                                  ^^^^
+
+test-integration/Test/PrintInspect.hs:347:37: warning: [GHC-63394] [-Wx-partial]
+    In the use of ‘head’
+    (imported from Prelude, but defined in GHC.Internal.List):
+    "This is a partial function, it throws an error on empty lists. Use pattern matching, 'Data.List.uncons' or 'Data.Maybe.listToMaybe' instead. Consider refactoring to use "Data.List.NonEmpty"."
+    |
+347 |                       mapFieldName (head maps) `shouldBe` "metadata"
+    |                                     ^^^^
+
+[2 of 4] Compiling Generated.Edition2024 ( test-regression/Generated/Edition2024.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Generated/Edition2024.o )
+[10 of 19] Compiling Test.Resolver    ( test-integration/Test/Resolver.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Resolver.o )
+[11 of 19] Compiling Test.RingSink    ( test-integration/Test/RingSink.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/RingSink.o )
+[12 of 19] Compiling Test.Roundtrip   ( test-integration/Test/Roundtrip.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Roundtrip.o )
+[3 of 4] Compiling THFixtures       ( test-regression/THFixtures.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/THFixtures.o )
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:11:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘ov’
+   |
+11 | $(loadProto "test-regression/proto/json_numbers.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:11:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+11 | $(loadProto "test-regression/proto/json_numbers.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[13 of 19] Compiling Test.Schema      ( test-integration/Test/Schema.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Schema.o )
+[14 of 19] Compiling Test.StreamCodec ( test-integration/Test/StreamCodec.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/StreamCodec.o )
+[15 of 19] Compiling Test.TDP         ( test-integration/Test/TDP.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/TDP.o )
+test-integration/Test/TDP.hs:6:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Int’ is redundant
+      except perhaps to import instances from ‘Data.Int’
+    To import instances alone, use: import Data.Int()
+  |
+6 | import Data.Int (Int32, Int64)
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/TDP.hs:21:29: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Tag’ from module ‘Proto.Internal.Wire’ is redundant
+   |
+21 | import Proto.Internal.Wire (Tag (..), WireType (..), fieldTag)
+   |                             ^^^^^^^^
+
+test-integration/Test/TDP.hs:23:3: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘DecodeError, DecodeResult, Decoder, getFixed32,
+                   getFixed64, getLengthDelimited, getTag, getText, getVarint,
+                   runDecoder, skipWireType, withTagM’
+    from module ‘Proto.Internal.Wire.Decode’ is redundant
+   |
+23 |   DecodeError (..),
+   |   ^^^^^^^^^^^^^^^^^...
+
+test-integration/Test/TDP.hs:37:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Proto.Internal.Wire.Decode’ is redundant
+      except perhaps to import instances from ‘Proto.Internal.Wire.Decode’
+    To import instances alone, use: import Proto.Internal.Wire.Decode()
+   |
+37 | import Proto.Internal.Wire.Decode qualified as WD
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/TDP.hs:587:33: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int -> IntMap.Key
+      can probably be omitted
+    |
+587 |           [ case IntMap.lookup (fromIntegral b) tagMap of
+    |                                 ^^^^^^^^^^^^
+
+test-integration/Test/TDP.hs:587:33: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int -> IntMap.Key
+      can probably be omitted
+    |
+587 |           [ case IntMap.lookup (fromIntegral b) tagMap of
+    |                                 ^^^^^^^^^^^^
+
+[4 of 4] Compiling Main             ( test-regression/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Main.o )
+[16 of 19] Compiling Test.WellKnown   ( test-integration/Test/WellKnown.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/WellKnown.o )
+test-integration/Test/WellKnown.hs:22:24: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘TypeRegistry’
+    from module ‘Proto.Registry’ is redundant
+   |
+22 | import Proto.Registry (TypeRegistry, emptyRegistry, lookupCodec, lookupDecoder, registerMessage)
+   |                        ^^^^^^^^^^^^
+
+[17 of 19] Compiling Test.WellKnownUtil ( test-integration/Test/WellKnownUtil.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/WellKnownUtil.o )
+test-integration/Test/WellKnownUtil.hs:4:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Int’ is redundant
+      except perhaps to import instances from ‘Data.Int’
+    To import instances alone, use: import Data.Int()
+  |
+4 | import Data.Int (Int32, Int64)
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:8:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text’ is redundant
+      except perhaps to import instances from ‘Data.Text’
+    To import instances alone, use: import Data.Text()
+  |
+8 | import Data.Text qualified as T
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:9:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Time.Clock’ is redundant
+      except perhaps to import instances from ‘Data.Time.Clock’
+    To import instances alone, use: import Data.Time.Clock()
+  |
+9 | import Data.Time.Clock (NominalDiffTime, UTCTime)
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:10:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Time.Clock.POSIX’ is redundant
+      except perhaps to import instances from ‘Data.Time.Clock.POSIX’
+    To import instances alone, use: import Data.Time.Clock.POSIX()
+   |
+10 | import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:11:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Vector’ is redundant
+      except perhaps to import instances from ‘Data.Vector’
+    To import instances alone, use: import Data.Vector()
+   |
+11 | import Data.Vector qualified as V
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:17:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Google.Protobuf.FieldMask’ is redundant
+      except perhaps to import instances from ‘Proto.Google.Protobuf.FieldMask’
+    To import instances alone, use: import Proto.Google.Protobuf.FieldMask()
+   |
+17 | import Proto.Google.Protobuf.FieldMask
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:19:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Google.Protobuf.Struct’ is redundant
+      except perhaps to import instances from ‘Proto.Google.Protobuf.Struct’
+    To import instances alone, use: import Proto.Google.Protobuf.Struct()
+   |
+19 | import Proto.Google.Protobuf.Struct
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:23:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Google.Protobuf.Wrappers’ is redundant
+      except perhaps to import instances from ‘Proto.Google.Protobuf.Wrappers’
+    To import instances alone, use: import Proto.Google.Protobuf.Wrappers()
+   |
+23 | import Proto.Google.Protobuf.Wrappers
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[18 of 19] Compiling Test.Wire        ( test-integration/Test/Wire.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Wire.o )
+test-integration/Test/Wire.hs:7:19: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Word32’ from module ‘Data.Word’ is redundant
+  |
+7 | import Data.Word (Word32, Word64)
+  |                   ^^^^^^
+
+[19 of 19] Compiling Main             ( test-integration/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Main.o )
+[20 of 20] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test
+Configuring test suite 'wireform-proto-derive-test' for wireform-proto-0.3.0.0...
+Preprocessing test suite 'wireform-proto-derive-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-derive-test' for wireform-proto-0.3.0.0...
+[ 5 of 19] Compiling Test.Proto.Derive.Oneof ( test/Test/Proto/Derive/Oneof.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Oneof.o )
+[5 of 5] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test
+[ 6 of 19] Compiling Test.Proto.Derive.RegressionTypes ( test/Test/Proto/Derive/RegressionTypes.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RegressionTypes.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RegressionTypes.dyn_o ) [Missing dynamic object file]
+[ 7 of 19] Compiling Test.Proto.Derive.RegressionInstances ( test/Test/Proto/Derive/RegressionInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RegressionInstances.o )
+Configuring executable 'wireform-conformance-runner' for wireform-proto-0.3.0.0...
+Preprocessing executable 'wireform-conformance-runner' for wireform-proto-0.3.0.0...
+Building executable 'wireform-conformance-runner' for wireform-proto-0.3.0.0...
+[1 of 3] Compiling Test.Conformance.Schema ( test-conformance/Test/Conformance/Schema.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/x/wireform-conformance-runner/opt/build/wireform-conformance-runner/wireform-conformance-runner-tmp/Test/Conformance/Schema.o )
+[ 8 of 19] Compiling Test.Proto.Derive.Golden ( test/Test/Proto/Derive/Golden.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Golden.o ) [Missing object file]
+[ 9 of 19] Compiling Test.Proto.Derive.RichTypes ( test/Test/Proto/Derive/RichTypes.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RichTypes.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RichTypes.dyn_o ) [Missing dynamic object file]
+[10 of 19] Compiling Test.Proto.Derive.RichInstances ( test/Test/Proto/Derive/RichInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RichInstances.o )
+test-conformance/Test/Conformance/Schema.hs:132:2: warning: [GHC-62412] [-Wsimplifiable-class-constraints]
+    • The constraint ‘Given ExtensionRegistry’ matches
+        instance Given ExtensionRegistry
+          -- Defined at test-conformance/Test/Conformance/Schema.hs:115:10
+      This makes type inference for inner bindings fragile;
+        either use MonoLocalBinds, or simplify it using the instance
+    • In the instance declaration for
+        ‘aeson-2.2.3.0:Data.Aeson.Types.ToJSON.ToJSON TestAllTypesProto2’
+    |
+132 | $(loadProto "test-conformance/protos/test_messages_proto2.proto")
+    |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-conformance/Test/Conformance/Schema.hs:132:2: warning: [GHC-62412] [-Wsimplifiable-class-constraints]
+    • The constraint ‘Given ExtensionRegistry’ matches
+        instance Given ExtensionRegistry
+          -- Defined at test-conformance/Test/Conformance/Schema.hs:115:10
+      This makes type inference for inner bindings fragile;
+        either use MonoLocalBinds, or simplify it using the instance
+    • In the instance declaration for
+        ‘aeson-2.2.3.0:Data.Aeson.Types.FromJSON.FromJSON TestAllTypesProto2’
+    |
+132 | $(loadProto "test-conformance/protos/test_messages_proto2.proto")
+    |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[11 of 19] Compiling Test.Proto.Derive.TopEnumInstances ( test/Test/Proto/Derive/TopEnumInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TopEnumInstances.o )
+test/Test/Proto/Derive/TopEnumInstances.hs:26:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Given ExtensionRegistry
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+   |
+26 | instance Given ExtensionRegistry where
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[12 of 19] Compiling Test.Proto.Derive.TopEnum ( test/Test/Proto/Derive/TopEnum.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TopEnum.o ) [Missing object file]
+[13 of 19] Compiling Test.Proto.Derive.Metadata ( test/Test/Proto/Derive/Metadata.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Metadata.o ) [Missing object file]
+[14 of 19] Compiling Test.Proto.Derive.TranslatedTypes ( test/Test/Proto/Derive/TranslatedTypes.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TranslatedTypes.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TranslatedTypes.dyn_o ) [Missing dynamic object file]
+[15 of 19] Compiling Test.Proto.Derive.TranslatedInstances ( test/Test/Proto/Derive/TranslatedInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TranslatedInstances.o ) [Missing object file]
+[16 of 19] Compiling Test.Proto.Derive.Types ( test/Test/Proto/Derive/Types.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Types.o, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Types.dyn_o ) [Missing dynamic object file]
+[17 of 19] Compiling Test.Proto.Derive.Instances ( test/Test/Proto/Derive/Instances.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Instances.o ) [Missing object file]
+[18 of 19] Compiling Test.Proto.Derive ( test/Test/Proto/Derive.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive.o )
+[19 of 19] Compiling Main             ( test/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Main.o ) [Missing object file]
+[20 of 20] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test
+Configuring executable 'regen-wkt' for wireform-proto-0.3.0.0...
+Preprocessing executable 'regen-wkt' for wireform-proto-0.3.0.0...
+Building executable 'regen-wkt' for wireform-proto-0.3.0.0...
+[1 of 1] Compiling Main             ( regen-wkt/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/x/regen-wkt/opt/build/regen-wkt/regen-wkt-tmp/Main.o )
+regen-wkt/Main.hs:9:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text’ is redundant
+      except perhaps to import instances from ‘Data.Text’
+    To import instances alone, use: import Data.Text()
+  |
+9 | import Data.Text qualified as T
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+regen-wkt/Main.hs:12:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.IDL.Parser’ is redundant
+      except perhaps to import instances from ‘Proto.IDL.Parser’
+    To import instances alone, use: import Proto.IDL.Parser()
+   |
+12 | import Proto.IDL.Parser (parseProtoFile)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[2 of 2] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/x/regen-wkt/opt/build/regen-wkt/regen-wkt
+[2 of 3] Compiling Test.Conformance.Handler ( test-conformance/Test/Conformance/Handler.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/x/wireform-conformance-runner/opt/build/wireform-conformance-runner/wireform-conformance-runner-tmp/Test/Conformance/Handler.o )
+[3 of 3] Compiling Main             ( test-conformance/Runner.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/x/wireform-conformance-runner/opt/build/wireform-conformance-runner/wireform-conformance-runner-tmp/Main.o )
+test-conformance/Runner.hs:30:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Proxy’ is redundant
+      except perhaps to import instances from ‘Data.Proxy’
+    To import instances alone, use: import Data.Proxy()
+   |
+30 | import Data.Proxy (Proxy (..))
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-conformance/Runner.hs:65:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘conformanceRegistry’
+   |
+65 | conformanceRegistry =
+   | ^^^^^^^^^^^^^^^^^^^
+
+test-conformance/Runner.hs:139:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘testAllTypesProto3AnyCodec’
+    |
+139 | testAllTypesProto3AnyCodec =
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-conformance/Runner.hs:154:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘testAllTypesProto2AnyCodec’
+    |
+154 | testAllTypesProto2AnyCodec =
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Configuring executable 'protoc-gen-wireform' for wireform-proto-0.3.0.0...
+[4 of 4] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/x/wireform-conformance-runner/opt/build/wireform-conformance-runner/wireform-conformance-runner
+Configuring test suite 'protobuf-conformance-test' for wireform-proto-0.3.0.0...
+Preprocessing executable 'protoc-gen-wireform' for wireform-proto-0.3.0.0...
+Building executable 'protoc-gen-wireform' for wireform-proto-0.3.0.0...
+[1 of 1] Compiling Main             ( protoc-plugin/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/x/protoc-gen-wireform/opt/build/protoc-gen-wireform/protoc-gen-wireform-tmp/Main.o )
+[2 of 2] Linking /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/x/protoc-gen-wireform/opt/build/protoc-gen-wireform/protoc-gen-wireform
+Preprocessing test suite 'protobuf-conformance-test' for wireform-proto-0.3.0.0...
+Building test suite 'protobuf-conformance-test' for wireform-proto-0.3.0.0...

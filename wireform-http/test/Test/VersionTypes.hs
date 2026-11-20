@@ -9,6 +9,8 @@ dep closure.
 -}
 module Test.VersionTypes (tests) where
 
+import Data.Either (isLeft)
+import Network.HTTP.Client.URI qualified as URI
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Method qualified as M
 import Network.HTTP.Types.Status qualified as S
@@ -23,6 +25,7 @@ tests =
       [ versionRoundTrips
       , versionOrder
       , methodConstants
+      , uriPorts
       , statusCategories
       , headerLookups
       ]
@@ -62,6 +65,28 @@ methodConstants = it "Method constants serialise correctly" $ do
   (not (M.isSafe M.mPost)) `shouldBe` True
   (not (M.isIdempotent M.mPost)) `shouldBe` True
   (M.bodyAllowedInRequest M.mPost) `shouldBe` True
+  let safe = [M.mQuery, M.mPri, M.mPropFind, M.mReport, M.mSearch]
+  map M.isSafe safe `shouldBe` replicate 5 True
+  map M.isIdempotent safe `shouldBe` replicate 5 True
+  map M.isSafe ["query", "search", "EXTEND"] `shouldBe` replicate 3 False
+
+
+uriPorts :: Spec
+uriPorts = it "applies bounded HTTP ports and parses bracketed IPv6 hosts" $ do
+  (URI.uriPort <$> URI.parseURI "http://example.test:/") `shouldBe` Right 80
+  (URI.uriPort <$> URI.parseURI "https://example.test:65535/") `shouldBe` Right 65535
+  case URI.parseURI "http://[2001:db8::1]:8080/path" of
+    Right uri -> do
+      URI.uriHost uri `shouldBe` "2001:db8::1"
+      URI.uriPort uri `shouldBe` 8080
+      URI.renderURI uri `shouldBe` "http://[2001:db8::1]:8080/path"
+    Left err -> expectationFailure err
+  map (isLeft . URI.parseURI)
+    [ "http://example.test:65536/", "http://example.test:18446744073709551696/"
+    , "http://[::1]:65536/", "http://example.test:+80/", "http://example.test:http/"
+    ] `shouldBe` replicate 5 True
+  map URI.removeDotSegments ["/a/b/.", "/a/b/..", "/a/./b", "/a/../b"]
+    `shouldBe` ["/a/b/", "/a/", "/a/b", "/b"]
 
 
 statusCategories :: Spec

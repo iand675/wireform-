@@ -1,8 +1,6 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
-RFC 4918 §10.1 @DAV@ response header — advertises the WebDAV
-compliance classes supported by a resource (sent on @OPTIONS@).
+RFC 4918 §10.1 @DAV@ — advertises WebDAV compliance classes, usually from
+a resource in an @OPTIONS@ response. Extensions can use it in a request.
 
 == Grammar
 
@@ -23,18 +21,19 @@ See also: "Network.HTTP.Headers.DASL", "Network.HTTP.Headers.Depth", "Network.HT
 module Network.HTTP.Headers.DAV (
   DAV (..),
   ComplianceClass (..),
+  davClasses,
   davParser,
   renderDAV,
 ) where
 
-import qualified Control.Monad.Combinators.NonEmpty as NEC
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (codedURL)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hDAV)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (sepByCommas1, shortText)
 
 
 -- | A single advertised compliance class.
@@ -46,22 +45,26 @@ data ComplianceClass
   deriving stock (Eq, Show)
 
 
--- | The non-empty list of compliance classes advertised by the resource.
-newtype DAV = DAV {davComplianceClasses :: NE.NonEmpty ComplianceClass}
+-- | Advertised compliance classes, including an explicitly empty value.
+data DAV
+  = DAV {davComplianceClasses :: !(NE.NonEmpty ComplianceClass)}
+  | DAVEmpty
   deriving stock (Eq, Show)
+
+
+-- | All advertised classes, in their wire order.
+davClasses :: DAV -> [ComplianceClass]
+davClasses (DAV classes) = NE.toList classes
+davClasses DAVEmpty = []
 
 
 instance KnownHeader DAV where
   type ParseFailure DAV = String
   type Cardinality DAV = 'ZeroOrOne
-  type Direction DAV = 'Response
+  type Direction DAV = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser davParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing DAV header: " <> show rest
-    Fail -> Left "Failed to parse DAV header"
-    Err e -> Left e
+  parseFromHeaders _ = fmap fromClasses . parseListFieldLines "DAV" (httpList complianceClassParser)
 
 
   renderToHeaders _ = M.toStrictByteString . renderDAV
@@ -71,22 +74,21 @@ instance KnownHeader DAV where
 
 
 complianceClassParser :: ParserT st String ComplianceClass
-complianceClassParser = codedURL <|> (ComplianceToken <$> rfc9110Token)
-  where
-    codedURL = do
-      $(char '<')
-      uri <- shortASCIIFromParser_ (skipSome (satisfyAscii (/= '>')))
-      $(char '>')
-      pure (ComplianceURL uri)
+complianceClassParser = (ComplianceURL <$> codedURL) <|> (ComplianceToken <$> rfc9110Token)
 
 
 davParser :: ParserT st String DAV
-davParser = DAV <$> (complianceClassParser `NEC.sepBy1` (ows *> $(char ',') *> ows))
+davParser = fromClasses <$> httpList complianceClassParser
+
+
+fromClasses :: [ComplianceClass] -> DAV
+fromClasses = maybe DAVEmpty DAV . NE.nonEmpty
 
 
 renderDAV :: DAV -> M.Builder
+renderDAV DAVEmpty = mempty
 renderDAV (DAV classes) =
-  M.intersperse ", " (map renderClass (NE.toList classes))
+  sepByCommas1 (fmap renderClass classes)
   where
     renderClass (ComplianceToken t) = shortText t
     renderClass (ComplianceURL u) = M.char7 '<' <> shortText u <> M.char7 '>'

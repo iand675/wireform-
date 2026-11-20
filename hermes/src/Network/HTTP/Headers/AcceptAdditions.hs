@@ -8,16 +8,15 @@ brewed response.
 == Grammar
 
 @
-Accept-Additions = \"Accept-Additions\" \":\" #( addition-type *( \";\" parameter ) )
-addition-type    = ( \"*\" | token ) *( \";\" parameter )
-parameter        = token [ \"=\" ( token | quoted-string ) ]
+Accept-Additions = #( addition-range [ accept-params ] )
+addition-range   = token *( \";\" parameter )
+accept-params    = \";q=\" qvalue *( \";\" parameter )
+parameter       = token [ \"=\" ( token | quoted-string ) ]
 @
 
-Each comma-separated element is an addition-type token (the @\"*\"@
-wildcard and the named additions are all tokens) followed by zero or more
-@;@-separated parameters; the quality factor @q@ is just one such
-parameter. Parameter values render as a bare token when token-safe and as
-a quoted-string otherwise.
+The first @q@ parameter is a quality weight. The codec keeps the spelling
+of names and weights, supports HTCPCP-TEA additions and extension tokens,
+and preserves quoted octets using a one-to-one Latin-1 mapping.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc2324#section-2.2.2.1>
 
@@ -27,14 +26,15 @@ module Network.HTTP.Headers.AcceptAdditions (
   AcceptAdditions (..),
   Addition (..),
   AdditionParam (..),
+  additionQuality,
   acceptAdditionsParser,
   renderAcceptAdditions,
 ) where
 
-import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Short as SBS
+import Data.List (find)
 import qualified Data.Text.Short as ST
+import Network.HTTP.ContentNegotiation (qualityValueParser)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptAdditions)
 import qualified Network.HTTP.Headers.Mason as M
@@ -69,14 +69,7 @@ instance KnownHeader AcceptAdditions where
   type Direction AcceptAdditions = 'Request
 
 
-  parseFromHeaders _ headers = case runParser acceptAdditionsParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise -> Left ("Unconsumed input after parsing Accept-Additions: " <> show leftover)
-    Fail -> Left "Failed to parse Accept-Additions header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = parseFieldLine "Accept-Additions" acceptAdditionsParser . combineFieldLines ", "
 
 
   renderToHeaders _ = M.toStrictByteString . renderAcceptAdditions
@@ -86,27 +79,39 @@ instance KnownHeader AcceptAdditions where
 
 
 acceptAdditionsParser :: ParserT st String AcceptAdditions
-acceptAdditionsParser = AcceptAdditions <$> (ows *> additions)
+acceptAdditionsParser = AcceptAdditions <$> httpList addition
   where
-    additions = nonEmpty <|> pure []
-    nonEmpty = do
-      a <- addition
-      as <- many (ows *> $(char ',') *> ows *> addition)
-      pure (a : as)
-    addition = do
-      ty <- rfc9110Token
-      ps <- many (ows *> $(char ';') *> ows *> param)
-      pure (Addition ty ps)
-    param = do
+    addition = Addition <$> rfc9110Token <*> parameters False
+    parameters weighted =
+      withOption (ows *> $(char ';') *> ows) (const (parameter weighted)) (pure [])
+    parameter weighted = do
       name <- rfc9110Token
-      val <- optional ($(char '=') *> (rfc9110Token <|> quotedString))
-      pure (AdditionParam name val)
+      if not weighted && isQuality name
+        then do
+          wire <- $(char '=') *> shortASCIIFromParser_ (qualityValueParser <* notFollowedBy tokenBytes)
+          (AdditionParam name (Just wire) :) <$> parameters True
+        else do
+          value <- optional ($(char '=') *> (rfc9110Token <|> (shortTextFromLatin1 <$> httpQuotedBytes)))
+          (AdditionParam name value :) <$> parameters weighted
+
+
+-- | The first explicit quality weight. A missing weight defaults to one
+-- when interpreting the addition's preference.
+additionQuality :: Addition -> Maybe Double
+additionQuality addition = do
+  parameter <- find (isQuality . paramName) (additionParams addition)
+  wire <- paramValue parameter
+  either (const Nothing) Just (parseFieldLine "Accept-Additions quality" qualityValueParser (ST.toByteString wire))
+
+
+isQuality :: ST.ShortText -> Bool
+isQuality name = name == "q" || name == "Q"
 
 
 renderAcceptAdditions :: AcceptAdditions -> M.Builder
-renderAcceptAdditions (AcceptAdditions as) = M.intersperse ", " (map renderAddition as)
+renderAcceptAdditions (AcceptAdditions as) = R.renderSeparated ", " renderAddition as
   where
-    renderAddition (Addition ty ps) = R.shortText ty <> mconcat (map renderParam ps)
+    renderAddition (Addition ty ps) = R.shortText ty <> foldMap renderParam ps
     renderParam (AdditionParam name Nothing) = M.char7 ';' <> R.shortText name
     renderParam (AdditionParam name (Just v)) =
       M.char7 ';' <> R.shortText name <> M.char7 '=' <> renderTokenOrQuoted v
@@ -117,11 +122,9 @@ quoted-string with the mandatory escaping of @\"@ and @\\@.
 -}
 renderTokenOrQuoted :: ST.ShortText -> M.Builder
 renderTokenOrQuoted t
-  | isToken s = R.shortText t
-  | otherwise = M.char8 '"' <> foldr esc mempty s <> M.char8 '"'
+  | not (ST.null t) && ST.all isTokenChar t = R.shortText t
+  | SBS.all plainQuotedByte bytes = M.char7 '"' <> M.shortByteString bytes <> M.char7 '"'
+  | otherwise = R.renderHttpQuotedString (ST.toText t)
   where
-    s = ST.toString t
-    isToken cs = not (null cs) && all (`CharSet.member` tokenCharSet) cs
-    esc c acc
-      | c == '"' || c == '\\' = M.char8 '\\' <> M.char8 c <> acc
-      | otherwise = M.char8 c <> acc
+    bytes = ST.toShortByteString t
+    plainQuotedByte byte = byte == 9 || (byte >= 32 && byte <= 126 && byte /= 34 && byte /= 92)

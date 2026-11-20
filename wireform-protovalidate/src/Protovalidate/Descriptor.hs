@@ -12,10 +12,9 @@ Because "Proto.Google.Protobuf.Descriptor" now preserves unknown fields,
 those extension bytes survive decoding; this module pulls them out and maps
 them onto the validation 'MessageRules' model.
 
-The universal parts — custom CEL constraints (@cel@), @required@, and
-@ignore@ — are always read. The standard rule sets are mapped for the common
-kinds (string / numeric / bool / bytes / repeated / map) using the
-@buf.validate@ v1 field numbers; unrecognized rule fields are ignored.
+The decoder reads custom CEL constraints (@cel@), @required@, and @ignore@.
+Supported standard rules use their @buf.validate@ v1 field numbers and wire
+types, including packed scalar lists and timestamp and duration messages.
 -}
 module Protovalidate.Descriptor (
   fileRulesFromDescriptor,
@@ -24,24 +23,30 @@ module Protovalidate.Descriptor (
   messageConstraintExtension,
 ) where
 
-import CEL.Value (Value (..))
+import CEL.Value (Duration (..), Timestamp (..), Value (..), celMapFromList)
+import Control.Monad (replicateM)
 import Data.Bits (shiftR, xor, (.&.))
 import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64)
-import Data.Maybe (fromMaybe)
+import Data.List (find, partition)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
+import Data.Vector.Unboxed qualified as VU
 import Data.Word (Word32, Word64)
-import GHC.Float (castWord32ToFloat, castWord64ToDouble)
+import GHC.Float (castWord32ToFloat, castWord64ToDouble, double2Float, float2Double)
 import Proto.Decode (
   DecodeError (..),
   Decoder,
   UnknownField (..),
+  decodeAllVarints,
   decodeFail,
+  decodeMessage,
   getFixed32,
   getFixed64,
   getLengthDelimited,
@@ -50,7 +55,11 @@ import Proto.Decode (
   withTagM,
  )
 import Proto.Google.Protobuf.Descriptor
-import Protovalidate.Constraint (Constraint, mkConstraint)
+import Proto.Google.Protobuf.Duration qualified as ProtoDuration
+import Proto.Google.Protobuf.Timestamp qualified as ProtoTimestamp
+import Proto.IDL.AST (Constant (..))
+import Proto.IDL.Descriptor (descriptorDefaultConstant, descriptorFieldHasPresence)
+import Protovalidate.Constraint (Constraint, mkAnnotationConstraint)
 import Protovalidate.Rules
 
 
@@ -78,9 +87,15 @@ messageConstraintExtension = lenDelimUnknown bufValidateExtension . moUnknownFie
 
 
 lenDelimUnknown :: Int -> [UnknownField] -> Maybe BS.ByteString
-lenDelimUnknown fn ufs = case [bs | UnknownLenDelim n bs <- ufs, n == fn] of
-  (bs : _) -> Just bs
-  [] -> Nothing
+lenDelimUnknown number = mergeSubmessages . foldr collect []
+  where
+    collect (UnknownLenDelim n bytes) rest | n == number = bytes : rest
+    collect _ rest = rest
+
+
+mergeSubmessages :: [BS.ByteString] -> Maybe BS.ByteString
+mergeSubmessages [] = Nothing
+mergeSubmessages chunks = Just (BS.concat chunks)
 
 
 ----------------------------------------------------------------------
@@ -90,141 +105,341 @@ lenDelimUnknown fn ufs = case [bs | UnknownLenDelim n bs <- ufs, n == fn] of
 -- | Extract validation rules for every message defined in a file descriptor.
 fileRulesFromDescriptor :: FileDescriptorProto -> Either Text [(Text, MessageRules)]
 fileRulesFromDescriptor fdp =
-  let msgs = collectMessages (fdpMessageType fdp)
-  in traverse (\m -> (,) (dpName m) <$> extractMessage msgs Set.empty m) msgs
+  traverse extract messages
+  where
+    messages = descriptorMessages fdp
+    enums = descriptorEnums fdp messages
+    shapes = descriptorShapes fdp messages enums
+    extract entry@(_, msg) =
+      (,) (dpName msg) <$> extractMessage fdp messages enums shapes Set.empty entry
 
 
-{- | Extract validation rules for a single (top-level or nested) message by
-name.
--}
+-- | Extract rules for a message by its qualified or simple name.
 messageRulesFromDescriptor :: FileDescriptorProto -> Text -> Either Text MessageRules
 messageRulesFromDescriptor fdp name =
-  let msgs = collectMessages (fdpMessageType fdp)
-  in case [m | m <- msgs, dpName m == name] of
-       (m : _) -> extractMessage msgs Set.empty m
-       [] -> Left ("no such message: " <> name)
-
-
-collectMessages :: V.Vector DescriptorProto -> [DescriptorProto]
-collectMessages = concatMap go . V.toList
+  case find ((== T.dropWhile (== '.') name) . fst) messages of
+    Just entry -> extract entry
+    Nothing -> case find ((== name) . dpName . snd) messages of
+      Just entry -> extract entry
+      Nothing -> Left ("no such message: " <> name)
   where
-    go m = m : collectMessages (dpNestedType m)
+    messages = descriptorMessages fdp
+    enums = descriptorEnums fdp messages
+    extract = extractMessage fdp messages enums (descriptorShapes fdp messages enums) Set.empty
+
+
+type MessageDescriptors = [(Text, DescriptorProto)]
+
+
+descriptorMessages :: FileDescriptorProto -> MessageDescriptors
+descriptorMessages fdp = collect (fdpPackage fdp) (fdpMessageType fdp)
+  where
+    collect scope = concatMap (go scope) . V.toList
+    go scope msg =
+      let name = qualifiedName scope (dpName msg)
+      in (name, msg) : collect name (dpNestedType msg)
+
+
+type EnumDefinitions = Map.Map Text [EnumValueDescriptorProto]
+
+
+descriptorEnums :: FileDescriptorProto -> MessageDescriptors -> EnumDefinitions
+descriptorEnums fdp messages =
+  Map.fromList (entries (fdpPackage fdp) (fdpEnumType fdp) ++ concatMap nested messages)
+  where
+    entries scope = map (\ed -> (qualifiedName scope (edpName ed), V.toList (edpValue ed))) . V.toList
+    nested (scope, msg) = entries scope (dpEnumType msg)
+
+
+qualifiedName :: Text -> Text -> Text
+qualifiedName scope name
+  | T.null scope = name
+  | otherwise = scope <> "." <> name
+
+
+descriptorShapes :: FileDescriptorProto -> MessageDescriptors -> EnumDefinitions -> ProtoSchema
+descriptorShapes file messages enums = Map.fromList (map messageShape messages)
+  where
+    byName = Map.fromList messages
+    messageShape (name, msg) = (name, Map.fromList (map fieldShape (V.toList (dpField msg))))
+    fieldShape field = (fdpFieldName field, shape)
+      where
+        shape
+          | fdpFieldLabel field /= 3 = descriptorValueShape file enums field
+          | Just entry <- Map.lookup (descriptorTypeName field) byName
+          , maybe False moMapEntry (dpOptions entry) =
+              MapShape (maybe (ExplicitDefault VNull) (descriptorValueShape file enums) (V.find ((== 2) . fdpFieldNumber) (dpField entry)))
+          | otherwise = ListShape (descriptorValueShape file enums field)
+
+
+descriptorTypeName :: FieldDescriptorProto -> Text
+descriptorTypeName = T.dropWhile (== '.') . fdpFieldTypeName
+
+
+descriptorValueShape :: FileDescriptorProto -> EnumDefinitions -> FieldDescriptorProto -> ProtoFieldShape
+descriptorValueShape file enums field = case fdpFieldType field of
+  10 -> namedMessageShape name
+  11 -> namedMessageShape name
+  14 -> withPresence (VInt (fromIntegral enumDefault))
+  code -> withPresence (fromMaybe fallback (descriptorScalarDefault code fallback <$> descriptorDefaultConstant field))
+    where fallback = fromMaybe VNull (scalarDefaultValue code)
+  where
+    name = descriptorTypeName field
+    supplied = fdpFieldDefault field
+    withPresence = if descriptorFieldHasPresence file field then ExplicitDefault else ImplicitDefault
+    enumDefault = case Map.findWithDefault [] name enums of
+      [] -> 0
+      first : rest -> evdpNumber (fromMaybe first (find ((== supplied) . evdpName) (first : rest)))
+
+
+descriptorScalarDefault :: Int32 -> Value -> Constant -> Value
+descriptorScalarDefault code fallback value = case (fallback, value) of
+  (VInt _, CInt n) -> VInt (fromInteger n)
+  (VUInt _, CInt n) -> VUInt (fromInteger n)
+  (VBool _, CBool b) -> VBool b
+  (VString _, CString text) -> VString text
+  (VBytes _, CBytes bytes) -> VBytes bytes
+  (VDouble _, CFloat n) -> VDouble (if code == 2 then float2Double (double2Float n) else n)
+  _ -> fallback
 
 
 ----------------------------------------------------------------------
 -- Message / field extraction
 ----------------------------------------------------------------------
 
-extractMessage :: [DescriptorProto] -> Set Text -> DescriptorProto -> Either Text MessageRules
-extractMessage msgs visiting dp = do
-  fields <- traverse (extractField msgs (Set.insert (dpName dp) visiting)) (V.toList (dpField dp))
-  msgCustoms <- case dpOptions dp >>= messageConstraintExtension of
-    Nothing -> Right []
-    Just bytes -> messageConstraintsCel bytes
-  Right (messageRules fields msgCustoms)
+-- Resolve nested rules only when the corresponding field rules are active.
+type NestedRules = Either Text (Maybe NestedMessage)
+
+data ValueTarget = ValueTarget ~NestedRules ~(Maybe [Integer])
+
+data FieldTarget
+  = SingleTarget !(Maybe Value) !ValueTarget
+  | RepeatedTarget !ValueTarget
+  | MapTarget !ValueTarget
+  | ElementTarget !ValueTarget
 
 
-extractField :: [DescriptorProto] -> Set Text -> FieldDescriptorProto -> Either Text (Text, FieldRules)
-extractField msgs visiting fdp = do
-  let isRepeated = fdpFieldLabel fdp == 3
-      namedMsg = resolveMessage msgs visiting (fdpFieldTypeName fdp) (fdpFieldType fdp)
-  fr0 <- case fdpFieldOptions fdp >>= fieldConstraintExtension of
-    Nothing -> Right emptyFieldRules
-    Just bytes -> fieldConstraints bytes
-  let fr =
-        if isRepeated
-          then case frKind fr0 of
-            Just KRepeated -> fr0 {frItems = mergeItemMessage namedMsg (frItems fr0)}
-            -- scalar rules on a repeated field actually describe the items
-            _ ->
-              emptyFieldRules
-                { frRequired = frRequired fr0
-                , frIgnoreEmpty = frIgnoreEmpty fr0
-                , frCustom = frCustom fr0
-                , frKind = Just KRepeated
-                , frItems = mergeItemMessage namedMsg (itemsFromScalar fr0)
-                }
-          else fr0 {frMessage = namedMsg}
-  Right (fdpFieldName fdp, fr)
+extractMessage :: FileDescriptorProto -> MessageDescriptors -> EnumDefinitions -> ProtoSchema -> Set Text -> (Text, DescriptorProto) -> Either Text MessageRules
+extractMessage file messages enums shapes visiting (name, dp) = do
+  let fields = map (\fd -> (fd, fieldTarget fd)) (V.toList (dpField dp))
+      (maps, ordinary) = partition (isMap . snd) fields
+      known = Set.fromList (map (fdpFieldName . fst) fields)
+  options <- maybe (Right []) scanMessage (dpOptions dp >>= messageConstraintExtension)
+  groups <- traverse (messageOneofFromBytes name known) (submessageChunks 4 options)
+  let members = Set.fromList (concatMap messageOneofFields groups)
+  rules <- traverse (uncurry (extractField members)) (ordinary ++ maps)
+  msgCustoms <- decodeCelRules 5 3 options
+  oneofs <- catMaybes <$> traverse requiredOneof (zip [0 ..] (V.toList (dpOneofDecl dp)))
+  Right (messageRules rules (msgCustoms ++ oneofs))
+    { mrProtoSchema = Just (name, shapes)
+    , mrMessageOneofs = groups
+    }
   where
-    itemsFromScalar fr0 =
-      if frKind fr0 == Nothing && null (frRules fr0)
-        then Nothing
-        else Just emptyFieldRules {frKind = frKind fr0, frRules = frRules fr0}
-    mergeItemMessage Nothing items = items
-    mergeItemMessage msg Nothing = Just emptyFieldRules {frMessage = msg}
-    mergeItemMessage msg (Just it) = Just it {frMessage = msg}
+    requiredOneof (index, oneof) =
+      case odpOptions oneof >>= lenDelimUnknown bufValidateExtension . oneofoUnknownFields of
+        Nothing -> Right Nothing
+        Just bytes -> do
+          fields <- scanMessage bytes
+          let members = V.toList (V.map fdpFieldName (V.filter ((== index) . fdpFieldOneofIdx) (dpField dp)))
+          case lastVarint 1 fields of
+            Just value | value /= 0 -> Right (Just (oneofRequired (odpName oneof) members))
+            _ -> Right Nothing
+
+    isMap (MapTarget _) = True
+    isMap _ = False
+
+    findMessage fd
+      | fdpFieldType fd == 11 || fdpFieldType fd == 10 = find ((== descriptorTypeName fd) . fst) messages
+      | otherwise = Nothing
+
+    fieldTarget fd
+      | fdpFieldLabel fd /= 3 = SingleTarget (fieldDefault fd) target
+      | Just (_, entry) <- referenced
+      , maybe False moMapEntry (dpOptions entry) =
+          MapTarget (maybe emptyTarget valueTarget (V.find ((== 2) . fdpFieldNumber) (dpField entry)))
+      | otherwise = RepeatedTarget target
+      where
+        referenced = findMessage fd
+        target = ValueTarget (resolve referenced) (enumNumbers fd)
+
+    valueTarget fd = ValueTarget (resolve (findMessage fd)) (enumNumbers fd)
+    enumNumbers :: FieldDescriptorProto -> Maybe [Integer]
+    enumNumbers fd
+      | fdpFieldType fd == 14 = map (fromIntegral . evdpNumber) <$> Map.lookup (descriptorTypeName fd) enums
+      | otherwise = Nothing
+
+    fieldDefault fd
+      | descriptorFieldHasPresence file fd = Nothing
+      | Just (first : _) <- enumNumbers fd = Just (VInt (fromIntegral first))
+      | otherwise = scalarDefaultValue (fdpFieldType fd)
+
+    resolve (Just entry@(childName, _))
+      | childName == name || Set.member childName visiting = Right (Just (RecursiveMessage childName))
+      | otherwise =
+          Just . InlineMessage <$> extractMessage file messages enums shapes (Set.insert name visiting) entry
+    resolve _ = Right Nothing
 
 
-resolveMessage :: [DescriptorProto] -> Set Text -> Text -> Int32 -> Maybe MessageRules
-resolveMessage msgs visiting typeName fieldType
-  | fieldType /= 11 = Nothing -- not a message field (TYPE_MESSAGE == 11)
-  | otherwise =
-      let simple = last (T.splitOn "." typeName)
-      in if Set.member simple visiting
-           then Nothing
-           else case [m | m <- msgs, dpName m == simple] of
-             (m : _) -> either (const Nothing) Just (extractMessage msgs visiting m)
-             [] -> Nothing
+emptyTarget :: ValueTarget
+emptyTarget = ValueTarget (Right Nothing) Nothing
+
+
+extractField :: Set Text -> FieldDescriptorProto -> FieldTarget -> Either Text (Text, FieldRules)
+extractField members fd target = do
+  fields <- maybe (Right []) scanMessage (fdpFieldOptions fd >>= fieldConstraintExtension)
+  let name = fdpFieldName fd
+      effective
+        | Set.member name members, not (isJust (lastVarint 27 fields)) = (27, WVarint 1) : fields
+        | otherwise = fields
+  rules <- decodeFieldRules target effective
+  Right (name, rules)
 
 
 ----------------------------------------------------------------------
--- buf.validate message decoding (via the wireform-proto wire decoder, so
--- that repeated fields such as `cel` are preserved and malformed wire data is
--- reported rather than silently truncated)
+-- buf.validate message decoding
 ----------------------------------------------------------------------
 
--- Decode a FieldConstraints message into FieldRules.
-fieldConstraints :: BS.ByteString -> Either Text FieldRules
-fieldConstraints bytes = do
-  fs <- scanMessage bytes
-  customs <- traverse constraintFromBytes [b | (23, WLen b) <- fs]
-  let required = any (\(n, v) -> n == 25 && wvTrue v) fs
-      ignored = any (\(n, v) -> n == 27 && wvNonZero v) fs
-      ruleEntry = firstJust [(,) k b | (n, WLen b) <- fs, Just k <- [ruleKindOf n]]
-  case ruleEntry of
-    Just (kind, sub) -> do
-      rules <- decodeRuleMessage kind sub
-      pure
-        emptyFieldRules
-          { frRequired = required
-          , frIgnoreEmpty = ignored
-          , frCustom = customs
-          , frKind = Just kind
-          , frRules = rules
-          }
-    Nothing ->
-      pure emptyFieldRules {frRequired = required, frIgnoreEmpty = ignored, frCustom = customs}
+fieldConstraints :: FieldTarget -> BS.ByteString -> Either Text FieldRules
+fieldConstraints target bytes = scanMessage bytes >>= decodeFieldRules target
+
+
+decodeFieldRules :: FieldTarget -> [(Int, WV)] -> Either Text FieldRules
+decodeFieldRules target fields
+  | ignoreMode == Just 3 = Right emptyFieldRules
+  | otherwise = do
+      customs <- decodeCelRules 29 23 fields
+      (kind, ruleFields) <- case selectedRule fields of
+        Just (n, bytes) | Just k <- ruleKindOf n -> (Just k,) <$> scanMessage bytes
+        _ -> Right (Nothing, [])
+      let base =
+            emptyFieldRules
+              { frRequired = maybe False (/= 0) (lastVarint 25 fields)
+              , frImplicitDefault = implicitDefault
+              , frIgnoreEmpty = allowIgnoreZero && ignoreMode == Just 1
+              , frCustom = customs
+              }
+      case (target, kind) of
+        (MapTarget nested, _) ->
+          mapRules base nested (if kind == Just KMap then ruleFields else [])
+        (_, Just KMap) -> mapRules base emptyTarget ruleFields
+        (RepeatedTarget nested, Just KRepeated) -> repeatedRules base nested ruleFields
+        (_, Just KRepeated) -> repeatedRules base emptyTarget ruleFields
+        (RepeatedTarget nested, _) -> do
+          item <- scalarRules kind ruleFields nested emptyFieldRules
+          let hasItems = isJust kind || isJust (frMessage item) || isJust (frMessageReference item)
+          Right base {frKind = Just KRepeated, frItems = if hasItems then Just item else Nothing}
+        (SingleTarget _ nested, _) -> scalarRules kind ruleFields nested base
+        (ElementTarget nested, _) -> scalarRules kind ruleFields nested base
   where
-    firstJust xs = case xs of (x : _) -> Just x; [] -> Nothing
+    ignoreMode = lastVarint 27 fields
+    implicitDefault = case target of
+      SingleTarget value _ -> value
+      RepeatedTarget _ -> Just (VList V.empty)
+      MapTarget _ -> Just (VMap (celMapFromList []))
+      ElementTarget _ -> Nothing
+    allowIgnoreZero = case target of
+      ElementTarget _ -> True
+      _ -> isJust implicitDefault
+
+    mapRules base nested ruleFields = do
+      values <- decodeRuleMessage KMap ruleFields
+      keys <- subRules 4 emptyTarget ruleFields
+      items <- subRules 5 nested ruleFields
+      Right base {frKind = Just KMap, frRules = values, frMapKeys = keys, frMapValues = items}
+
+    repeatedRules base nested ruleFields = do
+      values <- decodeRuleMessage KRepeated ruleFields
+      items <- subRules 4 nested ruleFields
+      Right base {frKind = Just KRepeated, frRules = values, frItems = items}
+
+    subRules number target'@(ValueTarget nested _) ruleFields =
+      case mergeSubmessages (submessageChunks number ruleFields) of
+        Just bytes -> Just <$> fieldConstraints (ElementTarget target') bytes
+        Nothing -> fmap (\message -> withNestedMessage (Just message) emptyFieldRules) <$> nested
+
+    scalarRules kind ruleFields (ValueTarget nested enumNumbers) base = do
+      values <- maybe (Right []) (\k -> decodeRuleMessage k ruleFields) kind
+      context <- scalarContext kind ruleFields enumNumbers
+      message <- nested
+      Right $ withNestedMessage message base
+        { frKind = kind
+        , frRules = values
+        , frCustom = frCustom base ++ context
+        }
 
 
--- Decode the `cel` repeated Constraint of a MessageConstraints message (field 3).
-messageConstraintsCel :: BS.ByteString -> Either Text [Constraint]
-messageConstraintsCel bytes = do
-  fs <- scanMessage bytes
-  traverse constraintFromBytes [b | (3, WLen b) <- fs]
+scalarContext :: Maybe RuleKind -> [(Int, WV)] -> Maybe [Integer] -> Either Text [Constraint]
+scalarContext kind fields numbers = case kind of
+  Just KEnum | maybe False (/= 0) (lastVarint 2 fields) ->
+    maybe (Left "buf.validate enum.defined_only needs the enum definition") (Right . pure . definedOnly) numbers
+  Just KString | Just code <- lastVarint 24 fields, code == 1 || code == 2 ->
+    Right [wellKnownRegex (fromIntegral code) (lastVarint 25 fields /= Just 0)]
+  _ -> Right []
+
+
+submessageChunks :: Int -> [(Int, WV)] -> [BS.ByteString]
+submessageChunks number = foldr collect []
+  where
+    collect (n, WLen bytes) rest | n == number = bytes : rest
+    collect _ rest = rest
+
+
+lastVarint :: Int -> [(Int, WV)] -> Maybe Word64
+lastVarint number = foldl' select Nothing
+  where
+    select _ (n, WVarint word) | n == number = Just word
+    select current _ = current
+
+
+-- FieldRules.type is a oneof. The last member wins, and fragments of that
+-- member merge until a different member is encountered.
+selectedRule :: [(Int, WV)] -> Maybe (Int, BS.ByteString)
+selectedRule fields = fmap (fmap (BS.concat . reverse)) (foldl' select Nothing fields)
+  where
+    select current (n, WLen bytes)
+      | isJust (ruleKindOf n) || n == 20 || n == 28 =
+          case current of
+            Just (prev, chunks) | n == prev -> Just (n, bytes : chunks)
+            _ -> Just (n, [bytes])
+    select current _ = current
+
+
+messageOneofFromBytes :: Text -> Set Text -> BS.ByteString -> Either Text MessageOneof
+messageOneofFromBytes name known bytes = do
+  fields <- scanMessage bytes
+  members <- traverse ruleText (submessageChunks 1 fields)
+  makeMessageOneof name known members (maybe False (/= 0) (lastVarint 2 fields))
+
+
+decodeCelRules :: Int -> Int -> [(Int, WV)] -> Either Text [Constraint]
+decodeCelRules expressionField ruleField fields = do
+  expressions <- traverse fromExpression (submessageChunks expressionField fields)
+  rules <- traverse constraintFromBytes (submessageChunks ruleField fields)
+  Right (expressions ++ rules)
+  where
+    fromExpression bytes = do
+      expression <- ruleText bytes
+      mkAnnotationConstraint expression "" expression
 
 
 -- Constraint { id=1 string, message=2 string, expression=3 string }
 constraintFromBytes :: BS.ByteString -> Either Text Constraint
 constraintFromBytes bytes = do
-  fs <- scanMessage bytes
-  let str n = fromMaybe "" (firstStr n fs)
-      cid = str 1
-      msg = str 2
-      expr = str 3
-  if T.null expr
-    then Left "buf.validate constraint missing expression"
-    else case mkConstraint cid msg expr of
-      Left e -> Left ("invalid CEL in constraint '" <> cid <> "': " <> T.pack (show e))
-      Right c -> Right c
+  fields <- scanMessage bytes
+  cid <- lastText 1 fields
+  msg <- lastText 2 fields
+  expr <- lastText 3 fields
+  mkAnnotationConstraint cid msg expr
 
 
-firstStr :: Int -> [(Int, WV)] -> Maybe Text
-firstStr n fs = case [b | (m, WLen b) <- fs, m == n] of
-  (b : _) -> Just (TE.decodeUtf8With (\_ _ -> Just '\xFFFD') b)
-  [] -> Nothing
+lastText :: Int -> [(Int, WV)] -> Either Text Text
+lastText number fields = case reverse (submessageChunks number fields) of
+  bytes : _ -> ruleText bytes
+  [] -> Right ""
+
+
+ruleText :: BS.ByteString -> Either Text Text
+ruleText = either (const (Left "invalid UTF-8 in buf.validate string rule")) Right . TE.decodeUtf8'
 
 
 -- Map the FieldConstraints oneof field number to a RuleKind.
@@ -254,11 +469,15 @@ ruleKindOf = \case
 
 
 -- Decode a rule submessage (e.g. StringRules) into (ruleName, value) pairs.
-decodeRuleMessage :: RuleKind -> BS.ByteString -> Either Text [(Text, Value)]
-decodeRuleMessage kind bytes = do
-  fs <- scanMessage bytes
-  pure (mergeIn [(name, ruleVal kind name wv) | (n, wv) <- fs, Just name <- [ruleName kind n]])
+decodeRuleMessage :: RuleKind -> [(Int, WV)] -> Either Text [(Text, Value)]
+decodeRuleMessage kind fields = do
+  entries <- concat <$> traverse decodeEntry fields
+  pure (mergeIn entries)
   where
+    decodeEntry (n, wire) = case ruleName kind n of
+      Just name -> map (name,) <$> decodeRuleValues kind name wire
+      Nothing -> Right []
+
     -- Merge repeated in/not_in entries into a single list value.
     mergeIn entries =
       let names = nubOrd (map fst entries)
@@ -280,8 +499,29 @@ ruleName kind n = case kind of
   KBool -> if n == 1 then Just "const" else Nothing
   KRepeated -> case n of 1 -> Just "min_items"; 2 -> Just "max_items"; 3 -> Just "unique"; _ -> Nothing
   KMap -> case n of 1 -> Just "min_pairs"; 2 -> Just "max_pairs"; _ -> Nothing
-  KEnum -> numericRuleName n
-  _ -> numericRuleName n -- all numeric kinds share const/lt/lte/gt/gte/in/not_in
+  KEnum -> case n of
+    1 -> Just "const"
+    3 -> Just "in"
+    4 -> Just "not_in"
+    _ -> Nothing
+  KDuration -> case n of
+    7 -> Just "in"
+    8 -> Just "not_in"
+    _ -> timeBoundName n
+  KTimestamp -> case n of
+    7 -> Just "lt_now"
+    8 -> Just "gt_now"
+    9 -> Just "within"
+    _ -> timeBoundName n
+  KFloat | n == 8 -> Just "finite"
+  KDouble | n == 8 -> Just "finite"
+  _ -> numericRuleName n
+
+
+timeBoundName :: Int -> Maybe Text
+timeBoundName n
+  | n >= 2 && n <= 6 = numericRuleName (n - 1)
+  | otherwise = Nothing
 
 
 numericRuleName :: Int -> Maybe Text
@@ -317,9 +557,18 @@ stringRuleName = \case
   17 -> Just "uri"
   18 -> Just "uri_ref"
   19 -> Just "len"
+  20 -> Just "len_bytes"
   21 -> Just "address"
   22 -> Just "uuid"
   23 -> Just "not_contains"
+  26 -> Just "ip_with_prefixlen"
+  27 -> Just "ipv4_with_prefixlen"
+  28 -> Just "ipv6_with_prefixlen"
+  29 -> Just "ip_prefix"
+  30 -> Just "ipv4_prefix"
+  31 -> Just "ipv6_prefix"
+  32 -> Just "host_and_port"
+  33 -> Just "tuuid"
   _ -> Nothing
 
 
@@ -328,46 +577,93 @@ bytesRuleName = \case
   1 -> Just "const"
   2 -> Just "min_len"
   3 -> Just "max_len"
-  9 -> Just "in"
-  10 -> Just "not_in"
+  5 -> Just "prefix"
+  6 -> Just "suffix"
+  7 -> Just "contains"
+  8 -> Just "in"
+  9 -> Just "not_in"
+  10 -> Just "ip"
+  11 -> Just "ipv4"
+  12 -> Just "ipv6"
   13 -> Just "len"
   _ -> Nothing
 
 
 countRuleNames :: [Text]
-countRuleNames = ["min_len", "max_len", "len", "min_bytes", "max_bytes", "min_items", "max_items", "min_pairs", "max_pairs"]
-
-
-stringValueRules :: [Text]
-stringValueRules = ["const", "pattern", "prefix", "suffix", "contains", "not_contains", "in", "not_in"]
+countRuleNames =
+  ["min_len", "max_len", "len", "min_bytes", "max_bytes", "len_bytes", "min_items", "max_items", "min_pairs", "max_pairs"]
 
 
 flagRules :: [Text]
-flagRules = ["email", "hostname", "ip", "ipv4", "ipv6", "uri", "uri_ref", "address", "uuid", "unique"]
+flagRules =
+  [ "email", "hostname", "ip", "ipv4", "ipv6", "uri", "uri_ref", "address", "uuid", "tuuid", "unique"
+  , "ip_prefix", "ipv4_prefix", "ipv6_prefix", "ip_with_prefixlen", "ipv4_with_prefixlen", "ipv6_with_prefixlen"
+  , "host_and_port", "finite", "lt_now", "gt_now"
+  ]
 
 
--- Convert a wire value to a CEL value, given the rule kind and rule name.
-ruleVal :: RuleKind -> Text -> WV -> Value
-ruleVal kind name wv
-  | name `elem` countRuleNames = VUInt (wvWord wv)
-  | name `elem` flagRules = VBool (wvTrue wv)
-  | kind == KString && name `elem` stringValueRules = VString (wvText wv)
-  | kind == KBytes && name `elem` ["const", "in", "not_in"] = VBytes (wvBytes wv)
-  | otherwise = numericVal kind wv
+-- A field with a different wire type is unknown to the schema. Length-delimited
+-- numeric lists also have a valid packed representation, even in proto2.
+decodeRuleValues :: RuleKind -> Text -> WV -> Either Text [Value]
+decodeRuleValues kind name wire
+  | name `elem` countRuleNames = Right (fromVarint VUInt wire)
+  | name `elem` flagRules || kind == KBool = Right (fromVarint (VBool . (/= 0)) wire)
+  | kind == KString, WLen bytes <- wire = do
+      value <- ruleText bytes
+      Right [VString value]
+  | kind == KBytes, WLen bytes <- wire = Right [VBytes bytes]
+  | kind == KDuration || (kind == KTimestamp && name == "within") = case wire of
+      WLen bytes -> do
+        duration <- mapDecodeError (decodeMessage bytes)
+        Right [VDuration (Duration (ProtoDuration.durationSeconds duration) (ProtoDuration.durationNanos duration))]
+      _ -> Right []
+  | kind == KTimestamp = case wire of
+      WLen bytes -> do
+        timestamp <- mapDecodeError (decodeMessage bytes)
+        Right [VTimestamp (Timestamp (ProtoTimestamp.timestampSeconds timestamp) (ProtoTimestamp.timestampNanos timestamp))]
+      _ -> Right []
+  | name == "in" || name == "not_in"
+  , WLen bytes <- wire = concatMap (numericValues kind) <$> unpackNumeric kind bytes
+  | otherwise = Right (numericValues kind wire)
 
 
-numericVal :: RuleKind -> WV -> Value
-numericVal kind wv = case kind of
-  KBool -> VBool (wvTrue wv)
-  KFloat -> VDouble (realToFrac (castWord32ToFloat (wvWord32 wv)))
-  KDouble -> VDouble (castWord64ToDouble (wvWord wv))
-  KUint32 -> VUInt (wvWord wv)
-  KUint64 -> VUInt (wvWord wv)
-  KFixed32 -> VUInt (wvWord wv)
-  KFixed64 -> VUInt (wvWord wv)
-  KSint32 -> VInt (zigzag (wvWord wv))
-  KSint64 -> VInt (zigzag (wvWord wv))
-  _ -> VInt (fromIntegral (wvWord wv) :: Int64) -- int32/int64/sfixed/enum
+fromVarint :: (Word64 -> Value) -> WV -> [Value]
+fromVarint f (WVarint word) = [f word]
+fromVarint _ _ = []
+
+
+numericValues :: RuleKind -> WV -> [Value]
+numericValues kind wire = case (kind, wire) of
+  (KFloat, WI32 word) -> [VDouble (float2Double (castWord32ToFloat word))]
+  (KDouble, WI64 word) -> [VDouble (castWord64ToDouble word)]
+  (KFixed32, WI32 word) -> [VUInt (fromIntegral word)]
+  (KFixed64, WI64 word) -> [VUInt word]
+  (KSfixed32, WI32 word) -> [signed32 word]
+  (KSfixed64, WI64 word) -> [VInt (fromIntegral word)]
+  (KInt32, WVarint word) -> [signed32 word]
+  (KEnum, WVarint word) -> [signed32 word]
+  (KInt64, WVarint word) -> [VInt (fromIntegral word)]
+  (KUint32, WVarint word) -> [VUInt (fromIntegral (fromIntegral word :: Word32))]
+  (KUint64, WVarint word) -> [VUInt word]
+  (KSint32, WVarint word) -> [VInt (zigzag (fromIntegral (fromIntegral word :: Word32)))]
+  (KSint64, WVarint word) -> [VInt (zigzag word)]
+  _ -> []
+  where
+    signed32 :: Integral a => a -> Value
+    signed32 word = VInt (fromIntegral (fromIntegral word :: Int32))
+
+
+unpackNumeric :: RuleKind -> BS.ByteString -> Either Text [WV]
+unpackNumeric kind bytes
+  | kind `elem` [KFloat, KFixed32, KSfixed32] = fixed 4 (WI32 <$> getFixed32)
+  | kind `elem` [KDouble, KFixed64, KSfixed64] = fixed 8 (WI64 <$> getFixed64)
+  | otherwise = map WVarint . VU.toList <$> mapDecodeError (decodeAllVarints bytes)
+  where
+    fixed width readWord
+      | remainder == 0 = mapDecodeError (runDecoder (replicateM count readWord) bytes)
+      | otherwise = Left "invalid length for packed buf.validate fixed-width rule"
+      where
+        (count, remainder) = BS.length bytes `quotRem` width
 
 
 ----------------------------------------------------------------------
@@ -376,36 +672,6 @@ numericVal kind wv = case kind of
 
 data WV = WVarint !Word64 | WI64 !Word64 | WI32 !Word32 | WLen !BS.ByteString
   deriving stock (Show)
-
-
-wvWord :: WV -> Word64
-wvWord (WVarint v) = v
-wvWord (WI64 v) = v
-wvWord (WI32 v) = fromIntegral v
-wvWord (WLen _) = 0
-
-
-wvWord32 :: WV -> Word32
-wvWord32 (WI32 v) = v
-wvWord32 wv = fromIntegral (wvWord wv)
-
-
-wvTrue :: WV -> Bool
-wvTrue = wvNonZero
-
-
-wvNonZero :: WV -> Bool
-wvNonZero wv = wvWord wv /= 0
-
-
-wvText :: WV -> Text
-wvText (WLen b) = TE.decodeUtf8With (\_ _ -> Just '\xFFFD') b
-wvText _ = ""
-
-
-wvBytes :: WV -> BS.ByteString
-wvBytes (WLen b) = b
-wvBytes _ = BS.empty
 
 
 zigzag :: Word64 -> Int64
@@ -418,7 +684,11 @@ scanner, malformed wire data surfaces as a 'DecodeError' rather than a
 silently truncated field list, and group wire types are rejected.
 -}
 scanMessage :: BS.ByteString -> Either Text [(Int, WV)]
-scanMessage bytes = case runDecoder scanLoop bytes of
+scanMessage = mapDecodeError . runDecoder scanLoop
+
+
+mapDecodeError :: Either DecodeError a -> Either Text a
+mapDecodeError = \case
   Right fs -> Right fs
   Left e -> Left ("malformed buf.validate wire data: " <> T.pack (show e))
 

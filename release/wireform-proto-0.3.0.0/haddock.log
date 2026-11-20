@@ -1,0 +1,1587 @@
+Build profile: -w ghc-9.10.3 -O2
+In order, the following will be built (use -v for more details):
+ - wireform-core-0.2.0.1 (lib) (requires build)
+ - wireform-derive-0.2.0.0 (lib) (requires build)
+ - wireform-proto-0.3.0.0 (lib) (configuration changed)
+Starting     wireform-derive-0.2.0.0 (lib)
+Starting     wireform-core-0.2.0.1 (lib)
+Building     wireform-core-0.2.0.1 (lib)
+Building     wireform-derive-0.2.0.0 (lib)
+Haddock      wireform-derive-0.2.0.0 (lib)
+Installing   wireform-derive-0.2.0.0 (lib)
+Completed    wireform-derive-0.2.0.0 (lib)
+Haddock      wireform-core-0.2.0.1 (lib)
+Installing   wireform-core-0.2.0.1 (lib)
+Completed    wireform-core-0.2.0.1 (lib)
+Configuring library for wireform-proto-0.3.0.0...
+Preprocessing library for wireform-proto-0.3.0.0...
+Running Haddock on library for wireform-proto-0.3.0.0...
+Warning: The following packages have no Haddock documentation installed. No
+links will be generated to these packages: vector-0.13.2.0
+[ 1 of 70] Compiling Paths_wireform_proto ( /private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/build/autogen/Paths_wireform_proto.hs, nothing ) [Flags changed]
+[ 2 of 70] Compiling Proto.IDL.AST.Span ( src/Proto/IDL/AST/Span.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_26.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_26.dyn_o )
+src/Proto/IDL/AST/Span.hs:94:25: warning: [GHC-39567] [-Wstar-is-type]
+    Using ‘*’ (or its Unicode variant) to mean ‘Data.Kind.Type’
+    relies on the StarIsType extension, which will become
+    deprecated in the future.
+    Suggested fix: Use ‘Type’ from ‘Data.Kind’ instead.
+   |
+94 | type family XNode (p :: *)
+   |                         ^
+
+[ 3 of 70] Compiling Proto.IDL.AST    ( src/Proto/IDL/AST.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_24.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_24.dyn_o )
+[ 4 of 70] Compiling Proto.IDL.Annotations ( src/Proto/IDL/Annotations.hs, nothing ) [Flags changed]
+[ 5 of 70] Compiling Proto.IDL.Inspect ( src/Proto/IDL/Inspect.hs, nothing ) [Flags changed]
+[ 6 of 70] Compiling Proto.Compat     ( src/Proto/Compat.hs, nothing ) [Flags changed]
+[ 7 of 70] Compiling Proto.IDL.Options ( src/Proto/IDL/Options.hs, nothing ) [Flags changed]
+[ 8 of 70] Compiling Proto.IDL.Options.Custom ( src/Proto/IDL/Options/Custom.hs, nothing ) [Flags changed]
+[ 9 of 70] Compiling Proto.CodeGen.Hooks ( src/Proto/CodeGen/Hooks.hs, nothing ) [Flags changed]
+src/Proto/CodeGen/Hooks.hs:173:56: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘emptyCustomOptionRegistry, extractExtensionOptions,
+                   registerCustomOption’
+    from module ‘Proto.IDL.Options.Custom’ is redundant
+    |
+173 | import Proto.IDL.Options.Custom (CustomOptionRegistry, emptyCustomOptionRegistry, extractExtensionOptions, registerCustomOption)
+    |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[10 of 70] Compiling Proto.IDL.Parser.Error ( src/Proto/IDL/Parser/Error.hs, nothing ) [Flags changed]
+[11 of 70] Compiling Proto.IDL.Parser.Lexer ( src/Proto/IDL/Parser/Lexer.hs, nothing ) [Flags changed]
+[12 of 70] Compiling Proto.IDL.Parser ( src/Proto/IDL/Parser.hs, nothing ) [Flags changed]
+src/Proto/IDL/Parser.hs:25:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.IDL.AST.Span’ is redundant
+      except perhaps to import instances from ‘Proto.IDL.AST.Span’
+    To import instances alone, use: import Proto.IDL.AST.Span()
+   |
+25 | import Proto.IDL.AST.Span (Span, SrcSpan (..), mkSpan)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/IDL/Parser.hs:815:11: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘between’ shadows the existing binding
+      imported from ‘Text.Megaparsec’ at src/Proto/IDL/Parser.hs:28:1-38
+      (and originally defined in ‘parser-combinators-1.3.1:Control.Applicative.Combinators’)
+    |
+815 |           between = filter (\lc -> lcLine lc > afterLine && lcLine lc < startLine) unclaimed
+    |           ^^^^^^^
+
+src/Proto/IDL/Parser.hs:886:11: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘between’ shadows the existing binding
+      imported from ‘Text.Megaparsec’ at src/Proto/IDL/Parser.hs:28:1-38
+      (and originally defined in ‘parser-combinators-1.3.1:Control.Applicative.Combinators’)
+    |
+886 |           between = filter (\lc -> lcLine lc > afterLine && lcLine lc < startLine) unclaimed
+    |           ^^^^^^^
+
+[13 of 70] Compiling Proto.IDL.Parser.Resolver ( src/Proto/IDL/Parser/Resolver.hs, nothing ) [Flags changed]
+[14 of 70] Compiling Proto.IDL.Print  ( src/Proto/IDL/Print.hs, nothing ) [Flags changed]
+[15 of 70] Compiling Proto.Internal.CodeGen.Combinators ( src/Proto/Internal/CodeGen/Combinators.hs, nothing ) [Flags changed]
+[16 of 70] Compiling Proto.CodeGen.Service ( src/Proto/CodeGen/Service.hs, nothing ) [Flags changed]
+[17 of 70] Compiling Proto.Internal.Either ( src/Proto/Internal/Either.hs, nothing ) [Flags changed]
+[18 of 70] Compiling Proto.Internal.FieldPresence ( src/Proto/Internal/FieldPresence.hs, nothing ) [Flags changed]
+[19 of 70] Compiling Proto.Internal.GrowList ( src/Proto/Internal/GrowList.hs, nothing ) [Flags changed]
+[20 of 70] Compiling Proto.Internal.JSON.Number ( src/Proto/Internal/JSON/Number.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_36.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_36.dyn_o )
+[21 of 70] Compiling Proto.Internal.JSON ( src/Proto/Internal/JSON.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_32.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_32.dyn_o )
+src/Proto/Internal/JSON.hs:434:25: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: Eq k
+    In the type signature for:
+         parseHashMapFromJSON :: forall k v.
+                                 (Eq k, Hashable k, Aeson.FromJSON k, Aeson.FromJSON v) =>
+                                 Aeson.Value -> Aeson.Parser (HM.HashMap k v)
+    |
+434 | parseHashMapFromJSON :: (Eq k, Hashable k, Aeson.FromJSON k, Aeson.FromJSON v) => Aeson.Value -> Aeson.Parser (HM.HashMap k v)
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[22 of 70] Compiling Proto.Internal.Maybe ( src/Proto/Internal/Maybe.hs, nothing ) [Flags changed]
+[23 of 70] Compiling Proto.Internal.Wire ( src/Proto/Internal/Wire.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_42.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_42.dyn_o )
+[24 of 70] Compiling Proto.Internal.Wire.Decode ( src/Proto/Internal/Wire/Decode.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_44.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_44.dyn_o )
+[25 of 70] Compiling Proto.Internal.Wire.Encode ( src/Proto/Internal/Wire/Encode.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_46.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_46.dyn_o )
+src/Proto/Internal/Wire/Encode.hs:60:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.ByteString.Lazy’ is redundant
+      except perhaps to import instances from ‘Data.ByteString.Lazy’
+    To import instances alone, use: import Data.ByteString.Lazy()
+   |
+60 | import Data.ByteString.Lazy qualified as BL
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[26 of 70] Compiling Proto.Internal.SizedBuilder ( src/Proto/Internal/SizedBuilder.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_40.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_40.dyn_o )
+[27 of 70] Compiling Proto.Internal.Encode.Archetype ( src/Proto/Internal/Encode/Archetype.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_30.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_30.dyn_o )
+src/Proto/Internal/Encode/Archetype.hs:60:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text.Encoding’ is redundant
+      except perhaps to import instances from ‘Data.Text.Encoding’
+    To import instances alone, use: import Data.Text.Encoding()
+   |
+60 | import Data.Text.Encoding qualified as TE
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Internal/Encode/Archetype.hs:71:3: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘zigZag32, zigZag64’
+    from module ‘Proto.Internal.Wire.Encode’ is redundant
+   |
+71 |   zigZag32,
+   |   ^^^^^^^^^...
+
+[28 of 70] Compiling Proto.Encode     ( src/Proto/Encode.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_6.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_6.dyn_o )
+src/Proto/Encode.hs:126:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Vector’ is redundant
+      except perhaps to import instances from ‘Data.Vector’
+    To import instances alone, use: import Data.Vector()
+    |
+126 | import Data.Vector qualified as V
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Encode.hs:130:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Foreign.ForeignPtr’ is redundant
+      except perhaps to import instances from ‘Foreign.ForeignPtr’
+    To import instances alone, use: import Foreign.ForeignPtr()
+    |
+130 | import Foreign.ForeignPtr (withForeignPtr)
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Encode.hs:132:36: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘sizeOf’ from module ‘Foreign.Storable’ is redundant
+    |
+132 | import Foreign.Storable (Storable, sizeOf)
+    |                                    ^^^^^^
+
+[29 of 70] Compiling Proto.Decode     ( src/Proto/Decode.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_4.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_4.dyn_o )
+src/Proto/Decode.hs:136:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.List’ is redundant
+      except perhaps to import instances from ‘Data.List’
+    To import instances alone, use: import Data.List()
+    |
+136 | import Data.List (foldl')
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Decode.hs:149:29: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Tag’ from module ‘Proto.Internal.Wire’ is redundant
+    |
+149 | import Proto.Internal.Wire (Tag (..), WireType (..))
+    |                             ^^^^^^^^
+
+[30 of 70] Compiling Proto.Google.Protobuf.Descriptor ( src/Proto/Google/Protobuf/Descriptor.hs, nothing ) [Flags changed]
+[31 of 70] Compiling Proto.IDL.Descriptor ( src/Proto/IDL/Descriptor.hs, nothing ) [Flags changed]
+[32 of 70] Compiling Proto.CodeGen    ( src/Proto/CodeGen.hs, nothing ) [Flags changed]
+[33 of 70] Compiling Proto.CodeGen.Types ( src/Proto/CodeGen/Types.hs, nothing ) [Flags changed]
+[34 of 70] Compiling Proto.CodeGen.Encode ( src/Proto/CodeGen/Encode.hs, nothing ) [Flags changed]
+[35 of 70] Compiling Proto.CodeGen.Decode ( src/Proto/CodeGen/Decode.hs, nothing ) [Flags changed]
+[36 of 70] Compiling Proto.Google.Protobuf.Compiler.Plugin ( src/Proto/Google/Protobuf/Compiler/Plugin.hs, nothing ) [Flags changed]
+src/Proto/Google/Protobuf/Compiler/Plugin.hs:22:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.ByteString’ is redundant
+      except perhaps to import instances from ‘Data.ByteString’
+    To import instances alone, use: import Data.ByteString()
+   |
+22 | import Data.ByteString (ByteString)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[37 of 70] Compiling Proto.Extension  ( src/Proto/Extension.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_8.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_8.dyn_o )
+[38 of 70] Compiling Proto.Internal.JSON.Extension ( src/Proto/Internal/JSON/Extension.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_34.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_34.dyn_o )
+[39 of 70] Compiling Proto.Decode.Stream ( src/Proto/Decode/Stream.hs, nothing ) [Flags changed]
+[40 of 70] Compiling Proto.Conformance ( src/Proto/Conformance.hs, nothing ) [Flags changed]
+[41 of 70] Compiling Proto.JSONSchema ( src/Proto/JSONSchema.hs, nothing ) [Flags changed]
+[42 of 70] Compiling Proto.Repr       ( src/Proto/Repr.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_50.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_50.dyn_o )
+src/Proto/Repr.hs:218:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.List’ is redundant
+      except perhaps to import instances from ‘Data.List’
+    To import instances alone, use: import Data.List()
+    |
+218 | import Data.List (foldl')
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[43 of 70] Compiling Proto.Schema     ( src/Proto/Schema.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_52.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_52.dyn_o )
+[44 of 70] Compiling Proto.Registry   ( src/Proto/Registry.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_48.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_48.dyn_o )
+src/Proto/Registry.hs:91:60: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Name’ from module ‘Language.Haskell.TH’ is redundant
+   |
+91 | import Language.Haskell.TH (Dec (..), Exp (..), Info (..), Name, Q, Type (..), mkName, reify)
+   |                                                            ^^^^
+
+src/Proto/Registry.hs:240:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: IsMessage a
+    In the type signature for:
+         lookupDecoder :: forall a.
+                          (Typeable a, IsMessage a) =>
+                          Text -> TypeRegistry -> Maybe (ByteString -> Either DecodeError a)
+    |
+240 |    . (Typeable a, IsMessage a)
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[45 of 70] Compiling Proto.Lens       ( src/Proto/Lens.hs, nothing ) [Flags changed]
+[46 of 70] Compiling Proto.Internal.Derive ( src/Proto/Internal/Derive.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_28.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_28.dyn_o )
+src/Proto/Internal/Derive.hs:87:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Internal.Wire’ is redundant
+      except perhaps to import instances from ‘Proto.Internal.Wire’
+    To import instances alone, use: import Proto.Internal.Wire()
+   |
+87 | import Proto.Internal.Wire (Tag)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Internal/Derive.hs:92:39: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘BytesRep, MapAdapter, StringRep’
+    from module ‘Proto.Repr’ is redundant
+   |
+92 | import Proto.Repr (BytesAdapter (..), BytesRep (..), MapAdapter (..), RepeatedAdapter (..), StringAdapter (..), StringRep (..))
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[47 of 70] Compiling Proto.Google.Protobuf.Wrappers ( src/Proto/Google/Protobuf/Wrappers.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_22.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_22.dyn_o )
+[48 of 70] Compiling Proto.Google.Protobuf.Wrappers.Util ( src/Proto/Google/Protobuf/Wrappers/Util.hs, nothing ) [Flags changed]
+[49 of 70] Compiling Proto.Google.Protobuf.Timestamp ( src/Proto/Google/Protobuf/Timestamp.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_20.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_20.dyn_o )
+src/Proto/Google/Protobuf/Timestamp.hs:215:82: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Timestamp.hs:215:82-85
+        (Num p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Timestamp.hs:215:82-85
+    • In the first argument of ‘dropTrailingZeros’, namely
+        ‘(pad9 (fromIntegral n))’
+      In the second argument of ‘(<>)’, namely
+        ‘dropTrailingZeros (pad9 (fromIntegral n))’
+      In the expression:
+        T.pack "." <> dropTrailingZeros (pad9 (fromIntegral n))
+    |
+215 |         nanoStr = if n == 0 then T.pack "" else T.pack "." <> dropTrailingZeros (pad9 (fromIntegral n))
+    |                                                                                  ^^^^
+
+src/Proto/Google/Protobuf/Timestamp.hs:220:16: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:220:16-19
+        (Num p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:220:16-19
+    • In the first argument of ‘(<>)’, namely ‘pad2 (fromIntegral m)’
+      In the second argument of ‘(<>)’, namely
+        ‘pad2 (fromIntegral m)
+           <>
+             T.pack "-"
+               <>
+                 pad2 (fromIntegral d)
+                   <>
+                     T.pack "T"
+                       <>
+                         pad2 hours
+                           <>
+                             T.pack ":"
+                               <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+      In the second argument of ‘(<>)’, namely
+        ‘T.pack "-"
+           <>
+             pad2 (fromIntegral m)
+               <>
+                 T.pack "-"
+                   <>
+                     pad2 (fromIntegral d)
+                       <>
+                         T.pack "T"
+                           <>
+                             pad2 hours
+                               <>
+                                 T.pack ":"
+                                   <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+    |
+220 |             <> pad2 (fromIntegral m)
+    |                ^^^^
+
+src/Proto/Google/Protobuf/Timestamp.hs:222:16: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:222:16-19
+        (Num p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:222:16-19
+    • In the first argument of ‘(<>)’, namely ‘pad2 (fromIntegral d)’
+      In the second argument of ‘(<>)’, namely
+        ‘pad2 (fromIntegral d)
+           <>
+             T.pack "T"
+               <>
+                 pad2 hours
+                   <>
+                     T.pack ":"
+                       <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+      In the second argument of ‘(<>)’, namely
+        ‘T.pack "-"
+           <>
+             pad2 (fromIntegral d)
+               <>
+                 T.pack "T"
+                   <>
+                     pad2 hours
+                       <>
+                         T.pack ":"
+                           <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+    |
+222 |             <> pad2 (fromIntegral d)
+    |                ^^^^
+
+[50 of 70] Compiling Proto.Google.Protobuf.Struct ( src/Proto/Google/Protobuf/Struct.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_18.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_18.dyn_o )
+[51 of 70] Compiling Proto.Google.Protobuf.Struct.Util ( src/Proto/Google/Protobuf/Struct/Util.hs, nothing ) [Flags changed]
+[52 of 70] Compiling Proto.Google.Protobuf.SourceContext ( src/Proto/Google/Protobuf/SourceContext.hs, nothing ) [Flags changed]
+[53 of 70] Compiling Proto.Google.Protobuf.FieldMask ( src/Proto/Google/Protobuf/FieldMask.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_16.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_16.dyn_o )
+[54 of 70] Compiling Proto.Google.Protobuf.FieldMask.Util ( src/Proto/Google/Protobuf/FieldMask/Util.hs, nothing ) [Flags changed]
+src/Proto/Google/Protobuf/FieldMask/Util.hs:41:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Set’ is redundant
+      except perhaps to import instances from ‘Data.Set’
+    To import instances alone, use: import Data.Set()
+   |
+41 | import Data.Set (Set)
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+[55 of 70] Compiling Proto.Google.Protobuf.Empty ( src/Proto/Google/Protobuf/Empty.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_14.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_14.dyn_o )
+[56 of 70] Compiling Proto.Google.Protobuf.Duration ( src/Proto/Google/Protobuf/Duration.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_12.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_12.dyn_o )
+src/Proto/Google/Protobuf/Duration.hs:199:82: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Duration.hs:199:82-85
+        (Num p0)
+          arising from a use of ‘abs’
+          at src/Proto/Google/Protobuf/Duration.hs:199:88-90
+    • In the first argument of ‘dropTrailingZeros’, namely
+        ‘(pad9 (abs (fromIntegral n)))’
+      In the second argument of ‘(<>)’, namely
+        ‘dropTrailingZeros (pad9 (abs (fromIntegral n)))’
+      In the expression:
+        T.pack "." <> dropTrailingZeros (pad9 (abs (fromIntegral n)))
+    |
+199 |         nanoStr = if n == 0 then T.pack "" else T.pack "." <> dropTrailingZeros (pad9 (abs (fromIntegral n)))
+    |                                                                                  ^^^^
+
+[57 of 70] Compiling Proto.Google.Protobuf.Timestamp.Util ( src/Proto/Google/Protobuf/Timestamp/Util.hs, nothing ) [Flags changed]
+src/Proto/Google/Protobuf/Timestamp/Util.hs:32:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+32 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:84:10: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+84 |         (fromIntegral (timestampSeconds ts) * nanosPerSecond + fromIntegral (timestampNanos ts))
+   |          ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:85:14: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+85 |           + (fromIntegral (durationSeconds dur) * nanosPerSecond + fromIntegral (durationNanos dur))
+   |              ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:96:16: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+96 |   let aNanos = fromIntegral (timestampSeconds a) * nanosPerSecond + fromIntegral (timestampNanos a)
+   |                ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:97:16: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+97 |       bNanos = fromIntegral (timestampSeconds b) * nanosPerSecond + fromIntegral (timestampNanos b)
+   |                ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:129:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Ord Timestamp
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+    |
+129 | instance Ord Timestamp where
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[58 of 70] Compiling Proto.Google.Protobuf.Duration.Util ( src/Proto/Google/Protobuf/Duration/Util.hs, nothing ) [Flags changed]
+src/Proto/Google/Protobuf/Duration/Util.hs:40:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+40 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Google/Protobuf/Duration/Util.hs:183:8: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘a0’ to type ‘Integer’ in the following constraints
+        (Num a0)
+          arising from a use of ‘signsAgree’
+          at src/Proto/Google/Protobuf/Duration/Util.hs:183:8-17
+        (Ord a0)
+          arising from a use of ‘signsAgree’
+          at src/Proto/Google/Protobuf/Duration/Util.hs:183:8-17
+    • In the second argument of ‘(&&)’, namely
+        ‘signsAgree
+           (durationSeconds dur) (fromIntegral (durationNanos dur))’
+      In the second argument of ‘(&&)’, namely
+        ‘abs (fromIntegral (durationNanos dur) :: Int64) <= 999999999
+           &&
+             signsAgree
+               (durationSeconds dur) (fromIntegral (durationNanos dur))’
+      In the expression:
+        abs (durationSeconds dur) <= 315576000000
+          &&
+            abs (fromIntegral (durationNanos dur) :: Int64) <= 999999999
+              &&
+                signsAgree (durationSeconds dur) (fromIntegral (durationNanos dur))
+    |
+183 |     && signsAgree (durationSeconds dur) (fromIntegral (durationNanos dur))
+    |        ^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Duration/Util.hs:195:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Ord Duration
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+    |
+195 | instance Ord Duration where
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[59 of 70] Compiling Proto.Google.Protobuf.Any ( src/Proto/Google/Protobuf/Any.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_10.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_10.dyn_o )
+[60 of 70] Compiling Proto.Internal.JSON.WellKnown ( src/Proto/Internal/JSON/WellKnown.hs, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_38.o, /var/folders/8w/44rf3zr512nd0pd0bwb70vfm0000gn/T/ghc63264_0/ghc_38.dyn_o )
+[61 of 70] Compiling Proto.Google.Protobuf.Any.Util ( src/Proto/Google/Protobuf/Any/Util.hs, nothing ) [Flags changed]
+[62 of 70] Compiling Proto.Dynamic    ( src/Proto/Dynamic.hs, nothing ) [Flags changed]
+src/Proto/Dynamic.hs:60:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+60 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Dynamic.hs:79:3: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘getDouble, getFloat, getText’
+    from module ‘Proto.Internal.Wire.Decode’ is redundant
+   |
+79 |   getDouble,
+   |   ^^^^^^^^^^...
+
+src/Proto/Dynamic.hs:298:7: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘nFields’ shadows the existing binding
+      bound at src/Proto/Dynamic.hs:320:5
+    |
+298 |       nFields = length fieldList'
+    |       ^^^^^^^
+
+[63 of 70] Compiling Proto.Decode.Collect ( src/Proto/Decode/Collect.hs, nothing ) [Flags changed]
+[64 of 70] Compiling Proto            ( src/Proto.hs, nothing ) [Flags changed]
+[65 of 70] Compiling Proto.Setup      ( src/Proto/Setup.hs, nothing ) [Flags changed]
+src/Proto/Setup.hs:72:34: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘ProtoFile'’ from module ‘Proto.IDL.AST’ is redundant
+   |
+72 | import Proto.IDL.AST (ProtoFile, ProtoFile' (..))
+   |                                  ^^^^^^^^^^^^^^^
+
+[66 of 70] Compiling Proto.TH.Derive  ( src/Proto/TH/Derive.hs, nothing ) [Flags changed]
+src/Proto/TH/Derive.hs:7:1: warning: [GHC-42044] [-Wunrecognised-pragmas]
+    Unrecognised pragma: HLINT
+  |
+7 | {-# HLINT ignore "Unused LANGUAGE pragma" #-}
+  | ^^^^^^^^^
+
+src/Proto/TH/Derive.hs:114:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text’ is redundant
+      except perhaps to import instances from ‘Data.Text’
+    To import instances alone, use: import Data.Text()
+    |
+114 | import Data.Text qualified as T
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Derive.hs:548:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘stripMaybe’
+    |
+548 | stripMaybe (AppT (ConT n) t) | n == ''Maybe = t
+    | ^^^^^^^^^^
+
+[67 of 70] Compiling Proto.TH.Metadata ( src/Proto/TH/Metadata.hs, nothing ) [Flags changed]
+src/Proto/TH/Metadata.hs:2221:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘scalarValueToJSON’
+     |
+2221 | scalarValueToJSON _ _ =
+     | ^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2287:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: Ord k
+    In the type signature for:
+         scalarMapToJSON :: forall k v.
+                            (AesonT.ToJSON k, AesonT.ToJSON v, Ord k) =>
+                            JsonScalar -> JsonScalar -> Map.Map k v -> AesonT.Value
+     |
+2287 |    . (Aeson.ToJSON k, Aeson.ToJSON v, Ord k)
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2357:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: AesonT.FromJSON k
+    In the type signature for:
+         parseScalarMapMaybe :: forall k v.
+                                (Ord k, AesonT.FromJSON k, AesonT.FromJSONKey k,
+                                 AesonT.FromJSON v) =>
+                                JsonScalar
+                                -> JsonScalar
+                                -> AesonT.Object
+                                -> Text
+                                -> AesonT.Parser (Maybe (Map.Map k v))
+     |
+2357 |    . (Ord k, Aeson.FromJSON k, Aeson.FromJSONKey k, Aeson.FromJSON v)
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2726:23: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘conE’ shadows the existing binding
+      imported from ‘Language.Haskell.TH’ at src/Proto/TH/Metadata.hs:92:1-26
+      (and originally defined in ‘Language.Haskell.TH.Lib.Internal’)
+     |
+2726 | oneofScalarParserE sc conE valE =
+     |                       ^^^^
+
+[68 of 70] Compiling Proto.TH         ( src/Proto/TH.hs, nothing ) [Flags changed]
+src/Proto/TH.hs:609:28: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘fields’ shadows the existing binding
+      bound at src/Proto/TH.hs:585:5
+    |
+609 |             MEExtend owner fields -> extendToDecls (scPackage childScope) owner fields
+    |                            ^^^^^^
+
+[69 of 70] Compiling Proto.TH.QQ      ( src/Proto/TH/QQ.hs, nothing ) [Flags changed]
+src/Proto/TH/QQ.hs:29:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.IDL.AST’ is redundant
+      except perhaps to import instances from ‘Proto.IDL.AST’
+    To import instances alone, use: import Proto.IDL.AST()
+   |
+29 | import Proto.IDL.AST (stripSpans)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[70 of 70] Compiling Proto.TextFormat ( src/Proto/TextFormat.hs, nothing ) [Flags changed]
+Haddock coverage:
+Warning: 'Span' is ambiguous. It is defined
+    * at src/Proto/IDL/AST/Span.hs:66:16
+    * at src/Proto/IDL/AST/Span.hs:66:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST/Span.hs:66:1
+ 100% ( 11 / 11) in 'Proto.IDL.AST.Span'
+Warning: 'Span' is ambiguous. It is defined
+    * at src/Proto/IDL/AST/Span.hs:66:16
+    * at src/Proto/IDL/AST/Span.hs:66:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST/Span.hs:66:1
+ 100% ( 80 / 80) in 'Proto.IDL.AST'
+ 100% ( 21 / 21) in 'Proto.IDL.Annotations'
+ 100% ( 41 / 41) in 'Proto.IDL.Inspect'
+Warning: 'CompatError' is ambiguous. It is defined
+    * at src/Proto/Compat.hs:97:20
+    * at src/Proto/Compat.hs:97:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Compat.hs:97:1
+ 100% ( 22 / 22) in 'Proto.Compat'
+ 100% ( 30 / 30) in 'Proto.IDL.Options'
+ 100% ( 12 / 12) in 'Proto.IDL.Options.Custom'
+Warning: 'CodeGenHooks' is ambiguous. It is defined
+    * at src/Proto/CodeGen/Hooks.hs:266:21
+    * at src/Proto/CodeGen/Hooks.hs:266:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/CodeGen/Hooks.hs:266:1
+Warning: 'THHooks' is ambiguous. It is defined
+    * at src/Proto/CodeGen/Hooks.hs:317:16
+    * at src/Proto/CodeGen/Hooks.hs:317:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/CodeGen/Hooks.hs:317:1
+Warning: 'genHooks' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'loTHHooks' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'MessageDef' is ambiguous. It is defined
+    * at src/Proto/IDL/AST.hs:308:22
+    * at src/Proto/IDL/AST.hs:137:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST.hs:137:1
+ 100% ( 35 / 35) in 'Proto.CodeGen.Hooks'
+ 100% (  3 /  3) in 'Proto.IDL.Parser.Error'
+ 100% ( 30 / 30) in 'Proto.IDL.Parser.Lexer'
+ 100% (  7 /  7) in 'Proto.IDL.Parser'
+Warning: 'Paths_wireform_proto' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 12 / 12) in 'Proto.IDL.Parser.Resolver'
+ 100% ( 15 / 15) in 'Proto.IDL.Print'
+ 100% (  7 /  7) in 'Proto.Internal.CodeGen.Combinators'
+  42% (  3 /  7) in 'Proto.Internal.GrowList'
+  Missing documentation for:
+    GrowList (src/Proto/Internal/GrowList.hs:22)
+    emptyGrowList (src/Proto/Internal/GrowList.hs:29)
+    snocGrowList (src/Proto/Internal/GrowList.hs:34)
+    growListLength (src/Proto/Internal/GrowList.hs:39)
+Warning: 'ToJSON' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'BytesRep' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'StringRep' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 51 / 51) in 'Proto.Internal.JSON'
+ 100% ( 12 / 12) in 'Proto.Internal.Wire'
+Warning: 'UMaybe' is ambiguous. It is defined
+    * at src/Proto/Internal/Wire/Decode.hs:462:17
+    * at src/Proto/Internal/Wire/Decode.hs:462:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Internal/Wire/Decode.hs:462:1
+Warning: 'decodeUtf8'' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'Tag' is ambiguous. It is defined
+    * at src/Proto/Internal/Wire.hs:61:12
+    * at src/Proto/Internal/Wire.hs:61:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Internal/Wire.hs:61:1
+Warning: 'decodeTextFast' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 43 / 43) in 'Proto.Internal.Wire.Decode'
+ 100% ( 39 / 39) in 'Proto.Internal.Wire.Encode'
+Warning: 'SizedBuilder' is ambiguous. It is defined
+    * at src/Proto/Internal/SizedBuilder.hs:40:21
+    * at src/Proto/Internal/SizedBuilder.hs:40:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Internal/SizedBuilder.hs:40:1
+ 100% ( 14 / 14) in 'Proto.Internal.SizedBuilder'
+  74% ( 26 / 35) in 'Proto.Internal.Encode.Archetype'
+  Missing documentation for:
+    archBoolSize (src/Proto/Internal/Encode/Archetype.hs:200)
+    archFixed32Size (src/Proto/Internal/Encode/Archetype.hs:205)
+    archFixed64Size (src/Proto/Internal/Encode/Archetype.hs:210)
+    sbArchBool (src/Proto/Internal/Encode/Archetype.hs:234)
+    sbArchFixed32 (src/Proto/Internal/Encode/Archetype.hs:240)
+    sbArchFixed64 (src/Proto/Internal/Encode/Archetype.hs:246)
+    sbArchFloat (src/Proto/Internal/Encode/Archetype.hs:252)
+    sbArchDouble (src/Proto/Internal/Encode/Archetype.hs:258)
+    sbArchBytes (src/Proto/Internal/Encode/Archetype.hs:280)
+Warning: 'Builder' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 65 / 65) in 'Proto.Encode'
+Warning: 'Decoder' is ambiguous. It is defined
+    * at src/Proto/Internal/Wire/Decode.hs:133:21
+    * at src/Proto/Internal/Wire/Decode.hs:133:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Internal/Wire/Decode.hs:133:1
+Warning: 'LazyMessage' is ambiguous. It is defined
+    * at src/Proto/Decode.hs:537:22
+    * at src/Proto/Decode.hs:537:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Decode.hs:537:1
+ 100% ( 70 / 70) in 'Proto.Decode'
+Warning: 'FieldOptions' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:614:21
+    * at src/Proto/Google/Protobuf/Descriptor.hs:614:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:614:1
+Warning: 'MessageOptions' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:576:23
+    * at src/Proto/Google/Protobuf/Descriptor.hs:576:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:576:1
+Warning: 'FileDescriptorSet' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:47:26
+    * at src/Proto/Google/Protobuf/Descriptor.hs:47:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:47:1
+Warning: 'FieldDescriptorProto' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:268:29
+    * at src/Proto/Google/Protobuf/Descriptor.hs:268:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:268:1
+   5% (  3 / 57) in 'Proto.Google.Protobuf.Descriptor'
+  Missing documentation for:
+    FileDescriptorSet (src/Proto/Google/Protobuf/Descriptor.hs:47)
+    defaultFileDescriptorSet (src/Proto/Google/Protobuf/Descriptor.hs:55)
+    FileDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:77)
+    defaultFileDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:95)
+    DescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:138)
+    defaultDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:155)
+    DescriptorProtoExtensionRange (src/Proto/Google/Protobuf/Descriptor.hs:192)
+    defaultDescriptorProtoExtensionRange (src/Proto/Google/Protobuf/Descriptor.hs:202)
+    DescriptorProtoReservedRange (src/Proto/Google/Protobuf/Descriptor.hs:222)
+    defaultDescriptorProtoReservedRange (src/Proto/Google/Protobuf/Descriptor.hs:231)
+    FieldDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:268)
+    defaultFieldDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:286)
+    OneofDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:329)
+    defaultOneofDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:338)
+    EnumDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:360)
+    defaultEnumDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:372)
+    EnumDescriptorProtoEnumReservedRange (src/Proto/Google/Protobuf/Descriptor.hs:398)
+    defaultEnumDescriptorProtoEnumReservedRange (src/Proto/Google/Protobuf/Descriptor.hs:407)
+    EnumValueDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:425)
+    defaultEnumValueDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:435)
+    ServiceDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:461)
+    defaultServiceDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:471)
+    MethodDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:493)
+    defaultMethodDescriptorProto (src/Proto/Google/Protobuf/Descriptor.hs:506)
+    FileOptions (src/Proto/Google/Protobuf/Descriptor.hs:541)
+    defaultFileOptions (src/Proto/Google/Protobuf/Descriptor.hs:552)
+    MessageOptions (src/Proto/Google/Protobuf/Descriptor.hs:576)
+    defaultMessageOptions (src/Proto/Google/Protobuf/Descriptor.hs:588)
+    FieldOptions (src/Proto/Google/Protobuf/Descriptor.hs:614)
+    defaultFieldOptions (src/Proto/Google/Protobuf/Descriptor.hs:626)
+    OneofOptions (src/Proto/Google/Protobuf/Descriptor.hs:652)
+    defaultOneofOptions (src/Proto/Google/Protobuf/Descriptor.hs:660)
+    EnumOptions (src/Proto/Google/Protobuf/Descriptor.hs:678)
+    defaultEnumOptions (src/Proto/Google/Protobuf/Descriptor.hs:688)
+    EnumValueOptions (src/Proto/Google/Protobuf/Descriptor.hs:710)
+    defaultEnumValueOptions (src/Proto/Google/Protobuf/Descriptor.hs:719)
+    ServiceOptions (src/Proto/Google/Protobuf/Descriptor.hs:739)
+    defaultServiceOptions (src/Proto/Google/Protobuf/Descriptor.hs:748)
+    MethodOptions (src/Proto/Google/Protobuf/Descriptor.hs:768)
+    defaultMethodOptions (src/Proto/Google/Protobuf/Descriptor.hs:778)
+    ExtensionRangeOptions (src/Proto/Google/Protobuf/Descriptor.hs:800)
+    defaultExtensionRangeOptions (src/Proto/Google/Protobuf/Descriptor.hs:808)
+    UninterpretedOption (src/Proto/Google/Protobuf/Descriptor.hs:830)
+    defaultUninterpretedOption (src/Proto/Google/Protobuf/Descriptor.hs:844)
+    UninterpretedOptionNamePart (src/Proto/Google/Protobuf/Descriptor.hs:874)
+    defaultUninterpretedOptionNamePart (src/Proto/Google/Protobuf/Descriptor.hs:883)
+    SourceCodeInfo (src/Proto/Google/Protobuf/Descriptor.hs:910)
+    defaultSourceCodeInfo (src/Proto/Google/Protobuf/Descriptor.hs:917)
+    SourceCodeInfoLocation (src/Proto/Google/Protobuf/Descriptor.hs:932)
+    defaultSourceCodeInfoLocation (src/Proto/Google/Protobuf/Descriptor.hs:942)
+    encStr (src/Proto/Google/Protobuf/Descriptor.hs:969)
+    encBytes (src/Proto/Google/Protobuf/Descriptor.hs:973)
+    encI32 (src/Proto/Google/Protobuf/Descriptor.hs:977)
+    encMsg (src/Proto/Google/Protobuf/Descriptor.hs:981)
+Warning: 'ProtoFile' is ambiguous. It is defined
+    * at src/Proto/IDL/AST.hs:185:21
+    * at src/Proto/IDL/AST.hs:125:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST.hs:125:1
+Warning: 'FileDescriptorProto' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:77:28
+    * at src/Proto/Google/Protobuf/Descriptor.hs:77:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:77:1
+Warning: 'DescriptorProto' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:138:24
+    * at src/Proto/Google/Protobuf/Descriptor.hs:138:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:138:1
+Warning: 'MessageDef' is ambiguous. It is defined
+    * at src/Proto/IDL/AST.hs:308:22
+    * at src/Proto/IDL/AST.hs:137:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST.hs:137:1
+Warning: 'EnumDescriptorProto' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:360:28
+    * at src/Proto/Google/Protobuf/Descriptor.hs:360:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:360:1
+Warning: 'EnumDef' is ambiguous. It is defined
+    * at src/Proto/IDL/AST.hs:571:19
+    * at src/Proto/IDL/AST.hs:161:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST.hs:161:1
+Warning: 'FieldDescriptorProto' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:268:29
+    * at src/Proto/Google/Protobuf/Descriptor.hs:268:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:268:1
+Warning: 'FieldDef' is ambiguous. It is defined
+    * at src/Proto/IDL/AST.hs:370:20
+    * at src/Proto/IDL/AST.hs:145:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST.hs:145:1
+Warning: 'ServiceDescriptorProto' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Descriptor.hs:461:31
+    * at src/Proto/Google/Protobuf/Descriptor.hs:461:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Descriptor.hs:461:1
+Warning: 'ServiceDef' is ambiguous. It is defined
+    * at src/Proto/IDL/AST.hs:625:22
+    * at src/Proto/IDL/AST.hs:169:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST.hs:169:1
+ 100% ( 12 / 12) in 'Proto.IDL.Descriptor'
+Warning: 'GenerateOpts' is ambiguous. It is defined
+    * at src/Proto/CodeGen.hs:172:21
+    * at src/Proto/CodeGen.hs:172:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/CodeGen.hs:172:1
+Warning: 'JsonOverride' is ambiguous. It is defined
+    * at src/Proto/CodeGen.hs:200:21
+    * at src/Proto/CodeGen.hs:200:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/CodeGen.hs:200:1
+Warning: 'CodeGenHooks' is ambiguous. It is defined
+    * at src/Proto/CodeGen/Hooks.hs:266:21
+    * at src/Proto/CodeGen/Hooks.hs:266:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/CodeGen/Hooks.hs:266:1
+Warning: 'ByteString' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'IsMessage' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'MessageEncode' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'MessageDecode' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'ProtoMessage' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'Typeable' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'setExtension' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'clearExtension' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'ExtensionType' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+  83% ( 26 / 31) in 'Proto.CodeGen'
+  Missing documentation for:
+    hsModuleName (src/Proto/CodeGen.hs:2838)
+    snakeToCamel (src/Proto/CodeGen.hs:2858)
+    snakeToPascal (src/Proto/CodeGen.hs:2892)
+    lowerFirst (src/Proto/CodeGen.hs:2846)
+    escapeReserved (src/Proto/CodeGen.hs:2898)
+  18% (  2 / 11) in 'Proto.CodeGen.Types'
+  Missing documentation for:
+    hsFieldName (src/Proto/CodeGen/Types.hs:29)
+    hsEnumCon (src/Proto/CodeGen/Types.hs:33)
+    hsModuleName (src/Proto/CodeGen.hs:2838)
+    hsScopedTypeName (src/Proto/CodeGen/Types.hs:37)
+    hsScopedFieldName (src/Proto/CodeGen/Types.hs:41)
+    hsScopedEnumCon (src/Proto/CodeGen/Types.hs:45)
+    genTypeDecls (src/Proto/CodeGen/Types.hs:52)
+    genEnumDecl (src/Proto/CodeGen/Types.hs:56)
+    genOneofDecl (src/Proto/CodeGen/Types.hs:60)
+Warning: 'buildMessage' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'messageSize' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'messageDecoder' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'CodeGeneratorRequest' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Compiler/Plugin.hs:36:29
+    * at src/Proto/Google/Protobuf/Compiler/Plugin.hs:36:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Compiler/Plugin.hs:36:1
+Warning: 'CodeGeneratorResponse' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Compiler/Plugin.hs:64:30
+    * at src/Proto/Google/Protobuf/Compiler/Plugin.hs:64:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Compiler/Plugin.hs:64:1
+  45% (  5 / 11) in 'Proto.Google.Protobuf.Compiler.Plugin'
+  Missing documentation for:
+    CodeGeneratorRequest (src/Proto/Google/Protobuf/Compiler/Plugin.hs:36)
+    defaultCodeGeneratorRequest (src/Proto/Google/Protobuf/Compiler/Plugin.hs:44)
+    CodeGeneratorResponse (src/Proto/Google/Protobuf/Compiler/Plugin.hs:64)
+    defaultCodeGeneratorResponse (src/Proto/Google/Protobuf/Compiler/Plugin.hs:72)
+    CodeGeneratorResponseFile (src/Proto/Google/Protobuf/Compiler/Plugin.hs:93)
+    defaultCodeGeneratorResponseFile (src/Proto/Google/Protobuf/Compiler/Plugin.hs:100)
+Warning: 'Extension' is ambiguous. It is defined
+    * at src/Proto/Extension.hs:88:24
+    * at src/Proto/Extension.hs:88:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Extension.hs:88:1
+ 100% ( 21 / 21) in 'Proto.Extension'
+Warning: 'ExtensionRegistry' is ambiguous. It is defined
+    * at src/Proto/Internal/JSON/Extension.hs:97:29
+    * at src/Proto/Internal/JSON/Extension.hs:97:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Internal/JSON/Extension.hs:97:1
+Warning: 'loadProto' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 13 / 13) in 'Proto.Internal.JSON.Extension'
+ 100% ( 13 / 13) in 'Proto.Decode.Stream'
+Warning: 'ConformanceRequest' is ambiguous. It is defined
+    * at src/Proto/Conformance.hs:46:27
+    * at src/Proto/Conformance.hs:46:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Conformance.hs:46:1
+Warning: 'ConformanceResponse' is ambiguous. It is defined
+    * at src/Proto/Conformance.hs:83:31
+    * at src/Proto/Conformance.hs:83:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Conformance.hs:83:1
+Warning: 'SchemaEnv' is ambiguous. It is defined
+    * at src/Proto/JSONSchema.hs:94:21
+    * at src/Proto/JSONSchema.hs:94:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/JSONSchema.hs:94:1
+Warning: 'SchemaOptions' is ambiguous. It is defined
+    * at src/Proto/JSONSchema.hs:248:22
+    * at src/Proto/JSONSchema.hs:248:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/JSONSchema.hs:248:1
+Warning: 'FieldConstraints'' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 25 / 25) in 'Proto.JSONSchema'
+Warning: 'StringAdapter' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:260:22
+    * at src/Proto/Repr.hs:260:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:260:1
+Warning: 'BytesAdapter' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:288:21
+    * at src/Proto/Repr.hs:288:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:288:1
+Warning: 'RepeatedAdapter' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:311:24
+    * at src/Proto/Repr.hs:311:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:311:1
+Warning: 'MapAdapter' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:332:19
+    * at src/Proto/Repr.hs:332:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:332:1
+Warning: 'RepConfig' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:573:18
+    * at src/Proto/Repr.hs:573:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:573:1
+Warning: 'AdapterRegistry' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:645:24
+    * at src/Proto/Repr.hs:645:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:645:1
+Warning: 'Unbox' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'FieldRep' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:553:17
+    * at src/Proto/Repr.hs:553:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:553:1
+  64% ( 67 /104) in 'Proto.Repr'
+  Missing documentation for:
+    encodeStrictTextFN (src/Proto/Repr.hs:824)
+    encodeLazyTextFN (src/Proto/Repr.hs:830)
+    encodeShortTextFN (src/Proto/Repr.hs:837)
+    encodeHsStringFN (src/Proto/Repr.hs:844)
+    encodeStrictBytesFN (src/Proto/Repr.hs:849)
+    encodeLazyBytesFN (src/Proto/Repr.hs:855)
+    encodeShortBytesFN (src/Proto/Repr.hs:860)
+    sizeStrictText (src/Proto/Repr.hs:867)
+    sizeLazyText (src/Proto/Repr.hs:875)
+    sizeShortText (src/Proto/Repr.hs:883)
+    sizeHsString (src/Proto/Repr.hs:890)
+    sizeStrictBytes (src/Proto/Repr.hs:895)
+    sizeLazyBytes (src/Proto/Repr.hs:902)
+    sizeShortBytes (src/Proto/Repr.hs:907)
+    emptyVector (src/Proto/Repr.hs:1029)
+    emptyList (src/Proto/Repr.hs:1033)
+    emptySeq (src/Proto/Repr.hs:1037)
+    snocVector (src/Proto/Repr.hs:1041)
+    snocList (src/Proto/Repr.hs:1046)
+    snocSeq (src/Proto/Repr.hs:1051)
+    nullVector (src/Proto/Repr.hs:1058)
+    nullList (src/Proto/Repr.hs:1062)
+    nullSeq (src/Proto/Repr.hs:1067)
+    emptyOrdMap (src/Proto/Repr.hs:1091)
+    emptyHashMap (src/Proto/Repr.hs:1095)
+    insertOrdMap (src/Proto/Repr.hs:1099)
+    insertHashMap (src/Proto/Repr.hs:1104)
+    nullOrdMap (src/Proto/Repr.hs:1109)
+    nullHashMap (src/Proto/Repr.hs:1113)
+    foldOrdMap (src/Proto/Repr.hs:1117)
+    foldHashMap (src/Proto/Repr.hs:1122)
+    sizeOrdMap (src/Proto/Repr.hs:1127)
+    sizeHashMap (src/Proto/Repr.hs:1131)
+    emptyStrictText (src/Proto/Repr.hs:1073)
+    emptyLazyText (src/Proto/Repr.hs:1077)
+    emptyShortBytes (src/Proto/Repr.hs:1081)
+    emptyHsString (src/Proto/Repr.hs:1085)
+ 100% ( 22 / 22) in 'Proto.Schema'
+Warning: 'TypeRegistry' is ambiguous. It is defined
+    * at src/Proto/Registry.hs:135:21
+    * at src/Proto/Registry.hs:135:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Registry.hs:135:1
+Warning: 'register' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'standardWktRegistry' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'Any' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 22 / 22) in 'Proto.Registry'
+ 100% ( 15 / 15) in 'Proto.Lens'
+Warning: 'ProtoField' is ambiguous. It is defined
+    * at src/Proto/Internal/Derive.hs:264:19
+    * at src/Proto/Internal/Derive.hs:264:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Internal/Derive.hs:264:1
+Warning: 'NoFieldSelectors' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'RepeatedAdapter' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:311:24
+    * at src/Proto/Repr.hs:311:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:311:1
+Warning: 'OneofVariant' is ambiguous. It is defined
+    * at src/Proto/Internal/Derive.hs:167:21
+    * at src/Proto/Internal/Derive.hs:167:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Internal/Derive.hs:167:1
+Warning: 'MessageMeta' is ambiguous. It is defined
+    * at src/Proto/Internal/Derive.hs:320:20
+    * at src/Proto/Internal/Derive.hs:320:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Internal/Derive.hs:320:1
+Warning: 'IsMessage' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'MessageEncode' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'MessageDecode' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'ProtoMessage' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'Typeable' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'snoc' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'snocFn' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'allPairs' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+  10% (  2 / 20) in 'Proto.Google.Protobuf.Wrappers'
+  Missing documentation for:
+    DoubleValue (src/Proto/Google/Protobuf/Wrappers.hs:106)
+    defaultDoubleValue (src/Proto/Google/Protobuf/Wrappers.hs:115)
+    FloatValue (src/Proto/Google/Protobuf/Wrappers.hs:214)
+    defaultFloatValue (src/Proto/Google/Protobuf/Wrappers.hs:223)
+    Int64Value (src/Proto/Google/Protobuf/Wrappers.hs:322)
+    defaultInt64Value (src/Proto/Google/Protobuf/Wrappers.hs:331)
+    UInt64Value (src/Proto/Google/Protobuf/Wrappers.hs:430)
+    defaultUInt64Value (src/Proto/Google/Protobuf/Wrappers.hs:439)
+    Int32Value (src/Proto/Google/Protobuf/Wrappers.hs:538)
+    defaultInt32Value (src/Proto/Google/Protobuf/Wrappers.hs:547)
+    UInt32Value (src/Proto/Google/Protobuf/Wrappers.hs:646)
+    defaultUInt32Value (src/Proto/Google/Protobuf/Wrappers.hs:655)
+    BoolValue (src/Proto/Google/Protobuf/Wrappers.hs:754)
+    defaultBoolValue (src/Proto/Google/Protobuf/Wrappers.hs:763)
+    StringValue (src/Proto/Google/Protobuf/Wrappers.hs:862)
+    defaultStringValue (src/Proto/Google/Protobuf/Wrappers.hs:871)
+    BytesValue (src/Proto/Google/Protobuf/Wrappers.hs:970)
+    defaultBytesValue (src/Proto/Google/Protobuf/Wrappers.hs:979)
+  21% ( 10 / 46) in 'Proto.Google.Protobuf.Wrappers.Util'
+  Missing documentation for:
+    toDoubleValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:76)
+    fromDoubleValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:80)
+    maybeToDoubleValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:84)
+    doubleValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:88)
+    toFloatValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:94)
+    fromFloatValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:98)
+    maybeToFloatValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:102)
+    floatValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:106)
+    toInt64Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:112)
+    fromInt64Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:116)
+    maybeToInt64Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:120)
+    int64ValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:124)
+    toUInt64Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:130)
+    fromUInt64Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:134)
+    maybeToUInt64Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:138)
+    uInt64ValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:142)
+    toInt32Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:148)
+    fromInt32Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:152)
+    maybeToInt32Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:156)
+    int32ValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:160)
+    toUInt32Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:166)
+    fromUInt32Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:170)
+    maybeToUInt32Value (src/Proto/Google/Protobuf/Wrappers/Util.hs:174)
+    uInt32ValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:178)
+    toBoolValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:184)
+    fromBoolValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:188)
+    maybeToBoolValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:192)
+    boolValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:196)
+    toStringValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:202)
+    fromStringValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:206)
+    maybeToStringValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:210)
+    stringValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:214)
+    toBytesValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:220)
+    fromBytesValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:224)
+    maybeToBytesValue (src/Proto/Google/Protobuf/Wrappers/Util.hs:228)
+    bytesValueToMaybe (src/Proto/Google/Protobuf/Wrappers/Util.hs:232)
+  50% (  2 /  4) in 'Proto.Google.Protobuf.Timestamp'
+  Missing documentation for:
+    Timestamp (src/Proto/Google/Protobuf/Timestamp.hs:106)
+    defaultTimestamp (src/Proto/Google/Protobuf/Timestamp.hs:116)
+  16% (  2 / 12) in 'Proto.Google.Protobuf.Struct'
+  Missing documentation for:
+    Struct (src/Proto/Google/Protobuf/Struct.hs:106)
+    defaultStruct (src/Proto/Google/Protobuf/Struct.hs:115)
+    Value (src/Proto/Google/Protobuf/Struct.hs:217)
+    Value'Kind (src/Proto/Google/Protobuf/Struct.hs:225)
+    defaultValue (src/Proto/Google/Protobuf/Struct.hs:254)
+    NullValue (src/Proto/Google/Protobuf/Struct.hs:384)
+    toProtoEnumNullValue (src/Proto/Google/Protobuf/Struct.hs:391)
+    fromProtoEnumNullValue (src/Proto/Google/Protobuf/Struct.hs:395)
+    ListValue (src/Proto/Google/Protobuf/Struct.hs:426)
+    defaultListValue (src/Proto/Google/Protobuf/Struct.hs:435)
+Warning: 'Struct' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Struct.hs:106:15
+    * at src/Proto/Google/Protobuf/Struct.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Struct.hs:106:1
+Warning: 'Value' is ambiguous. It is defined
+    * in ‘Data.Aeson.Types.Internal’
+    * at src/Proto/Google/Protobuf/Struct.hs:217:14
+    * at src/Proto/Google/Protobuf/Struct.hs:217:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Struct.hs:217:1
+ 100% ( 24 / 24) in 'Proto.Google.Protobuf.Struct.Util'
+  50% (  2 /  4) in 'Proto.Google.Protobuf.SourceContext'
+  Missing documentation for:
+    SourceContext (src/Proto/Google/Protobuf/SourceContext.hs:106)
+    defaultSourceContext (src/Proto/Google/Protobuf/SourceContext.hs:115)
+  50% (  2 /  4) in 'Proto.Google.Protobuf.FieldMask'
+  Missing documentation for:
+    FieldMask (src/Proto/Google/Protobuf/FieldMask.hs:106)
+    defaultFieldMask (src/Proto/Google/Protobuf/FieldMask.hs:115)
+Warning: 'FieldMask' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/FieldMask.hs:106:18
+    * at src/Proto/Google/Protobuf/FieldMask.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/FieldMask.hs:106:1
+ 100% ( 20 / 20) in 'Proto.Google.Protobuf.FieldMask.Util'
+  50% (  2 /  4) in 'Proto.Google.Protobuf.Empty'
+  Missing documentation for:
+    Empty (src/Proto/Google/Protobuf/Empty.hs:106)
+    defaultEmpty (src/Proto/Google/Protobuf/Empty.hs:114)
+  50% (  2 /  4) in 'Proto.Google.Protobuf.Duration'
+  Missing documentation for:
+    Duration (src/Proto/Google/Protobuf/Duration.hs:106)
+    defaultDuration (src/Proto/Google/Protobuf/Duration.hs:116)
+Warning: 'Duration' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Duration.hs:106:17
+    * at src/Proto/Google/Protobuf/Duration.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Duration.hs:106:1
+Warning: 'Timestamp' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Timestamp.hs:106:18
+    * at src/Proto/Google/Protobuf/Timestamp.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Timestamp.hs:106:1
+ 100% ( 15 / 15) in 'Proto.Google.Protobuf.Timestamp.Util'
+Warning: 'Duration' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Duration.hs:106:17
+    * at src/Proto/Google/Protobuf/Duration.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Duration.hs:106:1
+ 100% ( 23 / 23) in 'Proto.Google.Protobuf.Duration.Util'
+  50% (  2 /  4) in 'Proto.Google.Protobuf.Any'
+  Missing documentation for:
+    Any (src/Proto/Google/Protobuf/Any.hs:106)
+    defaultAny (src/Proto/Google/Protobuf/Any.hs:116)
+Warning: 'Timestamp' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Timestamp.hs:106:18
+    * at src/Proto/Google/Protobuf/Timestamp.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Timestamp.hs:106:1
+Warning: 'Duration' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Duration.hs:106:17
+    * at src/Proto/Google/Protobuf/Duration.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Duration.hs:106:1
+Warning: 'FieldMask' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/FieldMask.hs:106:18
+    * at src/Proto/Google/Protobuf/FieldMask.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/FieldMask.hs:106:1
+Warning: 'Struct' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Struct.hs:106:15
+    * at src/Proto/Google/Protobuf/Struct.hs:106:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Struct.hs:106:1
+Warning: 'Value' is ambiguous. It is defined
+    * at src/Proto/Google/Protobuf/Struct.hs:217:14
+    * at src/Proto/Google/Protobuf/Struct.hs:217:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Google/Protobuf/Struct.hs:217:1
+Warning: 'AnyCodec' is ambiguous. It is defined
+    * at src/Proto/Registry.hs:117:17
+    * at src/Proto/Registry.hs:117:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Registry.hs:117:1
+  95% ( 44 / 46) in 'Proto.Internal.JSON.WellKnown'
+  Missing documentation for:
+    nullValueFromJSON (src/Proto/Internal/JSON/WellKnown.hs:780)
+    anyFromJSON (src/Proto/Internal/JSON/WellKnown.hs:848)
+Warning: 'TypeRegistry' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+  30% (  3 / 10) in 'Proto.Google.Protobuf.Any.Util'
+  Missing documentation for:
+    packAny (src/Proto/Google/Protobuf/Any/Util.hs:38)
+    packAnyWithPrefix (src/Proto/Google/Protobuf/Any/Util.hs:47)
+    unpackAny (src/Proto/Google/Protobuf/Any/Util.hs:56)
+    isMessageType (src/Proto/Google/Protobuf/Any/Util.hs:62)
+    typeUrlPrefix (src/Proto/Google/Protobuf/Any/Util.hs:30)
+    typeUrlOf (src/Proto/Google/Protobuf/Any/Util.hs:34)
+    typeNameFromUrl (src/Proto/Google/Protobuf/Any/Util.hs:72)
+Warning: 'DynamicMessage' is ambiguous. It is defined
+    * at src/Proto/Dynamic.hs:135:23
+    * at src/Proto/Dynamic.hs:135:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Dynamic.hs:135:1
+Warning: 'FieldParser' is ambiguous. It is defined
+    * at src/Proto/Dynamic.hs:260:20
+    * at src/Proto/Dynamic.hs:260:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Dynamic.hs:260:1
+Warning: 'ParseTable' is ambiguous. It is defined
+    * at src/Proto/Dynamic.hs:279:19
+    * at src/Proto/Dynamic.hs:279:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Dynamic.hs:279:1
+ 100% ( 20 / 20) in 'Proto.Dynamic'
+Warning: 'DecodeIssue' is ambiguous. It is defined
+    * at src/Proto/Decode/Collect.hs:58:20
+    * at src/Proto/Decode/Collect.hs:58:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Decode/Collect.hs:58:1
+ 100% (  4 /  4) in 'Proto.Decode.Collect'
+ 100% ( 11 / 11) in 'Proto'
+Warning: 'ProtoGenConfig' is ambiguous. It is defined
+    * at src/Proto/Setup.hs:98:23
+    * at src/Proto/Setup.hs:98:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Setup.hs:98:1
+ 100% (  6 /  6) in 'Proto.Setup'
+Warning: 'MessageEncode' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'MessageDecode' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'MessageSize' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'mapKey' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'IsMessage' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'messageTypeName' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'ProtoMessage' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'Hashable' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'loadProto' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'TranslatedMessage' is ambiguous. It is defined
+    * at src/Proto/TH/Derive.hs:287:26
+    * at src/Proto/TH/Derive.hs:287:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/TH/Derive.hs:287:1
+Warning: 'TranslatedField' is ambiguous. It is defined
+    * at src/Proto/TH/Derive.hs:189:24
+    * at src/Proto/TH/Derive.hs:189:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/TH/Derive.hs:189:1
+Warning: 'strictBytesAdapter' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'strictTextAdapter' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'Map' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'PFSubmessage' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'PFEnum' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 26 / 26) in 'Proto.TH.Derive'
+Warning: 'loadProto' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'protoMessageName' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'protoPackageName' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'protoFieldDescriptors' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'protoDefaultValue' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'ToJSON' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'protoBytesToJSON' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'protoLazyBytesToJSON' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'protoShortBytesToJSON' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'parseFieldMaybe' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'SBool' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'SString' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'SInt32' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'SBytes' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'FieldSpec' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'NoFieldSelectors' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'parseJSON' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'UnknownField' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'optional' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'fieldRepeated' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'ListRep' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'SeqRep' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'MetaField' is ambiguous. It is defined
+    * at src/Proto/TH/Metadata.hs:119:18
+    * at src/Proto/TH/Metadata.hs:119:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/TH/Metadata.hs:119:1
+Warning: 'unsafeCoerce' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'OneofFieldDuplicate' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% ( 35 / 35) in 'Proto.TH.Metadata'
+Warning: 'LoadOpts' is ambiguous. It is defined
+    * at src/Proto/TH.hs:270:17
+    * at src/Proto/TH.hs:270:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/TH.hs:270:1
+Warning: 'ProtoFile' is ambiguous. It is defined
+    * at src/Proto/IDL/AST.hs:185:21
+    * at src/Proto/IDL/AST.hs:125:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/IDL/AST.hs:125:1
+Warning: 'FieldRep' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:553:17
+    * at src/Proto/Repr.hs:553:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:553:1
+Warning: 'RepConfig' is ambiguous. It is defined
+    * at src/Proto/Repr.hs:573:18
+    * at src/Proto/Repr.hs:573:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Repr.hs:573:1
+Warning: 'PFEnum' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'TestAllTypesProto3'NestedEnum' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'TestAllTypesProto3'NestedEnum'Foo' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'ScopeCtx' is ambiguous. It is defined
+    * at src/Proto/TH.hs:432:17
+    * at src/Proto/TH.hs:432:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/TH.hs:432:1
+Warning: 'EnumName' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'HasExtensions' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'forceLoadProtoExtensionRegistrations' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'Scalar' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'WktShape' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+Warning: 'JsonScalar' is out of scope.
+    If you qualify the identifier, haddock can try to link it anyway.
+ 100% (  8 /  8) in 'Proto.TH'
+ 100% (  2 /  2) in 'Proto.TH.QQ'
+Warning: 'DynamicMessage' is ambiguous. It is defined
+    * at src/Proto/Dynamic.hs:135:23
+    * at src/Proto/Dynamic.hs:135:1
+    You may be able to disambiguate the identifier by qualifying it or
+    by specifying the type/value namespace explicitly.
+    Defaulting to the one defined at src/Proto/Dynamic.hs:135:1
+ 100% ( 10 / 10) in 'Proto.TextFormat'
+Warning: Proto.IDL.AST.Span: could not find link destinations for: 
+	- Proto.IDL.AST.Span.Rep_Span
+	- Proto.IDL.AST.Span.Rep_SrcSpan
+Warning: Proto.IDL.AST: could not find link destinations for: 
+	- Proto.IDL.AST.Span.Rep_Span
+	- Proto.IDL.AST.Span.Rep_SrcSpan
+	- Proto.IDL.AST.Rep_FeatureSet
+	- Proto.IDL.AST.Rep_JsonFormatFeature
+	- Proto.IDL.AST.Rep_MessageEncodingFeature
+	- Proto.IDL.AST.Rep_Utf8ValidationFeature
+	- Proto.IDL.AST.Rep_RepeatedFieldEncodingFeature
+	- Proto.IDL.AST.Rep_EnumTypeFeature
+	- Proto.IDL.AST.Rep_FieldPresenceFeature
+	- Proto.IDL.AST.Rep_ProtoFile'
+	- Proto.IDL.AST.Rep_TopLevel'
+	- Proto.IDL.AST.Rep_MessageElement'
+	- Proto.IDL.AST.Rep_MessageDef'
+	- Proto.IDL.AST.Rep_ExtensionRange
+	- Proto.IDL.AST.Rep_ExtensionRangeBound
+	- Proto.IDL.AST.Rep_FieldDef'
+	- Proto.IDL.AST.Rep_MapField'
+	- Proto.IDL.AST.Rep_OneofDef'
+	- Proto.IDL.AST.Rep_OneofField'
+	- Proto.IDL.AST.Rep_EnumDef'
+	- Proto.IDL.AST.Rep_EnumValue'
+	- Proto.IDL.AST.Rep_ServiceDef'
+	- Proto.IDL.AST.Rep_RpcDef'
+	- Proto.IDL.AST.Rep_OptionDef'
+	- Proto.IDL.AST.Rep_Constant
+	- Proto.IDL.AST.Rep_OptionName
+	- Proto.IDL.AST.Rep_OptionNamePart
+	- Proto.IDL.AST.Rep_StreamQualifier
+	- Proto.IDL.AST.Rep_ReservedDef
+	- Proto.IDL.AST.Rep_ReservedRange
+	- Proto.IDL.AST.Rep_ReservedName
+	- Proto.IDL.AST.Rep_FieldType
+	- Proto.IDL.AST.Rep_ScalarType
+	- Proto.IDL.AST.Rep_FieldLabel
+	- Proto.IDL.AST.Rep_FieldNumber
+	- Proto.IDL.AST.Rep_Comment
+	- Proto.IDL.AST.Rep_ImportDef'
+	- Proto.IDL.AST.Rep_ImportModifier
+	- Proto.IDL.AST.Rep_Syntax
+	- Proto.IDL.AST.Rep_Edition
+Warning: Proto.Internal.GrowList: could not find link destinations for: 
+	- Data.Vector.Vector
+	- Data.Vector.Unboxed.Base.Unbox
+	- Data.Vector.Unboxed.Base.Vector
+Warning: Proto.Internal.JSON: could not find link destinations for: 
+	- Proto.Internal.JSON.boundedFromSci
+Warning: Proto.Internal.Wire.Encode: could not find link destinations for: 
+	- Proto.Internal.Wire.Encode.byteArraySliceBuilder
+Warning: Proto.Internal.SizedBuilder: could not find link destinations for: 
+	- Proto.Internal.SizedBuilder.sbSize
+Warning: Proto.Internal.Encode.Archetype: could not find link destinations for: 
+	- Data.Vector.Unboxed.Base.Vector
+Warning: Proto.Encode: could not find link destinations for: 
+	- Data.Vector.Unboxed.Base.Vector
+Warning: Proto.Decode: could not find link destinations for: 
+	- Data.Vector.Unboxed.Base.Vector
+Warning: Proto.Google.Protobuf.Descriptor: could not find link destinations for: 
+	- Data.Vector.Vector
+	- Proto.Google.Protobuf.Descriptor.Rep_DescriptorProtoExtensionRange
+	- Proto.Google.Protobuf.Descriptor.Rep_DescriptorProtoReservedRange
+	- Proto.Google.Protobuf.Descriptor.Rep_DescriptorProto
+	- Proto.Google.Protobuf.Descriptor.Rep_EnumDescriptorProtoEnumReservedRange
+	- Proto.Google.Protobuf.Descriptor.Rep_EnumDescriptorProto
+	- Proto.Google.Protobuf.Descriptor.Rep_EnumOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_EnumValueDescriptorProto
+	- Proto.Google.Protobuf.Descriptor.Rep_EnumValueOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_ExtensionRangeOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_FieldDescriptorLabel
+	- Proto.Google.Protobuf.Descriptor.Rep_FieldDescriptorProto
+	- Proto.Google.Protobuf.Descriptor.Rep_FieldDescriptorType
+	- Proto.Google.Protobuf.Descriptor.Rep_FieldOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_FileDescriptorProto
+	- Proto.Google.Protobuf.Descriptor.Rep_FileDescriptorSet
+	- Proto.Google.Protobuf.Descriptor.Rep_FileOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_MessageOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_MethodDescriptorProto
+	- Proto.Google.Protobuf.Descriptor.Rep_MethodOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_OneofDescriptorProto
+	- Proto.Google.Protobuf.Descriptor.Rep_OneofOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_ServiceDescriptorProto
+	- Proto.Google.Protobuf.Descriptor.Rep_ServiceOptions
+	- Proto.Google.Protobuf.Descriptor.Rep_SourceCodeInfoLocation
+	- Proto.Google.Protobuf.Descriptor.Rep_SourceCodeInfo
+	- Proto.Google.Protobuf.Descriptor.Rep_UninterpretedOptionNamePart
+	- Proto.Google.Protobuf.Descriptor.Rep_UninterpretedOption
+Warning: Proto.Google.Protobuf.Compiler.Plugin: could not find link destinations for: 
+	- Data.Vector.Vector
+	- Proto.Google.Protobuf.Compiler.Plugin.Rep_CodeGeneratorRequest
+	- Proto.Google.Protobuf.Compiler.Plugin.Rep_CodeGeneratorResponseFile
+	- Proto.Google.Protobuf.Compiler.Plugin.Rep_CodeGeneratorResponse
+Warning: Proto.Repr: could not find link destinations for: 
+	- Data.Vector.Vector
+Warning: Proto.Google.Protobuf.Wrappers: could not find link destinations for: 
+	- Proto.Google.Protobuf.Wrappers.Rep_BytesValue
+	- Proto.Google.Protobuf.Wrappers.Rep_StringValue
+	- Proto.Google.Protobuf.Wrappers.Rep_BoolValue
+	- Proto.Google.Protobuf.Wrappers.Rep_UInt32Value
+	- Proto.Google.Protobuf.Wrappers.Rep_Int32Value
+	- Proto.Google.Protobuf.Wrappers.Rep_UInt64Value
+	- Proto.Google.Protobuf.Wrappers.Rep_Int64Value
+	- Proto.Google.Protobuf.Wrappers.Rep_FloatValue
+	- Proto.Google.Protobuf.Wrappers.Rep_DoubleValue
+Warning: Proto.Google.Protobuf.Timestamp: could not find link destinations for: 
+	- Proto.Google.Protobuf.Timestamp.Rep_Timestamp
+Warning: Proto.Google.Protobuf.Struct: could not find link destinations for: 
+	- Data.Vector.Vector
+	- Proto.Google.Protobuf.Struct.Rep_ListValue
+	- Proto.Google.Protobuf.Struct.Rep_Value
+	- Proto.Google.Protobuf.Struct.Rep_Value'Kind
+	- Proto.Google.Protobuf.Struct.Rep_Struct
+	- Proto.Google.Protobuf.Struct.Rep_NullValue
+Warning: Proto.Google.Protobuf.SourceContext: could not find link destinations for: 
+	- Proto.Google.Protobuf.SourceContext.Rep_SourceContext
+Warning: Proto.Google.Protobuf.FieldMask: could not find link destinations for: 
+	- Data.Vector.Vector
+	- Proto.Google.Protobuf.FieldMask.Rep_FieldMask
+Warning: Proto.Google.Protobuf.Empty: could not find link destinations for: 
+	- Proto.Google.Protobuf.Empty.Rep_Empty
+Warning: Proto.Google.Protobuf.Duration: could not find link destinations for: 
+	- Proto.Google.Protobuf.Duration.Rep_Duration
+Warning: Proto.Google.Protobuf.Any: could not find link destinations for: 
+	- Proto.Google.Protobuf.Any.Rep_Any
+Warning: Proto.Dynamic: could not find link destinations for: 
+	- Data.Vector.Vector
+Warning: Proto.Decode.Collect: could not find link destinations for: 
+	- Proto.Decode.Collect.Rep_DecodeIssue
+Warning: Proto.TH.Metadata: could not find link destinations for: 
+	- Data.Vector.Vector
+Documentation created:
+/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/doc/html/wireform-proto-0.3.0.0-docs,
+/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/build/aarch64-osx/ghc-9.10.3/wireform-proto-0.3.0.0/opt/doc/html/wireform-proto-0.3.0.0-docs/wireform-proto.txt
+Documentation tarball created:
+/private/tmp/wireform-proto-release-2026-11-06/archive-check/dist-newstyle/wireform-proto-0.3.0.0-docs.tar.gz

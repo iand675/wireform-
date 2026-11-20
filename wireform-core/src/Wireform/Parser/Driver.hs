@@ -307,14 +307,12 @@ runParserLoop t p k = do
 ------------------------------------------------------------------------
 
 {- | Run a parser against a whole 'ByteString'.
-The hot path is bit-identical to flatparse — no suspension overhead.
+The input already has a fixed end and needs no streaming prompt.
 -}
 parseByteString :: forall e a. Parser Pure e a -> ByteString -> Either (ParseError e) a
 parseByteString p b = unsafeDupablePerformIO $ do
-  -- withForeignPtr keeps the ByteString's backing memory alive
   let !(BSI.BS (ForeignPtr buf# fp) (I# len#)) = b
       !end# = plusAddr# buf# len#
-
   withForeignPtr (ForeignPtr buf# fp) \_ ->
     allocaBytes 24 \cells -> do
       let !endPtr = cells
@@ -323,9 +321,8 @@ parseByteString p b = unsafeDupablePerformIO $ do
       poke (castPtr endPtr :: Ptr (Ptr Word8)) (Ptr end#)
       poke (castPtr anchorPos :: Ptr Word64) 0
       poke (castPtr anchorCur :: Ptr (Ptr Word8)) (Ptr buf#)
-
-      IO \s0 -> case newPromptTag# s0 of
-        (# s1, (tag :: PromptTag# (Step e a)) #) ->
+      IO \s -> case newPromptTag# s of
+        (# s0, tag #) ->
           let env =
                 ParserEnv
                   { peEndPtr = castPtr endPtr
@@ -336,19 +333,8 @@ parseByteString p b = unsafeDupablePerformIO $ do
                   , peBackingFp = fp
                   , peTag = tagToAny tag
                   }
-              body :: State# RealWorld -> (# State# RealWorld, Step e a #)
-              body s = case runParser# p env end# buf# s of
-                (# s', OK# a cur' #) ->
-                  let !pos = fromIntegral (I# (minusAddr# cur' buf#))
-                  in (# s', StepDone pos a #)
-                (# s', Fail# #) -> (# s', StepFail 0 #)
-                (# s', Err# e #) -> (# s', StepErr 0 e #)
-          in case prompt# tag body s1 of
-               (# s2, step #) -> unIO (classifyStep step) s2
-  where
-    classifyStep (StepDone _ a) = pure (Right a)
-    classifyStep (StepFail pos) = pure (Left (ParseFail pos))
-    classifyStep (StepErr pos e) = pure (Left (ParseErr pos e))
-    classifyStep (StepSuspend _ _ r) = resumeEof r >>= classifyStep
-    classifyStep (StepCheckpoint _ r) = resumeEof r >>= classifyStep
-    unIO (IO f) = f
+          in case runParser# p env end# buf# s0 of
+               (# s', OK# a _ #) -> (# s', Right a #)
+               (# s', Fail# #) -> (# s', Left (ParseFail 0) #)
+               (# s', Err# e #) -> (# s', Left (ParseErr 0 e) #)
+{-# NOINLINE parseByteString #-}

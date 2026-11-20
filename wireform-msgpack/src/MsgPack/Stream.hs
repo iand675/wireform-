@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE UnboxedSums #-}
 
 {- | Incremental\/streaming decode for MessagePack values.
 
@@ -12,7 +13,7 @@ module MsgPack.Stream (
   feedMore,
 ) where
 
-import Data.Bits (shiftR, (.&.), (.|.))
+import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
@@ -25,6 +26,7 @@ import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
+import MsgPack.Timestamp (decodeTimestampPayload)
 import MsgPack.Value qualified as MV
 import System.IO.Unsafe (unsafeDupablePerformIO)
 
@@ -63,37 +65,41 @@ tryDecode !accum !new =
            else tryDecode buf more
        else case decodeOneWithLeftover buf of
          Right (val, leftover) -> Done val leftover
-         Left _ -> Partial $ \more ->
+         Left (InvalidTimestamp e) -> Fail e
+         Left NeedMore -> Partial $ \more ->
            if BS.null more
              then Fail "MsgPack.Stream: incomplete MessagePack value"
              else tryDecode buf more
 
 
-decodeOneWithLeftover :: ByteString -> Either String (MV.Value, ByteString)
+data DecodeError = NeedMore | InvalidTimestamp !String
+
+
+decodeOneWithLeftover :: ByteString -> Either DecodeError (MV.Value, ByteString)
 decodeOneWithLeftover bs
-  | BS.null bs = Left "empty input"
+  | BS.null bs = Left NeedMore
   | otherwise = case decodeOneValue bs 0 of
       Left e -> Left e
       Right (val, off) -> Right (val, BS.drop off bs)
 
 
-decodeOneValue :: ByteString -> Int -> Either String (MV.Value, Int)
+decodeOneValue :: ByteString -> Int -> Either DecodeError (MV.Value, Int)
 decodeOneValue !bs !off
-  | off >= BS.length bs = Left "unexpected end of input"
+  | off >= BS.length bs = Left NeedMore
   | otherwise =
       let !b = BS.index bs off
           !off1 = off + 1
       in dispatchDecode bs off1 b
 
 
-dispatchDecode :: ByteString -> Int -> Word8 -> Either String (MV.Value, Int)
+dispatchDecode :: ByteString -> Int -> Word8 -> Either DecodeError (MV.Value, Int)
 dispatchDecode bs off b
   | b <= 0x7f = Right (MV.Word (fromIntegral b), off)
   | b >= 0x80 && b <= 0x8f = decodeMapN bs off (fromIntegral (b .&. 0x0f))
   | b >= 0x90 && b <= 0x9f = decodeArrayN bs off (fromIntegral (b .&. 0x0f))
   | b >= 0xa0 && b <= 0xbf = decodeStr bs off (fromIntegral (b .&. 0x1f))
   | b == 0xc0 = Right (MV.Nil, off)
-  | b == 0xc1 = Left "reserved byte 0xc1"
+  | b == 0xc1 = Left NeedMore
   | b == 0xc2 = Right (MV.Bool False, off)
   | b == 0xc3 = Right (MV.Bool True, off)
   | b == 0xc4 = requireN bs off 1 $ decodeBin bs (off + 1) (fromIntegral (BS.index bs off))
@@ -141,7 +147,7 @@ dispatchDecode bs off b
   | otherwise = Right (MV.Int (fromIntegral (fromIntegral b :: Int8)), off)
 
 
-decodeExtVariant :: ByteString -> Int -> Word8 -> Either String (MV.Value, Int)
+decodeExtVariant :: ByteString -> Int -> Word8 -> Either DecodeError (MV.Value, Int)
 decodeExtVariant bs off variant
   | variant == 0xc7 = requireN bs off 2 $ do
       let !elen = fromIntegral (BS.index bs off)
@@ -170,10 +176,10 @@ decodeExtVariant bs off variant
           else
             let !dat = BS.take elen (BS.drop (off + 5) bs)
             in Right (MV.Ext ty dat, off + 5 + elen)
-  | otherwise = Left "unexpected ext variant"
+  | otherwise = Left NeedMore
 
 
-decodeFixExt :: ByteString -> Int -> Int -> Either String (MV.Value, Int)
+decodeFixExt :: ByteString -> Int -> Int -> Either DecodeError (MV.Value, Int)
 decodeFixExt bs off elen = requireN bs off (1 + elen) $ do
   let !ty = fromIntegral (BS.index bs off) :: Int8
   if ty == -1
@@ -183,42 +189,29 @@ decodeFixExt bs off elen = requireN bs off (1 + elen) $ do
       in Right (MV.Ext ty dat, off + 1 + elen)
 
 
-decodeTimestamp :: Int -> Int -> ByteString -> Either String (MV.Value, Int)
-decodeTimestamp off elen bs = case elen of
-  4 ->
-    requireN bs off 4 $
-      let !secs = readBE32' bs off
-      in Right (MV.Timestamp (fromIntegral secs) 0, off + 4)
-  8 ->
-    requireN bs off 8 $
-      let !w64 = readBE64' bs off
-          !nsAdj = w64 `shiftR` 34
-          !secs = w64 .&. 0x3FFFFFFFF
-      in Right (MV.Timestamp (fromIntegral secs) (fromIntegral nsAdj), off + 8)
-  12 ->
-    requireN bs off 12 $
-      let !ns32 = readBE32' bs off
-          !sec64 = readBE64' bs (off + 4)
-      in Right (MV.Timestamp (fromIntegral sec64 :: Int64) (fromIntegral ns32 :: Word32), off + 12)
-  _ -> Left $ "invalid timestamp ext size: " ++ show elen
+decodeTimestamp :: Int -> Int -> ByteString -> Either DecodeError (MV.Value, Int)
+decodeTimestamp off elen bs =
+  case decodeTimestampPayload bs off elen of
+    (# timestamp | #) -> Right (timestamp, off + elen)
+    (# | e #) -> Left (InvalidTimestamp e)
 
 
-decodeStr :: ByteString -> Int -> Int -> Either String (MV.Value, Int)
+decodeStr :: ByteString -> Int -> Int -> Either DecodeError (MV.Value, Int)
 decodeStr bs off slen =
   requireN bs off slen $
     let !slice = BS.take slen (BS.drop off bs)
     in case TE.decodeUtf8' slice of
-         Left _ -> Left "invalid UTF-8 in string"
+         Left _ -> Left NeedMore
          Right t -> Right (MV.String t, off + slen)
 
 
-decodeBin :: ByteString -> Int -> Int -> Either String (MV.Value, Int)
+decodeBin :: ByteString -> Int -> Int -> Either DecodeError (MV.Value, Int)
 decodeBin bs off blen =
   requireN bs off blen $
     Right (MV.Binary (BS.take blen (BS.drop off bs)), off + blen)
 
 
-decodeArrayN :: ByteString -> Int -> Int -> Either String (MV.Value, Int)
+decodeArrayN :: ByteString -> Int -> Int -> Either DecodeError (MV.Value, Int)
 decodeArrayN bs off0 cnt = go off0 cnt []
   where
     go !off 0 !acc = Right (MV.Array (V.fromList (reverse acc)), off)
@@ -227,7 +220,7 @@ decodeArrayN bs off0 cnt = go off0 cnt []
       go o (n - 1) (v : acc)
 
 
-decodeMapN :: ByteString -> Int -> Int -> Either String (MV.Value, Int)
+decodeMapN :: ByteString -> Int -> Int -> Either DecodeError (MV.Value, Int)
 decodeMapN bs off0 cnt = go off0 cnt []
   where
     go !off 0 !acc = Right (MV.Map (V.fromList (reverse acc)), off)
@@ -237,9 +230,9 @@ decodeMapN bs off0 cnt = go off0 cnt []
       go o2 (n - 1) ((k, v) : acc)
 
 
-requireN :: ByteString -> Int -> Int -> Either String a -> Either String a
+requireN :: ByteString -> Int -> Int -> Either DecodeError a -> Either DecodeError a
 requireN bs off n action
-  | off + n > BS.length bs = Left "unexpected end of input"
+  | off + n > BS.length bs = Left NeedMore
   | otherwise = action
 {-# INLINE requireN #-}
 

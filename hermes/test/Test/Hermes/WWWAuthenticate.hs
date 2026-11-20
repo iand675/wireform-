@@ -23,19 +23,30 @@ module Test.Hermes.WWWAuthenticate (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog as H
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers
+import qualified Network.HTTP.Headers.AuthenticationInfo as Info
+import qualified Network.HTTP.Headers.Authorization as Auth
+import Network.HTTP.Headers.HeaderFieldName (hAuthorization, hWWWAuthenticate)
 import qualified Network.HTTP.Headers.Mason as M
+import qualified Network.HTTP.Headers.OptionalWWWAuthenticate as Optional
 import Network.HTTP.Headers.Parsing.Util (
   RFC8941String,
   Result (..),
+  eof,
   mkRFC8941String,
   runParser,
   unsafeToRFC8941String,
  )
+import qualified Network.HTTP.Headers.ProxyAuthenticate as Proxy
+import qualified Network.HTTP.Headers.ProxyAuthenticationInfo as ProxyInfo
+import qualified Network.HTTP.Headers.ProxyAuthorization as ProxyAuth
 import qualified Network.HTTP.Headers.WWWAuthenticate as W
 import Test.Syd
 import Test.Syd.Hedgehog ()
@@ -131,19 +142,100 @@ challengeGen :: Gen W.AuthChallenge
 challengeGen = do
   s <- tokenBS
   ps <- Gen.list (Range.linear 0 4) paramGen
+  let unique = zipWith (\prefix (name, value) -> (prefix <> name, value)) ["a-", "b-", "c-", "d-"] ps
   pure
     W.AuthChallenge
       { W.challengeScheme = scheme s
       , W.challengeContents =
           if null ps
             then W.ChallengeBare
-            else W.ChallengeParams ps
+            else W.ChallengeParams unique
       }
 
 
 -- ---------------------------------------------------------------------------
 -- Unit tests
 -- ---------------------------------------------------------------------------
+
+unit_credentials :: Spec
+unit_credentials = it "reads whole credentials and permits padding only after a token68 body" $ do
+  let value = Auth.Authorization (Auth.Credentials (Auth.AuthScheme "Example") (Auth.CredentialToken "ab.+_/~=="))
+      headers = headerMapFromList [("Authorization", "\tExample ab.+_/~== \t")]
+      lookupAuth wire = lookupHeader @Auth.Authorization (headerMapFromList [("Authorization", wire)])
+  lookupHeader headers `shouldBe` Right (Just value)
+  lookupRawHeader hAuthorization (setHeader value headers) `shouldBe` Just ("Example ab.+_/~==" :| [])
+  lookupAuth "Example" `shouldBe` Right (Just (Auth.Authorization (Auth.Credentials (Auth.AuthScheme "Example") Auth.CredentialBare)))
+  lookupAuth "Example realm \t= \"a,b\",, nonce=token,"
+    `shouldBe` Right
+      ( Just
+          ( Auth.Authorization
+              ( Auth.Credentials
+                  (Auth.AuthScheme "Example")
+                  (Auth.CredentialParams (paramString "realm" "a,b" :| [paramToken "nonce" "token"]))
+              )
+          )
+      )
+  mapM_ (\wire -> lookupAuth wire `shouldSatisfy` isLeft) ["Example ==", "Example ab==cd", "Example\txyz", "Example name=a, NAME=b"]
+  lookupHeader @Auth.Authorization (headerMapFromList [("Authorization", "Example one"), ("Authorization", "Example two")])
+    `shouldSatisfy` isLeft
+  lookupHeader @ProxyAuth.ProxyAuthorization (headerMapFromList [("Proxy-Authorization", "Example one"), ("Proxy-Authorization", "Example two")])
+    `shouldSatisfy` isLeft
+
+
+unit_token68_octets :: Spec
+unit_token68_octets =
+  it "matches the token68 alphabet for every octet" $
+    mapM_ check [0 .. 255]
+  where
+    check byte = do
+      let allowed =
+            byte >= 65 && byte <= 90
+              || byte >= 97 && byte <= 122
+              || byte >= 48 && byte <= 57
+              || BS.elem byte "-._~+/"
+          readToken wire = case runParser (Auth.token68Parser <* eof) wire of
+            OK result "" -> Just result
+            _ -> Nothing
+          padded = BS.pack [byte, 61, 61]
+      readToken padded `shouldBe` if allowed then Just padded else Nothing
+      readToken (BS.pack [65, 61, byte]) `shouldBe` if byte == 61 then Just "A==" else Nothing
+
+
+unit_repeated_challenge_fields :: Spec
+unit_repeated_challenge_fields = it "joins challenge parameters and schemes across repeated lines" $ do
+  let fields name = headerMapFromList [(name, "Example realm=\"a,b\","), (name, ", nonce=one, Next abc==")]
+      challenges = [W.AuthChallenge (scheme "Example") (W.ChallengeParams [paramString "realm" "a,b", paramToken "nonce" "one"]), W.AuthChallenge (scheme "Next") (W.ChallengeToken68 "abc==")]
+  lookupHeader (fields "WWW-Authenticate") `shouldBe` Right (Just (W.WWWAuthenticate challenges))
+  lookupHeader (fields "Proxy-Authenticate") `shouldBe` Right (Just (Proxy.ProxyAuthenticate challenges))
+  lookupHeader (fields "Optional-WWW-Authenticate") `shouldBe` Right (Just (Optional.OptionalWWWAuthenticate challenges))
+  lookupHeader @W.WWWAuthenticate (headerMapFromList [("WWW-Authenticate", "Example realm=one"), ("WWW-Authenticate", "REALM=two")])
+    `shouldSatisfy` isLeft
+  lookupHeader @W.WWWAuthenticate (headerMapFromList [("WWW-Authenticate", ", ,")])
+    `shouldBe` Right (Just (W.WWWAuthenticate []))
+  lookupHeader @Optional.OptionalWWWAuthenticate (headerMapFromList [("Optional-WWW-Authenticate", ", ,")])
+    `shouldSatisfy` isLeft
+
+
+unit_opaque_auth_params :: Spec
+unit_opaque_auth_params = it "keeps opaque parameter octets in challenge and information fields" $ do
+  let payload = "a, " <> BS.pack [0x80, 0xff] <> "\\"
+      wire = "realm=\"a, " <> BS.pack [0x80, 0xff] <> "\\\\\""
+      opaque = Auth.CredentialParamOpaque payload
+      challenge = W.WWWAuthenticate [W.AuthChallenge (scheme "Example") (W.ChallengeParams [("realm", opaque)])]
+      fields = headerMapFromList [("WWW-Authenticate", "Example " <> wire)]
+      params = [("realm", opaque), paramToken "nonce" "token"]
+  lookupHeader fields `shouldBe` Right (Just challenge)
+  lookupRawHeader hWWWAuthenticate (setHeader challenge fields) `shouldBe` Just (("Example " <> wire) :| [])
+  lookupHeader (headerMapFromList [("Authentication-Info", wire <> ",,"), ("Authentication-Info", "nonce=token")])
+    `shouldBe` Right (Just (Info.AuthenticationInfo params))
+  lookupHeader (headerMapFromList [("Proxy-Authentication-Info", wire <> ",,"), ("Proxy-Authentication-Info", "nonce=token")])
+    `shouldBe` Right (Just (ProxyInfo.ProxyAuthenticationInfo params))
+  Auth.credentialParamBytes opaque `shouldBe` payload
+  let (_, quoted) = paramString "name" "abc"
+      (_, token) = paramToken "name" "abc"
+  quoted `shouldBe` token
+  token `shouldBe` quoted
+
 
 unit_basic :: Spec
 unit_basic = it "Basic realm" $
@@ -161,14 +253,14 @@ unit_multi_challenge =
   it "multi-challenge values" $
     let raw = "Basic realm=\"x\", Bearer realm=\"y\", scope=\"r\""
     in case parseOk raw of
-        Right [b, br] -> do
-          W.challengeScheme b `shouldBe` scheme "Basic"
-          W.challengeScheme br `shouldBe` scheme "Bearer"
-          case W.challengeContents br of
-            W.ChallengeParams ps ->
-              length ps `shouldBe` 2
-            _ -> error "expected ChallengeParams for Bearer"
-        other -> error ("expected exactly two challenges, got: " <> show other)
+         Right [b, br] -> do
+           W.challengeScheme b `shouldBe` scheme "Basic"
+           W.challengeScheme br `shouldBe` scheme "Bearer"
+           case W.challengeContents br of
+             W.ChallengeParams ps ->
+               length ps `shouldBe` 2
+             _ -> error "expected ChallengeParams for Bearer"
+         other -> error ("expected exactly two challenges, got: " <> show other)
 
 
 unit_token68 :: Spec
@@ -187,11 +279,11 @@ unit_digest_qop_list =
           "Digest realm=\"api\", qop=\"auth,auth-int\", nonce=\"abc\", \
           \algorithm=SHA-256, opaque=\"o\""
     in case parseOk raw of
-        Right [ch] -> case W.challengeContents ch of
-          W.ChallengeParams ps ->
-            length ps `shouldBe` 5
-          _ -> error "expected ChallengeParams"
-        other -> error ("expected one challenge, got: " <> show other)
+         Right [ch] -> case W.challengeContents ch of
+           W.ChallengeParams ps ->
+             length ps `shouldBe` 5
+           _ -> error "expected ChallengeParams"
+         other -> error ("expected one challenge, got: " <> show other)
 
 
 unit_empty_list_form :: Spec
@@ -260,16 +352,7 @@ prop_roundtrip = property $ do
     contentsEq (W.ChallengeParams a) (W.ChallengeParams b) =
       length a == length b && all paramEq (zip a b)
     contentsEq _ _ = False
-    paramEq ((k1, v1), (k2, v2)) = k1 == k2 && credEq v1 v2
-    credEq (W.CredentialParamToken a) (W.CredentialParamToken b) = a == b
-    credEq (W.CredentialParamString a) (W.CredentialParamString b) = a == b
-    -- Cross-shape: a token-valued param renders byte-identically
-    -- to the quoted-string form of the same payload; the parser
-    -- can pick either shape on parse. Accept both.
-    credEq (W.CredentialParamToken t) (W.CredentialParamString s) =
-      ST.toShortByteString t == ST.toShortByteString (unsafeToRFC8941String s)
-    credEq (W.CredentialParamString s) (W.CredentialParamToken t) =
-      ST.toShortByteString t == ST.toShortByteString (unsafeToRFC8941String s)
+    paramEq = uncurry (==)
 
 
 -- ---------------------------------------------------------------------------
@@ -281,6 +364,10 @@ tests =
   describe "WWWAuthenticate" $
     sequence_
       [ unit_basic
+      , unit_credentials
+      , unit_token68_octets
+      , unit_repeated_challenge_fields
+      , unit_opaque_auth_params
       , unit_multi_challenge
       , unit_token68
       , unit_digest_qop_list

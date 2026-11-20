@@ -25,7 +25,8 @@ module Network.HTTP.Headers.CrossOriginResourcePolicy (
   renderCrossOriginResourcePolicy,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hCrossOriginResourcePolicy)
 import qualified Network.HTTP.Headers.Mason as M
@@ -49,14 +50,13 @@ instance KnownHeader CrossOriginResourcePolicy where
   type Direction CrossOriginResourcePolicy = 'Response
 
 
-  parseFromHeaders _ headers = case runParser crossOriginResourcePolicyParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Cross-Origin-Resource-Policy header: " <> show rest
-    Fail -> Left "Failed to parse Cross-Origin-Resource-Policy header"
-    Err e -> Left e
+  parseFromHeaders _ ("same-origin" :| []) = Right CorpSameOrigin
+  parseFromHeaders _ ("same-site" :| []) = Right CorpSameSite
+  parseFromHeaders _ ("cross-origin" :| []) = Right CorpCrossOrigin
+  parseFromHeaders _ fields = parseSingleFieldLine "Cross-Origin-Resource-Policy" crossOriginResourcePolicyParser fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderCrossOriginResourcePolicy
+  renderToHeaders _ = resourcePolicyBytes
 
 
   headerName _ = hCrossOriginResourcePolicy
@@ -65,17 +65,21 @@ instance KnownHeader CrossOriginResourcePolicy where
 crossOriginResourcePolicyParser :: ParserT st String CrossOriginResourcePolicy
 crossOriginResourcePolicyParser =
   $( switch
-      [|
-        case _ of
-          "same-origin" -> pure CorpSameOrigin
-          "same-site" -> pure CorpSameSite
-          "cross-origin" -> pure CorpCrossOrigin
-        |]
+       [|
+         case _ of
+           "same-origin" -> pure CorpSameOrigin
+           "same-site" -> pure CorpSameSite
+           "cross-origin" -> pure CorpCrossOrigin
+         |]
    )
 
 
 renderCrossOriginResourcePolicy :: CrossOriginResourcePolicy -> M.Builder
-renderCrossOriginResourcePolicy = \case
+renderCrossOriginResourcePolicy = M.byteString . resourcePolicyBytes
+
+
+resourcePolicyBytes :: CrossOriginResourcePolicy -> ByteString
+resourcePolicyBytes = \case
   CorpSameOrigin -> "same-origin"
   CorpSameSite -> "same-site"
   CorpCrossOrigin -> "cross-origin"

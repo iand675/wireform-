@@ -79,6 +79,7 @@ import Arrow.Column (
   withPrim,
   pattern ColBinary,
   pattern ColBinaryView,
+  takeColumnArray,
   pattern ColBool,
   pattern ColDenseUnion,
   pattern ColDictionary,
@@ -130,7 +131,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64, Int8)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Data.List (sortOn, stripPrefix)
+import Data.List (isSuffixOf, sortOn, stripPrefix)
 import Data.Either (partitionEithers)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
@@ -269,6 +270,8 @@ cases =
     , primPair "time64_ns" (ATime Nanosecond 64) PTime64 [Just 0, Just 1, Nothing, Just 86399999999999] [2]
     , concatMap timeUnitCases [(Second, "s"), (Millisecond, "ms"), (Microsecond, "us"), (Nanosecond, "ns")]
     , primPair "timestamp_us_new_york" (ATimestamp Microsecond (Just "America/New_York")) PTimestamp [Just 0, Just 1700000000000000, Nothing] [5]
+    , decimalPair "decimal32_9_2" (ADecimal32 9 2) (PDecimal32 9 2) fromInteger [Just (-999999999), Just 123, Nothing, Just 0, Just 999999999] [1]
+    , decimalPair "decimal64_18_2" (ADecimal64 18 2) (PDecimal64 18 2) fromInteger [Just (-999999999999999999), Just 123, Nothing, Just 0, Just 999999999999999999] [1]
     , decimalPair "decimal128_18_2" (ADecimal 18 2) (PDecimal128 18 2) decimal128FromInteger [Just 0, Just 123, Nothing, Just (-123), Just 999999999999999999] [1]
     , decimalPair "decimal128_38_10" (ADecimal 38 10) (PDecimal128 38 10) decimal128FromInteger [Just 123456789012345678901234567890, Nothing, Just (-1)] [10000000000]
     , decimalPair "decimal256_76_5" (ADecimal256 76 5) (PDecimal256 76 5) decimal256FromInteger [Just 100000, Nothing, Just (-1234567890123456789012345678901234567890123456789012345)] [1]
@@ -462,22 +465,31 @@ unionCases =
   , sparse "sparse_union" [0, 1] False
   , sparse "sparse_union_nullable" [0, 1] True
   , dense "dense_union_type_codes" [3, 7] True
+  , simple
+      "dense_union_take"
+      (ufield Dense [3, 7] True)
+      (map takeDense [reordered, concat (replicate 512 reordered), [0, 3, 4], []])
   , sparse "sparse_union_type_codes" [5, 2] True
   ]
   where
     kids = [field "i" True (AInt 32 True) [], field "s" True AUtf8 []]
     ufield mode codes nullable = field "x" nullable (AUnion mode (V.fromList codes)) kids
     tids = VS.fromList :: [Int8] -> VS.Vector Int8
+    -- Repeat the selection so the compression variants emit actual frames.
+    reordered = [4, 2, 1, 0, 2, 3]
+    takeDense rows = ok (takeColumnArray (VS.fromList rows) denseValues)
+    denseValues =
+      ok
+        ( mkDenseUnion
+            (tids [0, 1, 0, 0, 1])
+            (VS.fromList [0, 0, 1, 2, 1])
+            (V.fromList [i32m [Just 1, Just 2, Nothing], utf8m [Just "a", Just "b"]])
+        )
     dense n codes nullable =
       simple
         n
         (ufield Dense codes nullable)
-        [ ok
-            ( mkDenseUnion
-                (tids [0, 1, 0, 0, 1])
-                (VS.fromList [0, 0, 1, 2, 1])
-                (V.fromList [i32m [Just 1, Just 2, Nothing], utf8m [Just "a", Just "b"]])
-            )
+        [ denseValues
         , ok (mkDenseUnion (tids [1]) (VS.fromList [0]) (V.fromList [i32m [], utf8m [Just "z"]]))
         ]
     sparse n codes nullable =
@@ -733,6 +745,8 @@ primRows p col = case p of
   PIntervalYearMonth -> go (LInt . toInteger)
   PIntervalDayTime -> go (\(IntervalDayTime d m) -> LList [LInt (toInteger d), LInt (toInteger m)])
   PIntervalMonthDayNano -> go (\(IntervalMonthDayNano m d n) -> LList [LInt (toInteger m), LInt (toInteger d), LInt (toInteger n)])
+  PDecimal32 _ _ -> go (LInt . toInteger)
+  PDecimal64 _ _ -> go (LInt . toInteger)
   PDecimal128 _ _ -> go (LInt . decimal128ToInteger)
   PDecimal256 _ _ -> go (LInt . decimal256ToInteger)
   where
@@ -918,10 +932,10 @@ variantSupported v = case lookup v compressionVariants of
 @.arrow@ unless stream-only). Returns the file names written plus the
 cases whose encoder threw.
 -}
-writeHaskellFiles :: FilePath -> IO ([String], [(String, String)])
-writeHaskellFiles dir = do
+writeHaskellFiles :: Endianness -> FilePath -> IO ([String], [(String, String)])
+writeHaskellFiles endian dir = do
   createDirectoryIfMissing True dir
-  results <- forM cases $ \c -> forM compressionVariants $ \(variant, codec) -> do
+  results <- forM (map (\c -> c {caseSchema = (caseSchema c) {arrowEndianness = endian}}) cases) $ \c -> forM compressionVariants $ \(variant, codec) -> do
     let opts =
           defaultWriteOptions
             { writeBodyCompression = codec
@@ -935,8 +949,12 @@ writeHaskellFiles dir = do
       r <- try (evaluate (force bytes)) :: IO (Either SomeException (Either String ByteString))
       case r of
         Right (Right bs) -> do
-          BS.writeFile (dir </> name) bs
-          pure (Right name)
+          let decode = if ".arrow" `isSuffixOf` name then decodeArrowFile defaultReadOptions else decodeArrowStream defaultReadOptions
+          case decode bs >>= uncurry (compareDecoded c) of
+            Left e -> pure (Left (name, "native writer/reader roundtrip: " ++ e))
+            Right () -> do
+              BS.writeFile (dir </> name) bs
+              pure (Right name)
         Right (Left e) -> pure (Left (name, "wireform-arrow encoder rejected the case: " ++ e))
         Left e -> pure (Left (name, "wireform-arrow encoder threw: " ++ show e))
   let (failures, written) = partitionEithers (concat (concat results))
@@ -954,15 +972,16 @@ runPython python script args = do
 
 
 -- | Direction A: wireform-arrow writes, pyarrow reads.
-directionA :: IORef Tally -> FilePath -> FilePath -> FilePath -> IO ()
-directionA ref python script tmp = do
-  let dir = tmp </> "wireform"
-  (written, encodeFailures) <- writeHaskellFiles dir
+directionA :: Endianness -> IORef Tally -> FilePath -> FilePath -> FilePath -> IO ()
+directionA endian ref python script tmp = do
+  let dir = tmp </> ("wireform-" ++ show endian)
+  (written, encodeFailures) <- writeHaskellFiles endian dir
   forM_ encodeFailures $ \(name, e) -> report ref "A" name (Left e)
   out <- runPython python script ["check", dir]
   case out of
     Left e -> report ref "A" "pyarrow checker" (Left e)
     Right ls -> do
+      forM_ (filter (\line -> take 8 line == "ADAPTER ") ls) putStrLn
       let verdicts =
             Map.fromList
               ( mapMaybe
@@ -1054,14 +1073,14 @@ main = do
   hSetEncoding stdout utf8
   args <- getArgs
   case args of
-    ["--write", dir] -> do
-      (written, failures) <- writeHaskellFiles dir
+    [mode, dir] | mode == "--write" || mode == "--write-big" -> do
+      (written, failures) <- writeHaskellFiles (if mode == "--write-big" then Big else Little) dir
       putStrLn ("wrote " ++ show (length written) ++ " files to " ++ dir)
       forM_ failures $ \(n, e) -> putStrLn ("FAIL " ++ n ++ ": " ++ e)
       if null failures then exitSuccess else exitFailure
     [] -> runSuite
     _ -> do
-      putStrLn "usage: wireform-arrow-pyarrow-interop [--write DIR]"
+      putStrLn "usage: wireform-arrow-pyarrow-interop [--write DIR | --write-big DIR]"
       exitFailure
 
 
@@ -1092,7 +1111,8 @@ runSuite = do
   ref <- newIORef (Tally 0 0 0 [])
   checkCaseNames ref python script
   withSystemTempDirectory "wireform-arrow-interop" $ \tmp -> do
-    directionA ref python script tmp
+    directionA Little ref python script tmp
+    directionA Big ref python script tmp
     directionB ref python script tmp
   t <- readIORef ref
   putStrLn ""

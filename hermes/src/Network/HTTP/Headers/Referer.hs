@@ -2,8 +2,8 @@
 The @Referer@ request header gives the URI of the page from which the request
 was initiated (the misspelling of \"referrer\" is baked into the protocol),
 letting servers see where traffic came from. Browsers may trim or omit it
-under a referrer policy for privacy. Its value is a URI reference, preserved
-verbatim here.
+under a referrer policy for privacy. Its value is a URI reference without a fragment
+or userinfo. The codec preserves its spelling.
 
 @
 Referer = absolute-URI / partial-URI
@@ -19,8 +19,8 @@ module Network.HTTP.Headers.Referer (
   renderReferer,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (referrerReference)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hReferer)
 import qualified Network.HTTP.Headers.Mason as M
@@ -39,13 +39,7 @@ instance KnownHeader Referer where
   type Direction Referer = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser refererParser header of
-      OK referer "" -> Right referer
-      OK _ rest -> Left $ "Unconsumed input after parsing Referer header: " <> show rest
-      Fail -> Left "Failed to parse Referer header"
-      Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Referer" refererParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderReferer
@@ -55,7 +49,7 @@ instance KnownHeader Referer where
 
 
 refererParser :: ParserT st String Referer
-refererParser = Referer <$> takeRestShortText
+refererParser = Referer <$> referrerReference
 
 
 renderReferer :: Referer -> M.Builder

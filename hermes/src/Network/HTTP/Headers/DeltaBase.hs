@@ -25,7 +25,6 @@ module Network.HTTP.Headers.DeltaBase (
   renderDeltaBase,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.ETag (EntityTag, entityTagParser, renderEntityTag)
 import Network.HTTP.Headers.HeaderFieldName (hDeltaBase)
@@ -46,11 +45,7 @@ instance KnownHeader DeltaBase where
   type Direction DeltaBase = 'Response
 
 
-  parseFromHeaders _ headers = case runParser deltaBaseParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Delta-Base header: " <> show rest
-    Fail -> Left "Failed to parse Delta-Base header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Delta-Base" deltaBaseParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderDeltaBase

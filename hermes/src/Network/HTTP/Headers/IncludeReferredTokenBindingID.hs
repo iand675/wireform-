@@ -1,18 +1,5 @@
-{-# LANGUAGE TemplateHaskell #-}
-{-# OPTIONS_GHC -Wno-name-shadowing #-}
-
-{- | The @Include-Referred-Token-Binding-ID@ request header field.
-
-Defined by RFC 8473 (Token Binding over HTTP), §5.3. A client sets this
-field to signal that the Token Binding message in 'Sec-Token-Binding' also
-conveys a /referred/ Token Binding ID for a different (referred) server. The
-value is the boolean-ish literal @true@; this module models it as a structured
-'Bool' so the (otherwise trivial) grammar is captured rather than treated as
-opaque text.
-
-Spec: <https://www.rfc-editor.org/rfc/rfc8473#section-5.3>
-
-See also: "Network.HTTP.Headers.SecTokenBinding", "Network.HTTP.Headers.DPoP", "Network.HTTP.Headers.Authorization".
+{- | RFC 8473 §5.3 @Include-Referred-Token-Binding-ID@ is a response
+signal carried by the case-insensitive literal @true@.
 -}
 module Network.HTTP.Headers.IncludeReferredTokenBindingID (
   IncludeReferredTokenBindingID (..),
@@ -20,14 +7,17 @@ module Network.HTTP.Headers.IncludeReferredTokenBindingID (
   renderIncludeReferredTokenBindingID,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.Bits ((.|.))
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Unsafe as BSU
+import Data.List.NonEmpty (NonEmpty (..))
+import Network.HTTP.Grammar.Parser
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hIncludeReferredTokenBindingID)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
 
 
--- | @Include-Referred-Token-Binding-ID@ value: the boolean-ish flag @true@/@false@.
+-- | A disabled signal emits no field line.
 newtype IncludeReferredTokenBindingID = IncludeReferredTokenBindingID
   {includeReferredTokenBindingID :: Bool}
   deriving stock (Eq, Show)
@@ -35,37 +25,45 @@ newtype IncludeReferredTokenBindingID = IncludeReferredTokenBindingID
 
 instance KnownHeader IncludeReferredTokenBindingID where
   type ParseFailure IncludeReferredTokenBindingID = String
-  type Cardinality IncludeReferredTokenBindingID = 'ZeroOrOne
-  type Direction IncludeReferredTokenBindingID = 'Request
+  type Cardinality IncludeReferredTokenBindingID = 'ZeroOrMore
+  type Direction IncludeReferredTokenBindingID = 'Response
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser includeReferredTokenBindingIDParser header of
-      OK v "" -> Right v
-      OK _ rest -> Left $ "Unconsumed input after parsing Include-Referred-Token-Binding-ID header: " <> show rest
-      Fail -> Left "Failed to parse Include-Referred-Token-Binding-ID header"
-      Err e -> Left e
+  parseFromHeaders _ fields@(wire :| [])
+    | BS.length wire == 4 =
+        if BSU.unsafeIndex wire 0 .|. 32 == 116
+          && BSU.unsafeIndex wire 1 .|. 32 == 114
+          && BSU.unsafeIndex wire 2 .|. 32 == 117
+          && BSU.unsafeIndex wire 3 .|. 32 == 101
+          then Right (IncludeReferredTokenBindingID True)
+          else invalidSignal
+    | otherwise = parseSingleFieldLine "Include-Referred-Token-Binding-ID" includeReferredTokenBindingIDParser fields
+  parseFromHeaders _ _ = Left "Multiple Include-Referred-Token-Binding-ID field lines"
 
 
-  renderToHeaders _ = M.toStrictByteString . renderIncludeReferredTokenBindingID
+  renderToHeaders _ (IncludeReferredTokenBindingID True) = ["true"]
+  renderToHeaders _ (IncludeReferredTokenBindingID False) = []
+
+
+  omitHeaderValue = not . includeReferredTokenBindingID
+  {-# INLINE omitHeaderValue #-}
 
 
   headerName _ = hIncludeReferredTokenBindingID
 
 
+invalidSignal :: Either String a
+invalidSignal = Left "Invalid Include-Referred-Token-Binding-ID signal"
+
+
 includeReferredTokenBindingIDParser :: ParserT st String IncludeReferredTokenBindingID
-includeReferredTokenBindingIDParser =
-  IncludeReferredTokenBindingID
-    <$> $( switch
-            [|
-              case _ of
-                "true" -> pure True
-                "false" -> pure False
-              |]
-         )
+includeReferredTokenBindingIDParser = do
+  wire <- anyWord32be
+  if wire .|. 0x20202020 == 0x74727565
+    then pure (IncludeReferredTokenBindingID True)
+    else failed
 
 
 renderIncludeReferredTokenBindingID :: IncludeReferredTokenBindingID -> M.Builder
-renderIncludeReferredTokenBindingID (IncludeReferredTokenBindingID b) =
-  if b then "true" else "false"
+renderIncludeReferredTokenBindingID (IncludeReferredTokenBindingID enabled) =
+  if enabled then "true" else mempty

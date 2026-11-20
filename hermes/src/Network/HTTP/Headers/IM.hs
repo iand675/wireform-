@@ -1,51 +1,82 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {- |
-@IM@ (Instance-Manipulation) is a response header that lists, in the
-order they were applied, the instance-manipulations — delta encodings
-such as @vcdiff@ or @gdiff@, and/or transfer codings like @gzip@ —
-used to derive the transmitted entity from its base instance. It is
-the response-side counterpart of the client's @A-IM@ preference and
-accompanies a @226 IM Used@ delta-encoded response (RFC 3229).
+@IM@ lists the instance manipulations applied to a response in application
+order. RFC 3229 allows each token to carry an optional named extension
+parameter with an optional value.
 
-== Grammar
+<https://www.rfc-editor.org/rfc/rfc3229.html#section-10.5.2 RFC 3229 §10.5.2>
 
-@
-IM                    = #( instance-manipulation )
-instance-manipulation = \"vcdiff\" / \"diffe\" / \"gzip\" / \"deflate\"
-                      / \"gdiff\" / \"range\" / \"identity\"
-                      / token
-@
-
-A comma list of instance-manipulation tokens (no quality weights,
-unlike 'Network.HTTP.Headers.AIM.AIM'). Tokens are surfaced verbatim
-as 'ST.ShortText' since extension manipulations are permitted.
-
-Spec: <https://www.rfc-editor.org/rfc/rfc3229#section-10.5.4>
-
-See also: "Network.HTTP.Headers.AIM", "Network.HTTP.Headers.DeltaBase", "Network.HTTP.Headers.ContentEncoding".
+See also: "Network.HTTP.Headers.AIM", "Network.HTTP.Headers.DeltaBase".
 -}
 module Network.HTTP.Headers.IM (
-  IM (..),
+  IM (IM, instanceManipulations, IMEntries, instanceManipulationEntries),
+  InstanceManipulation (..),
+  IMParameter (..),
+  IMParameterValue (..),
   iMParser,
   renderIM,
+  imParameterParser,
+  imParameterSeparator,
+  renderIMParameter,
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Short as SBS
+import Data.Maybe (isNothing)
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hIM)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeHttpQuotedBytes, renderSeparated, shortText)
 
 
--- | The full @IM@ header value: the ordered list of manipulations applied.
-newtype IM = IM
-  { instanceManipulations :: [ST.ShortText]
+data InstanceManipulation = InstanceManipulation
+  { manipulationName :: !ST.ShortText
+  , manipulationParameter :: !(Maybe IMParameter)
   }
   deriving stock (Eq, Show)
+
+
+data IMParameter = IMParameter
+  { imParameterName :: !ST.ShortText
+  , imParameterValue :: !(Maybe IMParameterValue)
+  }
+  deriving stock (Eq, Show)
+
+
+data IMParameterValue
+  = IMParameterToken !ST.ShortText
+  | IMParameterQuoted !SBS.ShortByteString
+  deriving stock (Eq, Show)
+
+
+-- | The ordered list of manipulations applied to the response.
+newtype IM = IMEntries {instanceManipulationEntries :: [InstanceManipulation]}
+  deriving stock (Eq)
+
+
+-- | Construct a list of bare manipulations or read just the names.
+pattern IM :: [ST.ShortText] -> IM
+pattern IM {instanceManipulations} <- (map manipulationName . instanceManipulationEntries -> instanceManipulations)
+  where
+    IM names = IMEntries (map (\name -> InstanceManipulation name Nothing) names)
+
+
+{-# COMPLETE IM #-}
+
+
+instance Show IM where
+  showsPrec precedence (IMEntries entries) =
+    showParen (precedence > 10) (record . showChar '}')
+    where
+      record
+        | all (isNothing . manipulationParameter) entries =
+            showString "IM {instanceManipulations = " . shows (map manipulationName entries)
+        | otherwise =
+            showString "IMEntries {instanceManipulationEntries = " . shows entries
 
 
 instance KnownHeader IM where
@@ -54,11 +85,7 @@ instance KnownHeader IM where
   type Direction IM = 'Response
 
 
-  parseFromHeaders _ headers = case runParser iMParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing IM header: " <> show rest
-    Fail -> Left "Failed to parse IM header"
-    Err e -> Left e
+  parseFromHeaders _ = fmap IMEntries . parseFieldLine "IM" imList . combineFieldLines ","
 
 
   renderToHeaders _ = M.toStrictByteString . renderIM
@@ -68,10 +95,43 @@ instance KnownHeader IM where
 
 
 iMParser :: ParserT st String IM
-iMParser = IM <$> (imToken `sepBy` $(char ','))
+iMParser = IMEntries <$> imList
+
+
+imList :: ParserT st String [InstanceManipulation]
+imList = httpList (branch identity (err "identity is reserved for A-IM") item)
   where
-    imToken = ows *> rfc9110Token <* ows
+    identity =
+      $(switchAsciiCI [|case _ of "identity" -> pure ()|])
+        <* notFollowedBy (skipSatisfyAscii isTokenChar)
+    item = InstanceManipulation <$> rfc9110Token <*> optional (imParameterSeparator *> imParameterParser)
+
+
+imParameterSeparator :: ParserT st e ()
+imParameterSeparator = ows *> $(char ';') *> ows
+{-# INLINE imParameterSeparator #-}
+
+
+-- | The extension parameter after its semicolon. The name q is reserved.
+imParameterParser :: ParserT st String IMParameter
+imParameterParser = do
+  name <- rfc9110Token
+  if name == "q" || name == "Q"
+    then err "q is reserved for A-IM weights"
+    else IMParameter name <$> optional (ows *> $(char '=') *> ows *> value)
+  where
+    value = branch (lookahead $(char '"')) (IMParameterQuoted . SBS.toShort <$> httpQuotedBytes) (IMParameterToken <$> rfc9110Token)
 
 
 renderIM :: IM -> M.Builder
-renderIM (IM xs) = M.intersperse ", " (map shortText xs)
+renderIM (IMEntries entries) = renderSeparated ", " renderEntry entries
+  where
+    renderEntry (InstanceManipulation name param) = shortText name <> foldMap renderIMParameter param
+
+
+renderIMParameter :: IMParameter -> M.Builder
+renderIMParameter (IMParameter name value) =
+  M.char7 ';' <> shortText name <> foldMap (\v -> M.char7 '=' <> renderValue v) value
+  where
+    renderValue (IMParameterToken token) = shortText token
+    renderValue (IMParameterQuoted bytes) = M.byteString (encodeHttpQuotedBytes bytes)

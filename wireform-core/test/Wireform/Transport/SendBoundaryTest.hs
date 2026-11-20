@@ -15,6 +15,8 @@ module Wireform.Transport.SendBoundaryTest (spec) where
 import Control.Exception (evaluate, try)
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder.Extra qualified as X
+import Data.ByteString.Lazy qualified as BSL
+import Data.ByteString.Short qualified as SBS
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Word (Word8)
 import Hedgehog (Gen, annotateShow, evalIO, forAll, property, (===))
@@ -30,6 +32,7 @@ import Wireform.Transport.SendTest (readChunks, ringSizeAt, withTestTransport)
 -- | The builder primitives whose ring-sink paths differ.
 data Prim
   = PByteString
+  | PShortByteString
   | PByteStringCopy
   | PByteStringInsert
   | PCStringLen
@@ -70,6 +73,16 @@ spec = describe "SendTransport boundaries" $ do
             then withSendCork t (`sendBuilderDirect` b)
             else sendBuilderDirect t b
       readChunks bytes === expected
+
+  it "writes compact fragments exactly across strict and lazy builder boundaries" $ do
+    let check n = do
+          let payload = itemPayload 0 (Item PShortByteString 0 n)
+              expected = BS.cons leadByte (BS.snoc payload 0xff)
+              builder = word8 leadByte <> shortByteString (SBS.toShort payload) <> word8 0xff
+          toStrictByteString builder `shouldBe` expected
+          toStrictByteStringExact (n + 2) builder `shouldBe` expected
+          BSL.toStrict (toLazyByteString builder) `shouldBe` expected
+    mapM_ check (boundaryLens 4096 ++ [126, 127, 128, 129])
 
   describe "FixedBuffer overflow" $ do
     it "getBytes past the end throws FixedBufferOverflow" $
@@ -132,6 +145,7 @@ withItems ((item, p) : rest) k =
 withPrim :: Prim -> BS.ByteString -> (Builder -> IO a) -> IO a
 withPrim prim p k = case prim of
   PByteString -> k (byteString p)
+  PShortByteString -> k (shortByteString (SBS.toShort p))
   PByteStringCopy -> k (byteStringCopy p)
   PByteStringInsert -> k (byteStringInsert p)
   PCStringLen -> BSU.unsafeUseAsCStringLen p (k . unsafeCStringLen)

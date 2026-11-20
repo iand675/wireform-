@@ -10,10 +10,12 @@ module Network.HTTP.Client.Response (
   -- * Raw response
   RawResponse (..),
   rawResponseBytes,
+  rawResponseTrailers,
   cancelStream,
 
   -- * Decoded response
   Response (..),
+  responseTrailers,
   mapResponse,
 ) where
 
@@ -22,6 +24,7 @@ import Network.HTTP.Client.BodyStream (Popper, popperBytes)
 import Network.HTTP.Client.Protocol (
   Http2Info (..),
   ProtocolInfo (..),
+  protocolTrailers,
  )
 import Network.HTTP.Client.Request (Request)
 import Network.HTTP.Types.Header qualified as H
@@ -62,6 +65,12 @@ rawResponseBytes :: RawResponse -> IO ByteString
 rawResponseBytes = popperBytes . bodyPopper
 
 
+-- | Read the trailer section after draining 'bodyPopper'. A streaming
+-- transport may need the caller to consume the body to make progress.
+rawResponseTrailers :: RawResponse -> IO H.Headers
+rawResponseTrailers = protocolTrailers . protocolInfo
+
+
 {- | Best-effort stream cancellation. On HTTP\/2 streaming
 transports, this emits @RST_STREAM(CANCEL)@ to the peer. On
 transports that have already drained the body, this is a no-op.
@@ -93,6 +102,11 @@ instance Show a => Show (Response a) where
       <> show (responseBody r)
       <> " "
       <> show (responseProtocolInfo r)
+
+
+-- | Read the trailer section of a response returned by 'send'.
+responseTrailers :: Response a -> IO H.Headers
+responseTrailers = protocolTrailers . responseProtocolInfo
 
 
 mapResponse :: (a -> b) -> Response a -> Response b

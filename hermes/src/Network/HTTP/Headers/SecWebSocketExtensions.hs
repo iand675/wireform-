@@ -16,10 +16,10 @@ extension-token          = registered-token
 extension-param          = token [ "=" (token | quoted-string) ]
 @
 
-A parameter value may be a token or a quoted-string on the wire; the
-parsed value is stored unquoted and re-rendered as a bare token (which
-is the only form used by the registered WebSocket extensions). Empty
-parameter lists and value-less parameters are preserved.
+A quoted parameter must decode to a token. Rendering emits that token
+directly. Empty parameter lists and value-less parameters are preserved.
+Multiple field lines are combined in received order in both directions,
+as clarified by RFC 6455 erratum 3433.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc6455#section-11.3.2>
 
@@ -33,8 +33,10 @@ module Network.HTTP.Headers.SecWebSocketExtensions (
   renderSecWebSocketExtensions,
 ) where
 
+import qualified Data.ByteString.Char8 as B8
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSecWebSocketExtensions)
 import qualified Network.HTTP.Headers.Mason as M
@@ -69,11 +71,8 @@ instance KnownHeader SecWebSocketExtensions where
   type Direction SecWebSocketExtensions = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser secWebSocketExtensionsParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left ("Unconsumed input after parsing Sec-WebSocket-Extensions: " <> show rest)
-    Fail -> Left "Failed to parse Sec-WebSocket-Extensions header"
-    Err e -> Left e
+  parseFromHeaders _ headers =
+    parseListFieldLines "Sec-WebSocket-Extensions" extensionList headers >>= extensionsFromList
 
 
   renderToHeaders _ = M.toStrictByteString . renderSecWebSocketExtensions
@@ -83,12 +82,15 @@ instance KnownHeader SecWebSocketExtensions where
 
 
 secWebSocketExtensionsParser :: ParserT st String SecWebSocketExtensions
-secWebSocketExtensionsParser = do
-  ows
-  first <- extension
-  rest <- many (ows *> $(char ',') *> ows *> extension)
-  ows
-  pure (SecWebSocketExtensions (first NE.:| rest))
+secWebSocketExtensionsParser = extensionList >>= either err pure . extensionsFromList
+
+
+extensionsFromList :: [Extension] -> Either String SecWebSocketExtensions
+extensionsFromList = fmap SecWebSocketExtensions . requireNonEmptyList "Sec-WebSocket-Extensions"
+
+
+extensionList :: ParserT st String [Extension]
+extensionList = httpList extension
   where
     extension = do
       tok <- rfc9110Token
@@ -96,8 +98,14 @@ secWebSocketExtensionsParser = do
       pure (Extension tok params)
     param = do
       name <- rfc9110Token
-      value <- optional ($(char '=') *> (quotedString <|> rfc9110Token))
+      value <- optional (ows *> $(char '=') *> ows *> (rfc9110Token <|> quotedToken))
       pure (ExtensionParam name value)
+    quotedToken = ($(char '"') *> rfc9110Token <* $(char '"')) <|> escapedToken
+    escapedToken = do
+      bytes <- httpQuotedBytes
+      if not (B8.null bytes) && B8.all isTokenChar bytes
+        then pure (STU.fromByteStringUnsafe bytes)
+        else err "Invalid quoted WebSocket extension token"
 
 
 renderSecWebSocketExtensions :: SecWebSocketExtensions -> M.Builder

@@ -113,7 +113,8 @@ int64_t hs_columnar_list_view_i32(const int32_t *offs, const int32_t *sizes, siz
 int64_t hs_columnar_list_view_i64(const int64_t *offs, const int64_t *sizes, size_t n, const uint8_t *valid, size_t validoff, int64_t childLen);
 
 /* denseUnionCheck: 0 <= types[i] < nchildren and
- * 0 <= offs[i] < childLens[types[i]]. childLens has nchildren entries. */
+ * 0 <= offs[i] < childLens[types[i]]. Offsets do not decrease within
+ * a child. childLens has nchildren entries. */
 int64_t hs_columnar_dense_union(const int8_t *types, const int32_t *offs, size_t n, const int64_t *childLens, size_t nchildren);
 
 /* viewRefsCheck: views has 16 * n bytes (validateViews checks it). For
@@ -273,6 +274,12 @@ static inline int64_t ref_dense_union(const int8_t *types, const int32_t *offs, 
     for (size_t i = 0; i < n; i++) {
         if (types[i] < 0 || (size_t)types[i] >= nchildren) return (int64_t)i;
         if (offs[i] < 0 || offs[i] >= childLens[types[i]]) return (int64_t)i;
+        for (size_t j = i; j > 0; j--) {
+            if (types[j - 1] == types[i]) {
+                if (offs[j - 1] > offs[i]) return (int64_t)i;
+                break;
+            }
+        }
     }
     return -1;
 }

@@ -52,6 +52,7 @@ library
       Network.HTTP2.Engine.TLS.Server
       Network.HTTP2.Engine.Types
     other-modules:
+      Network.HTTP2.Engine.Run.Output
       Network.HTTP2.Internal.BitOps
       Network.HTTP2.Frame.Decode
       Network.HTTP2.Frame.Encode

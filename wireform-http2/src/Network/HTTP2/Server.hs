@@ -13,31 +13,26 @@ module Network.HTTP2.Server
 import Control.Concurrent (forkIO, killThread, myThreadId, threadDelay, throwTo, ThreadId)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception (Exception, bracket, catch, handle, SomeException, finally)
-import Control.Monad (when)
+import Control.Exception (Exception, bracket, catch, handle, SomeException, finally, onException, throwIO)
+import Control.Monad (unless, when)
 import GHC.Clock (getMonotonicTime)
 import System.Timeout (timeout)
-import Data.Bits ((.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import Data.IORef
 import Network.Socket (Socket)
 import qualified Network.Socket as NS
 
 import qualified Data.ByteString.Internal as BSI
-import Foreign.ForeignPtr (withForeignPtr)
-import Foreign.Ptr (plusPtr)
 
 import Data.Bits ((.|.), (.&.), shiftL)
 import qualified Data.Map.Strict as Map
-import Data.Word (Word32)
+import Data.Word (Word32, Word64)
 
 import Network.HTTP2.Connection
 import Network.HTTP2.Frame
-import Network.HTTP2.Frame.Decode (FrameDecodeError (..))
-import Network.HTTP2.Frame.Types
-  ( FramePayload (..), decodeGoAway, decodeSettings
-  )
+import Network.HTTP2.Frame.Types (decodeGoAway, decodeSettings)
 import Network.HTTP2.HPACK
 import Network.HTTP2.RateLimit (RateCounter, newRateCounter, tickRate)
 import Network.HTTP2.Types hiding (StreamClosed)
@@ -96,7 +91,8 @@ data Request = Request
     -- ^ Block on the peer's trailer block.  Returns @[]@ when the
     -- request had no trailers (the END_STREAM came in on DATA or on
     -- the initial HEADERS frame).  Must be called after the body
-    -- has been fully drained.
+    -- has been fully drained. A malformed trailer block raises
+    -- 'ConnectionError' for this stream.
   }
 
 data Response = Response
@@ -104,19 +100,16 @@ data Response = Response
   , responseHeaders :: ![(ByteString, ByteString)]
   , responseBody :: !ResponseBody
   , responseTrailers :: ![(ByteString, ByteString)]
-    -- ^ Optional HTTP/2 trailer block (RFC 9113 §8.1). When non-empty,
-    -- the server sends the body without END_STREAM and then a final
-    -- HEADERS frame carrying these fields with END_STREAM set.
-    --
-    -- Trailers are how gRPC delivers @grpc-status@ + @grpc-message@
-    -- at the tail of a response; anything outside gRPC almost never
-    -- uses them, so this defaults to @[]@.
+    -- ^ Static trailers, sent before any fields from
+    -- 'ResponseBodyStreamWithTrailers' in the terminating field block.
   }
 
 data ResponseBody
   = ResponseBodyEmpty
   | ResponseBodyBS !ByteString
   | ResponseBodyStream (IO (Maybe ByteString))
+  | ResponseBodyStreamWithTrailers !(IO (Maybe ByteString)) !(IO [(ByteString, ByteString)])
+    -- ^ Evaluate the trailer action when the body producer returns 'Nothing'.
 
 defaultResponse :: Response
 defaultResponse = Response
@@ -193,7 +186,6 @@ handleTransport cfg transport = do
       sendServerPreface conn (serverSettings cfg)
       streamsRef <- newIORef Map.empty
       lastPeerStreamRef <- newIORef 0
-      continuationRef <- newIORef Nothing
       connRecvUnackedRef <- newIORef 0
       -- Our advertised connection-level recv window starts at the
       -- RFC default of 65535 (the connection window is never affected
@@ -223,10 +215,11 @@ handleTransport cfg transport = do
       -- A wake that was queued while the finalizer ran lands in the
       -- outer handler.
       handle (\IdleWatchdogFired -> pure ()) $
-        ( connectionLoop cfg conn streamsRef lastPeerStreamRef continuationRef
+        ( connectionLoop cfg conn streamsRef lastPeerStreamRef
                          connRecvUnackedRef connRecvWindowRef rl
                          lastActivityRef continuationStartRef
             `catch` (\IdleWatchdogFired -> pure ())
+            `catch` (\(_ :: ConnectionError) -> pure ())
         )
           `finally` (killThread watchdog >> releaseConnection conn)
 
@@ -237,23 +230,11 @@ data IdleWatchdogFired = IdleWatchdogFired
 
 instance Exception IdleWatchdogFired
 
--- | Pending header-block continuation state: which stream we're
--- continuing, what flags the initial HEADERS frame had (so we know
--- whether to mark END_STREAM when END_HEADERS finally arrives),
--- and the accumulated payload bytes.
-data Continuation = Continuation
-  { contStreamId :: !StreamId
-  , contInitialFlags :: !FrameFlags
-  , contBuffer :: !ByteString
-  }
-
 -- | Per-stream state we track at the server boundary.
 data StreamRec = StreamRec
   { srState :: !ServerStreamState
-  , srExpectedLength :: !(Maybe Int)
-    -- ^ Declared @content-length@ for the request body, if any.
-  , srReceivedBytes :: !Int
-    -- ^ DATA bytes received so far (excluding padding).
+  , srRemainingLength :: !(Maybe Word64)
+    -- ^ Bytes still owed against the declared content length, excluding padding.
   , srBodyQueue :: !(TBQueue BodyChunkItem)
     -- ^ Per-stream inbox for the request body.  Each DATA frame's
     -- payload becomes a 'BodyChunkBytes'; 'BodyChunkEnd' marks the
@@ -275,16 +256,17 @@ data StreamRec = StreamRec
     -- @WINDOW_UPDATE@ we emit.  When this goes negative the peer
     -- has overflowed our advertised window: stream-level
     -- @FLOW_CONTROL_ERROR@ via @RST_STREAM@.
-  , srTrailers :: !(MVar [(ByteString, ByteString)])
+  , srTrailers :: !(MVar (Either ConnectionError [(ByteString, ByteString)]))
     -- ^ Filled exactly once when END_STREAM has been observed:
     -- with the decoded trailer block from a final HEADERS frame, or
     -- with @[]@ when END_STREAM came in on DATA \/ on the initial
-    -- HEADERS frame.  Stream resets also fill this with @[]@.
+    -- HEADERS frame. A rejected trailer block carries its stream error.
   }
 
 data BodyChunkItem
   = BodyChunkBytes !ByteString
   | BodyChunkEnd
+  | BodyChunkError !ConnectionError
 
 data ServerStreamState
   = StOpen
@@ -295,7 +277,7 @@ data ServerStreamState
 freshStream
   :: Word32          -- ^ peer's @SETTINGS_INITIAL_WINDOW_SIZE@
   -> Word32          -- ^ our @SETTINGS_INITIAL_WINDOW_SIZE@
-  -> Maybe Int
+  -> Maybe Word64
   -> ServerStreamState
   -> IO StreamRec
 freshStream peerInit ourInit el st = do
@@ -304,7 +286,7 @@ freshStream peerInit ourInit el st = do
   ru <- newIORef 0
   rw <- newIORef (fromIntegral ourInit)
   trailers <- newEmptyMVar
-  pure $ StreamRec st el 0 q sw ru rw trailers
+  pure $ StreamRec st el q sw ru rw trailers
 
 -- | Threshold for coalesced @WINDOW_UPDATE@ frames.  Half the
 -- default @SETTINGS_INITIAL_WINDOW_SIZE@ — large enough that we
@@ -340,6 +322,9 @@ makeRequestBody conn connUnackedRef connWindowRef sid sr = do
     BodyChunkEnd -> do
       atomically $ writeTBQueue (srBodyQueue sr) BodyChunkEnd
       pure BS.empty
+    BodyChunkError err -> do
+      atomically $ writeTBQueue (srBodyQueue sr) item
+      throwIO err
 
 -- | Connection-level recv-window ack (stream 0).  When the unacked
 -- counter crosses 'recvWindowAckThreshold', emit a @WINDOW_UPDATE@
@@ -423,44 +408,35 @@ connectionLoop
   -> Connection
   -> IORef (Map.Map StreamId StreamRec)
   -> IORef StreamId
-  -> IORef (Maybe Continuation)
   -> IORef Int    -- ^ connection-level recv-unacked counter
   -> IORef Int    -- ^ connection-level recv-window remaining
   -> ServerRateLimiters
   -> IORef Double           -- ^ last-activity timestamp
   -> IORef (Maybe Double)   -- ^ header-block start timestamp
   -> IO ()
-connectionLoop cfg conn streamsRef lastPeerStreamRef contRef
+connectionLoop cfg conn streamsRef lastPeerStreamRef
                connRecvUnackedRef connRecvWindowRef rl
                lastActivityRef continuationStartRef = loop
   where
     maxFrame = settingsMaxFrameSize (serverSettings cfg)
-    loop = do
+    receive = do
       result <- recvFrame conn
       -- Refresh the activity timestamp before doing any work: any
       -- byte we just pulled off the wire counts as activity.
       now <- getMonotonicTime
       writeIORef lastActivityRef now
       case result of
-        Left err ->
-          closeConnection conn (decodeErrorToCode err) (decodeErrorMessage err)
-        Right frame@(Frame hdr _)
-          | fhLength hdr > maxFrame -> do
-              closeConnection conn FrameSizeError "frame exceeds SETTINGS_MAX_FRAME_SIZE"
-          | otherwise -> do
-              -- If a header-block continuation is in flight, the
-              -- ONLY frame the peer is allowed to send is a
-              -- CONTINUATION on the same stream (RFC 9113 §6.10).
-              pending <- readIORef contRef
-              case pending of
-                Just c | fhType hdr /= FrameContinuation
-                       || fhStreamId hdr /= contStreamId c -> do
-                  closeConnection conn ProtocolError "expected CONTINUATION frame"
-                _ -> do
-                  ok <- handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
-                                     connRecvUnackedRef connRecvWindowRef rl
-                                     continuationStartRef frame
-                  if ok then loop else pure ()
+        Left err -> abortConnection conn (decodeErrorToCode err) (decodeErrorMessage err)
+        Right frame
+          | fhLength (frameHeader frame) > maxFrame ->
+              abortConnection conn FrameSizeError "frame exceeds SETTINGS_MAX_FRAME_SIZE"
+          | otherwise -> pure frame
+    loop = do
+      frame <- receive
+      ok <- handleFrame' cfg conn streamsRef lastPeerStreamRef
+                         connRecvUnackedRef connRecvWindowRef rl
+                         continuationStartRef (Just <$> receive) frame
+      when ok loop
 
 -- | Map a 'FrameDecodeError' to the HTTP\/2 error code dictated by
 -- RFC 9113. Most malformed-payload conditions are
@@ -490,16 +466,16 @@ handleFrame'
   -> Connection
   -> IORef (Map.Map StreamId StreamRec)
   -> IORef StreamId
-  -> IORef (Maybe Continuation)
   -> IORef Int      -- ^ connection-level recv-unacked counter
   -> IORef Int      -- ^ connection-level recv-window remaining
   -> ServerRateLimiters
   -> IORef (Maybe Double)   -- ^ header-block start timestamp (slowloris guard)
+  -> IO (Maybe Frame)       -- ^ read another fragment on this connection
   -> Frame
   -> IO Bool
-handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
+handleFrame' cfg conn streamsRef lastPeerStreamRef
              connRecvUnackedRef connRecvWindowRef rl
-             continuationStartRef (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
+             continuationStartRef receive (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
   FrameSettings
     | testFlag (fhFlags hdr) flagAck ->
         if BS.null body
@@ -615,7 +591,7 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
                               -- Per-stream window overflow → RST_STREAM
                               -- with FLOW_CONTROL_ERROR (RFC 9113 §6.9.1).
                               sendRstStream conn sid FlowControlError
-                              _ <- tryPutMVar (srTrailers sr) []
+                              _ <- tryPutMVar (srTrailers sr) (Right [])
                               atomically $
                                 writeTBQueue (srBodyQueue sr) BodyChunkEnd
                               atomicModifyIORef' streamsRef
@@ -640,200 +616,123 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
     | fhStreamId hdr == 0 -> do
         closeConnection conn ProtocolError "HEADERS on stream 0"
         pure False
-    | not (testFlag (fhFlags hdr) flagEndHeaders) -> do
-        -- Start a CONTINUATION sequence: buffer this frame's
-        -- payload, expect zero or more CONTINUATION frames on the
-        -- same stream, terminated by one with END_HEADERS.
-        -- See note on 'forceCopyBS' -- the recv buffer reuses
-        -- memory across frames so we must materialise a copy
-        -- eagerly.
-        copiedBody <- forceCopyBS body
-        writeIORef contRef (Just (Continuation
-          { contStreamId = fhStreamId hdr
-          , contInitialFlags = fhFlags hdr
-          , contBuffer = copiedBody
-          }))
-        -- Slowloris guard #2: mark the start of the header block
-        -- so 'idleWatchdog' can shoot us down if the peer dribbles
-        -- in CONTINUATION frames forever.
-        now <- getMonotonicTime
-        writeIORef continuationStartRef (Just now)
-        pure True
     | otherwise -> do
         let sid = fhStreamId hdr
+            !selfDependency = headersSelfDependency sid (fhFlags hdr) body
+        block <- readBlock
         streams <- readIORef streamsRef
-        lastPeer <- readIORef lastPeerStreamRef
-        case fmap srState (Map.lookup sid streams) of
-          Just StClosedSrv -> do
+        case Map.lookup sid streams of
+          Just sr | srState sr == StClosedSrv -> do
             closeConnection conn Types.StreamClosed "HEADERS on closed stream"
             pure False
-          Just StHalfClosedRemote -> do
+          Just sr | srState sr == StHalfClosedRemote -> do
             closeConnection conn Types.StreamClosed "HEADERS on half-closed (remote) stream"
             pure False
-          Just StOpen
-            | not (testFlag (fhFlags hdr) flagEndStream) -> do
-                closeConnection conn ProtocolError "trailers without END_STREAM"
+          Just sr -> do
+            -- Decode first to keep the HPACK table in sync even when
+            -- the result violates trailer semantics.
+            res <- withMVar (connHpackDecoder conn) $ \decoder ->
+              decodeHeaderBlock decoder block
+            case res of
+              Left _ -> do
+                closeConnection conn CompressionError "HPACK decode failed in trailers"
                 pure False
-            | otherwise ->
-                case stripPaddingAndPriority FrameHeaders (fhFlags hdr) body of
-                  Nothing -> do
-                    closeConnection conn ProtocolError "malformed trailers"
-                    pure False
-                  Just block -> do
-                    -- See note in Client.hs FrameHeaders: HPACK's
-                    -- literal-string slices reference our input
-                    -- buffer, which is itself a recv ring-buffer
-                    -- slice.  Detach with a forced memcpy now.
-                    copied <- forceCopyBS block
-                    res0 <- withMVar (connHpackDecoder conn) $ \decoder ->
-                      decodeHeaderBlock decoder copied
-                    res <- case res0 of
-                      Right hs -> Right <$> forceCopyHeaders hs
-                      Left e   -> pure (Left e)
-                    case res of
-                      Left _ -> do
-                        closeConnection conn CompressionError "HPACK decode failed in trailers"
-                        pure False
-                      Right trailers
-                        | overHeaderListLimit' (serverSettings cfg) trailers -> do
-                            sendRstStream conn sid EnhanceYourCalm
-                            atomicModifyIORef' streamsRef
-                              (\m -> (Map.adjust (\sr -> sr { srState = StClosedSrv }) sid m, ()))
-                            pure True
-                        | any (\(n, _) -> not (BS.null n) && BS.head n == 0x3A) trailers -> do
-                            closeConnection conn ProtocolError "pseudo-header in trailers"
-                            pure False
-                        | otherwise -> do
-                            -- Trailer block: stash for the handler,
-                            -- then deliver END_STREAM to the
-                            -- request-body queue regardless of the
-                            -- content-length check outcome.
-                            streamsNow <- readIORef streamsRef
-                            case Map.lookup sid streamsNow of
-                              Just sr -> do
-                                _ <- tryPutMVar (srTrailers sr) trailers
-                                atomically $
-                                  writeTBQueue (srBodyQueue sr) BodyChunkEnd
-                              Nothing -> pure ()
-                            checkContentLength sid streamsRef >>= \case
-                              Just _ -> do
-                                sendRstStream conn sid ProtocolError
-                                atomicModifyStreams_ streamsRef (Map.adjust (\sr -> sr { srState = StClosedSrv }) sid)
-                                pure True
-                              Nothing -> do
-                                atomicModifyStreams_ streamsRef (Map.adjust (\sr -> sr { srState = StHalfClosedRemote }) sid)
-                                pure True
-          Nothing -> handleFreshStream lastPeer sid (fhFlags hdr) body
+              Right trailers
+                | overHeaderListLimit' (serverSettings cfg) trailers ->
+                    rejectRequestBody conn streamsRef sid sr EnhanceYourCalm "trailer field list too large"
+                | Just reason <- validateTrailerBlock (fhFlags hdr) trailers ->
+                    rejectRequestBody conn streamsRef sid sr ProtocolError reason
+                | Just remaining <- srRemainingLength sr, remaining /= 0 ->
+                    rejectRequestBody conn streamsRef sid sr ProtocolError "request content-length mismatch"
+                | otherwise -> do
+                    fields <- forceCopyHeaders trailers
+                    atomicModifyStreams_ streamsRef $
+                      Map.adjust (\current -> case srState current of
+                        StOpen -> current { srState = StHalfClosedRemote }
+                        _ -> current) sid
+                    finishRequestBody sr fields
+                    pure True
+          Nothing -> do
+            lastPeer <- readIORef lastPeerStreamRef
+            handleFreshStream lastPeer sid (fhFlags hdr) selfDependency block
         where
+          readBlock
+            | testFlag (fhFlags hdr) flagEndHeaders = assemble
+            | otherwise = do
+                now <- getMonotonicTime
+                writeIORef continuationStartRef (Just now)
+                assemble `finally` writeIORef continuationStartRef Nothing
+            where
+              assemble = recvHeaderBlockWith copyReceivedBytes conn receive hdr body
+
           connLastSid = connLastStreamId conn
-          handleFreshStream lp sid' flags body'
+          handleFreshStream lp sid' flags selfDependency block
             | even sid' || sid' <= lp = do
                 closeConnection conn ProtocolError "invalid stream id"
                 pure False
-            | headersSelfDependency sid' flags body' = do
+            | selfDependency = do
                 closeConnection conn ProtocolError "HEADERS depends on itself"
                 pure False
-            | otherwise = case stripPaddingAndPriority FrameHeaders flags body' of
-                Nothing -> do
-                  closeConnection conn ProtocolError "malformed HEADERS frame"
-                  pure False
-                Just headerBlock -> do
-                  -- See note above on detaching from the recv ring buffer.
-                  copied <- forceCopyBS headerBlock
-                  result <- withMVar (connHpackDecoder conn) $ \decoder ->
-                    decodeHeaderBlock decoder copied
-                  -- 'forceCopyHeaders' rebuilds each name\/value into
-                  -- a fresh malloc'd buffer.  HPACK's literal- and
-                  -- huffman-decode paths produce bytestrings that —
-                  -- even after forceCopyBS on the input block — still
-                  -- can read from the input block at unforced points;
-                  -- this pass guarantees every bytestring downstream
-                  -- is backed by independent memory, so the handler
-                  -- thread can read them without racing the recv loop.
-                  result' <- case result of
-                    Right hs -> Right <$> forceCopyHeaders hs
-                    Left e   -> pure (Left e)
-                  case result' of
-                    Left _ -> do
-                      closeConnection conn CompressionError "HPACK decode failed"
-                      pure False
-                    Right headers
-                      | overHeaderListLimit' (serverSettings cfg) headers -> do
-                          -- Refuse the stream but keep the connection
-                          -- open; an over-limit block is a single-stream
-                          -- problem, not a connection-fatal one.
-                          sendRstStream conn sid' RefusedStream
-                          writeIORef lastPeerStreamRef sid'
-                          peerInit <- settingsInitialWindowSize <$> readIORef (connRemoteSettings conn)
-                          let ourInit = settingsInitialWindowSize (serverSettings cfg)
-                          refused <- freshStream peerInit ourInit Nothing StClosedSrv
-                          atomicModifyStreams_ streamsRef (Map.insert sid' refused)
-                          pure True
-                      | otherwise -> case validateRequestHeaders headers of
-                      Just _err -> do
-                        closeConnection conn ProtocolError "malformed request headers"
-                        pure False
-                      Nothing -> do
-                        -- Check SETTINGS_MAX_CONCURRENT_STREAMS.
-                        streamsNow <- readIORef streamsRef
-                        let active = Map.size (Map.filter ((/= StClosedSrv) . srState) streamsNow)
-                        peerInit <- settingsInitialWindowSize <$> readIORef (connRemoteSettings conn)
-                        let ourInit = settingsInitialWindowSize (serverSettings cfg)
-                        case maxConcurrent of
-                          Just n | active >= fromIntegral n -> do
-                            sendRstStream conn sid' RefusedStream
-                            -- We still count this stream as seen so
-                            -- the lastPeerStream marker advances.
-                            writeIORef lastPeerStreamRef sid'
-                            refused <- freshStream peerInit ourInit Nothing StClosedSrv
-                            atomicModifyStreams_ streamsRef (Map.insert sid' refused)
-                            pure True
-                          _ -> do
-                            writeIORef connLastSid sid'
-                            writeIORef lastPeerStreamRef sid'
-                            let endStream = testFlag flags flagEndStream
-                                newState = if endStream then StHalfClosedRemote else StOpen
-                                clHdr = lookupContentLength headers
-                            rec0 <- freshStream peerInit ourInit clHdr newState
-                            -- If the body is already closed (no DATA
-                            -- frames to come), push the End marker
-                            -- now so the handler's 'requestBody'
-                            -- returns "" immediately, and resolve
-                            -- the trailers MVar with [] so a reader
-                            -- doesn't block.
-                            when endStream $ do
-                              _ <- tryPutMVar (srTrailers rec0) []
-                              atomically $ writeTBQueue (srBodyQueue rec0) BodyChunkEnd
-                            atomicModifyStreams_ streamsRef (Map.insert sid' rec0)
-                            -- If the request has a content-length header
-                            -- and END_STREAM on HEADERS, validate that
-                            -- the declared length is 0.
-                            if endStream && maybe False (/= 0) clHdr
-                              then do
-                                sendRstStream conn sid' ProtocolError
-                                rec1 <- freshStream peerInit ourInit Nothing StClosedSrv
-                                atomicModifyStreams_ streamsRef (Map.insert sid' rec1)
-                                pure True
-                              else do
-                                let req = buildRequest conn connRecvUnackedRef connRecvWindowRef sid' headers rec0
-                                _ <- serverForkStream cfg $
-                                  ( do
-                                      serverHandler cfg req $ \resp ->
-                                        sendResponse conn sid' (srSendWindow rec0) resp
-                                      atomicModifyStreams_ streamsRef
-                                        (Map.adjust (\sr -> sr { srState = StClosedSrv }) sid')
-                                  )
-                                  -- Stream workers may still be sending bytes when
-                                  -- the connection is torn down (socket closed in
-                                  -- another thread).  Swallow IO failures so the
-                                  -- thread exits silently instead of printing
-                                  -- "threadWait: Bad file descriptor" to stderr.
-                                  `catch` (\(_ :: SomeException) -> pure ())
-                                pure True
-                where
-                  maxConcurrent = maxConcurrentStreams' cfg
-                  maxConcurrentStreams' c =
-                    settingsMaxConcurrentStreams (serverSettings c)
+            | otherwise = do
+                result <- withMVar (connHpackDecoder conn) $ \decoder ->
+                  decodeHeaderBlock decoder block
+                -- Give the handler compact copies of the fields it keeps.
+                result' <- case result of
+                  Right hs -> Right <$> forceCopyHeaders hs
+                  Left e   -> pure (Left e)
+                case result' of
+                  Left _ -> do
+                    closeConnection conn CompressionError "HPACK decode failed"
+                    pure False
+                  Right headers
+                    | overHeaderListLimit' (serverSettings cfg) headers ->
+                        refuseFreshStream sid' RefusedStream
+                    | otherwise -> case parseRequestHead headers of
+                        Left _ -> refuseFreshStream sid' ProtocolError
+                        Right requestHead -> case readContentLength (requestHeadFields requestHead) of
+                          Left _ -> refuseFreshStream sid' ProtocolError
+                          Right remaining
+                            | testFlag flags flagEndStream, Just n <- remaining, n /= 0 ->
+                                refuseFreshStream sid' ProtocolError
+                            | otherwise -> acceptFreshStream sid' flags requestHead remaining
+
+          refuseFreshStream sid code = do
+            writeIORef lastPeerStreamRef sid
+            peerInit <- settingsInitialWindowSize <$> readIORef (connRemoteSettings conn)
+            refused <- freshStream peerInit ourInit Nothing StClosedSrv
+            atomicModifyStreams_ streamsRef (Map.insert sid refused)
+            sendRstStream conn sid code
+            pure True
+
+          ourInit = settingsInitialWindowSize (serverSettings cfg)
+
+          acceptFreshStream sid flags requestHead remaining = do
+            streamsNow <- readIORef streamsRef
+            let active = Map.size (Map.filter ((/= StClosedSrv) . srState) streamsNow)
+            case settingsMaxConcurrentStreams (serverSettings cfg) of
+              Just n | active >= fromIntegral n -> refuseFreshStream sid RefusedStream
+              _ -> do
+                writeIORef connLastSid sid
+                writeIORef lastPeerStreamRef sid
+                peerInit <- settingsInitialWindowSize <$> readIORef (connRemoteSettings conn)
+                let endStream = testFlag flags flagEndStream
+                    newState = if endStream then StHalfClosedRemote else StOpen
+                rec <- freshStream peerInit ourInit remaining newState
+                when endStream $ finishRequestBody rec []
+                atomicModifyStreams_ streamsRef (Map.insert sid rec)
+                unless endStream $ sendContinueIfExpected conn sid remaining requestHead
+                let req = buildRequest conn connRecvUnackedRef connRecvWindowRef sid requestHead rec
+                _ <- serverForkStream cfg $
+                  ( (serverHandler cfg req $ \resp ->
+                        sendResponse conn sid (srSendWindow rec) resp
+                          `onException` sendRstStream conn sid InternalError
+                    )
+                    `finally` atomicModifyStreams_ streamsRef
+                      (Map.adjust (\sr -> sr { srState = StClosedSrv }) sid)
+                  )
+                  -- A worker can still be writing when its connection closes.
+                  `catch` (\(_ :: SomeException) -> pure ())
+                pure True
 
   FrameData
     | fhStreamId hdr == 0 -> do
@@ -875,7 +774,7 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
                 -- payload — immediately returning its connection-level
                 -- flow-control credit so the peer isn't stalled — and finalize
                 -- on END_STREAM, rather than tearing down the whole connection.
-                case stripPaddingAndPriority FrameData (fhFlags hdr) body of
+                case stripFramePadding (fhFlags hdr) body of
                   Nothing -> do
                     closeConnection conn ProtocolError "malformed DATA frame"
                     pure False
@@ -886,13 +785,13 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
                         (FrameHeader 4 FrameWindowUpdate 0 0)
                         (WindowUpdateFrame (fromIntegral frameBytes))
                     when (testFlag (fhFlags hdr) flagEndStream) $ do
-                      _ <- tryPutMVar (srTrailers sr) []
+                      _ <- tryPutMVar (srTrailers sr) (Right [])
                       atomically $ writeTBQueue (srBodyQueue sr) BodyChunkEnd
                     pure True
               Just sr | srState sr == StHalfClosedRemote -> do
                 closeConnection conn Types.StreamClosed "DATA on half-closed (remote) stream"
                 pure False
-              Just sr -> case stripPaddingAndPriority FrameData (fhFlags hdr) body of
+              Just sr -> case stripFramePadding (fhFlags hdr) body of
                 Nothing -> do
                   closeConnection conn ProtocolError "malformed DATA frame"
                   pure False
@@ -922,39 +821,30 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
                       else do
                         let bytes = BS.length payload
                             endStream = testFlag (fhFlags hdr) flagEndStream
-                            newReceived = srReceivedBytes sr + bytes
-                            newState = if endStream then StHalfClosedRemote else StOpen
-                        atomicModifyStreams_ streamsRef
-                          (Map.insert sid sr { srState = newState, srReceivedBytes = newReceived })
-                        -- Hand the payload to the handler's request-body
-                        -- consumer.  Empty DATA frames are common terminators;
-                        -- only push non-empty chunks.  The recv windows are
-                        -- replenished lazily in 'makeRequestBody' when the
-                        -- handler actually consumes a chunk, so a slow handler
-                        -- back-pressures the peer naturally.
-                        -- The payload is a zero-copy slice of the recv ring
-                        -- buffer; the buffer reuses its memory on subsequent
-                        -- 'recvBufferRead' calls, so we copy before stashing
-                        -- in the long-lived per-stream queue.
-                        when (not (BS.null payload)) $ do
-                          copied <- forceCopyBS payload
-                          atomically $
-                            writeTBQueue (srBodyQueue sr) (BodyChunkBytes copied)
-                        when endStream $ do
-                          _ <- tryPutMVar (srTrailers sr) []
-                          atomically $
-                            writeTBQueue (srBodyQueue sr) BodyChunkEnd
-                        -- On END_STREAM, validate the declared content-length.
-                        if endStream
-                          then case srExpectedLength sr of
-                            Just expected
-                              | expected /= newReceived -> do
-                                  sendRstStream conn sid ProtocolError
-                                  atomicModifyStreams_ streamsRef
-                                    (Map.adjust (\s -> s { srState = StClosedSrv }) sid)
-                                  pure True
-                            _ -> pure True
-                          else pure True
+                            afterPayload remaining = remainingContentLength remaining bytes endStream
+                        case traverse afterPayload (srRemainingLength sr) of
+                          Nothing -> do
+                            ackConnRecv conn connRecvUnackedRef connRecvWindowRef frameBytes
+                            rejectRequestBody conn streamsRef sid sr ProtocolError "request content-length mismatch"
+                          Just remaining -> do
+                            let newState = if endStream then StHalfClosedRemote else StOpen
+                            when (endStream || remaining /= Nothing) $
+                              atomicModifyStreams_ streamsRef $
+                                Map.adjust (\current -> case srState current of
+                                  StOpen -> current { srState = newState, srRemainingLength = remaining }
+                                  _ -> current) sid
+                            let paddingBytes = frameBytes - bytes
+                            when (paddingBytes > 0) $ do
+                              ackConnRecv conn connRecvUnackedRef connRecvWindowRef paddingBytes
+                              when (not endStream) $
+                                ackStreamRecv conn sid (srRecvUnacked sr) (srRecvWindow sr) paddingBytes
+                            -- Copy before reuse of the ring. The reader refunds
+                            -- content bytes when it consumes each chunk.
+                            when (bytes /= 0) $ do
+                              copied <- copyReceivedBytes payload
+                              atomically $ writeTBQueue (srBodyQueue sr) (BodyChunkBytes copied)
+                            when endStream $ finishRequestBody sr []
+                            pure True
 
   FrameRSTStream
     | fhStreamId hdr == 0 -> do
@@ -982,7 +872,7 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
                 -- this as end-of-stream; callers that need to
                 -- distinguish abort vs clean end can poll the
                 -- connection state).
-                _ <- tryPutMVar (srTrailers sr) []
+                _ <- tryPutMVar (srTrailers sr) (Right [])
                 atomically $ writeTBQueue (srBodyQueue sr) BodyChunkEnd
                 atomicModifyStreams_ streamsRef
                   (Map.adjust (\s -> s { srState = StClosedSrv }) sid)
@@ -1008,34 +898,8 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
             pure True
           else pure True
 
-  FrameContinuation -> do
-    pending <- readIORef contRef
-    case pending of
-      Nothing -> do
-        closeConnection conn ProtocolError "unexpected CONTINUATION"
-        pure False
-      Just c
-        | contStreamId c /= fhStreamId hdr -> do
-            closeConnection conn ProtocolError "CONTINUATION on wrong stream"
-            pure False
-        | testFlag (fhFlags hdr) flagEndHeaders -> do
-            writeIORef contRef Nothing
-            writeIORef continuationStartRef Nothing
-            let assembled = contBuffer c <> body
-                origFlags = contInitialFlags c
-                synthHdr  = hdr
-                  { fhFlags  = origFlags .|. flagEndHeaders
-                  , fhType   = FrameHeaders
-                  , fhLength = fromIntegral (BS.length assembled)
-                  }
-            handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
-                         connRecvUnackedRef connRecvWindowRef rl
-                         continuationStartRef
-              (Frame synthHdr (FramePayloadRaw assembled))
-        | otherwise -> do
-            copiedBody <- forceCopyBS body
-            writeIORef contRef (Just c { contBuffer = contBuffer c <> copiedBody })
-            pure True
+  FrameContinuation ->
+    abortConnection conn ProtocolError "unexpected CONTINUATION"
 
   FramePushPromise -> do
     -- Clients are not supposed to send PUSH_PROMISE.
@@ -1044,23 +908,21 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
 
   FrameUnknown _ -> pure True  -- RFC 9113 §4.1: unknown frame types MUST be ignored
 
--- | Send a stream-scoped RST_STREAM with the given error code.
--- | Eager byte-for-byte copy of a 'ByteString' — see the matching
--- helper in "Network.HTTP2.Client" for the long explanation.  In
--- short: 'BS.copy' is too lazy under inlining; the memcpy can be
--- deferred past the recv-buffer overwrite, and any slice we hand
--- off to a long-lived structure silently becomes the next frame's
--- bytes.  This walks every byte to make the materialisation
--- synchronous.
-forceCopyBS :: ByteString -> IO ByteString
-forceCopyBS (BSI.PS srcFp srcOff srcLen) = do
-  dstFp <- BSI.mallocByteString srcLen
-  withForeignPtr srcFp $ \src ->
-    withForeignPtr dstFp $ \dst ->
-      BSI.memcpy dst (src `plusPtr` srcOff) srcLen
-  let !result = BSI.PS dstFp 0 srcLen
-  BS.foldr' (\b acc -> b `seq` acc) () result `seq` pure result
+finishRequestBody :: StreamRec -> [Header] -> IO ()
+finishRequestBody sr trailers = do
+  _ <- tryPutMVar (srTrailers sr) (Right trailers)
+  atomically $ writeTBQueue (srBodyQueue sr) BodyChunkEnd
 
+rejectRequestBody :: Connection -> IORef (Map.Map StreamId StreamRec) -> StreamId -> StreamRec -> ErrorCode -> ByteString -> IO Bool
+rejectRequestBody conn streamsRef sid sr code reason = do
+  let err = ConnectionError code reason sid
+  sendRstStream conn sid code
+  atomicModifyStreams_ streamsRef (Map.adjust (\current -> current { srState = StClosedSrv }) sid)
+  _ <- tryPutMVar (srTrailers sr) (Left err)
+  atomically $ writeTBQueue (srBodyQueue sr) (BodyChunkError err)
+  pure True
+
+-- | Send a stream-scoped RST_STREAM with the given error code.
 sendRstStream :: Connection -> StreamId -> ErrorCode -> IO ()
 sendRstStream conn sid code =
   sendFrame conn $ Frame
@@ -1086,53 +948,6 @@ headersSelfDependency sid flags body0
              dep = depRaw .&. 0x7FFFFFFF
          in dep == sid
 
--- | Pull a non-negative integer from a @content-length@ header.
--- Returns 'Nothing' when no @content-length@ is present, or when the
--- value isn't parseable (in which case we don't enforce it).
-lookupContentLength :: [(ByteString, ByteString)] -> Maybe Int
-lookupContentLength = go
-  where
-    go [] = Nothing
-    go ((n, v) : rest)
-      | n == "content-length" =
-          case BS.foldl' step (Just 0) v of
-            Just k -> Just k
-            Nothing -> go rest
-      | otherwise = go rest
-    step (Just acc) c
-      | c >= 0x30 && c <= 0x39 = Just (acc * 10 + fromIntegral (c - 0x30))
-      | otherwise              = Nothing
-    step Nothing _ = Nothing
-
--- | If a content-length was declared, returns 'Just' iff the
--- received DATA byte count doesn't match it. Returns 'Nothing'
--- when the stream is consistent (or when no content-length was
--- declared).
-checkContentLength
-  :: StreamId -> IORef (Map.Map StreamId StreamRec) -> IO (Maybe ())
-checkContentLength sid streamsRef = do
-  streams <- readIORef streamsRef
-  case Map.lookup sid streams of
-    Just sr -> case srExpectedLength sr of
-      Just expected
-        | expected /= srReceivedBytes sr -> pure (Just ())
-      _ -> pure Nothing
-    Nothing -> pure Nothing
-
--- | Validate the pseudo-header + regular-header rules from RFC
--- 9113 §8.3. Returns 'Just msg' on the first violation.
---
--- Specifically:
---
---   * Header field names must be lowercase (§8.2.1)
---   * No connection-specific headers (Connection, Transfer-Encoding,
---     Keep-Alive, Upgrade, Proxy-*) — §8.2.2
---   * Pseudo-headers must precede regular headers (§8.3)
---   * Only request pseudo-headers are allowed:
---     ':method', ':scheme', ':path', ':authority'
---   * No unknown pseudo-headers
---   * No pseudo-headers in trailers (we don't yet distinguish trailers
---     here; the validation runs on the initial HEADERS).
 -- | RFC 7541 §4.1 sizing: 32 octets overhead per field, plus the
 -- byte lengths of name and value.  Used to enforce the peer's
 -- advertised SETTINGS_MAX_HEADER_LIST_SIZE — exceeding it lets the
@@ -1151,8 +966,8 @@ headerListSize = foldr (\(n, v) acc -> acc + 32 + BS.length n + BS.length v) 0
 forceCopyHeaders
   :: [(ByteString, ByteString)] -> IO [(ByteString, ByteString)]
 forceCopyHeaders = mapM $ \(n, v) -> do
-  n' <- forceCopyBS n
-  v' <- forceCopyBS v
+  n' <- copyReceivedBytes n
+  v' <- copyReceivedBytes v
   pure (n', v')
 
 -- | Run @io@ but abandon it (and return 'Nothing') if it takes longer
@@ -1222,100 +1037,24 @@ overHeaderListLimit' s hs = case settingsMaxHeaderListSize s of
   Nothing  -> False
   Just lim -> headerListSize hs > fromIntegral lim
 
-validateRequestHeaders :: [(ByteString, ByteString)] -> Maybe ByteString
-validateRequestHeaders hs = case walk True hs of
-  Just err -> Just err
-  Nothing  -> presenceCheck
-  where
-    presenceCheck
-      | methods == 0 = Just "missing :method"
-      | methods > 1 = Just "duplicated :method"
-      | scheme  == 0 = Just "missing :scheme"
-      | scheme  > 1 = Just "duplicated :scheme"
-      | path    == 0 = Just "missing :path"
-      | path    > 1 = Just "duplicated :path"
-      | countPseudo ":authority" > 1 = Just "duplicated :authority"
-      | any (\(n, v) -> n == ":path" && BS.null v) hs = Just "empty :path"
-      | otherwise = Nothing
-    methods = countPseudo ":method"
-    scheme  = countPseudo ":scheme"
-    path    = countPseudo ":path"
-    countPseudo p = length (filter ((== p) . fst) hs)
-
-    walk _ [] = Nothing
-    walk seenRegular ((name, val) : rest)
-      | BS.null name = Just "empty header name"
-      | BS.head name == 0x3A {- ':' -} =
-          if not seenRegular
-            then Just "pseudo-header after regular header"
-            else if name `elem` allowedPseudos
-                   then walk True rest
-                   else Just "unknown pseudo-header"
-      | hasUppercase name = Just "uppercase header name"
-      | isConnectionSpecific name = Just "connection-specific header"
-      | name == "te" && val /= "trailers" =
-          Just "TE header field with value other than \"trailers\""
-      | otherwise = walk False rest
-
-    allowedPseudos =
-      [":method", ":scheme", ":path", ":authority"]
-
-    hasUppercase :: ByteString -> Bool
-    hasUppercase = BS.any (\c -> c >= 0x41 && c <= 0x5A)
-
-    isConnectionSpecific :: ByteString -> Bool
-    isConnectionSpecific n = n `elem`
-      [ "connection", "transfer-encoding", "keep-alive"
-      , "upgrade", "proxy-connection"
-      ]
-
--- | Strip the PADDED + PRIORITY prefixes from a frame payload per
--- RFC 9113. PADDED is recognised on DATA / HEADERS / PUSH_PROMISE
--- / CONTINUATION; PRIORITY is recognised on HEADERS only.
---
--- Returns 'Nothing' if the frame is malformed (pad length exceeds
--- payload, priority prefix missing, etc.).
-stripPaddingAndPriority
-  :: FrameType -> FrameFlags -> ByteString -> Maybe ByteString
-stripPaddingAndPriority ft flags bs0 = do
-  bs1 <- stripPadding flags bs0
-  if ft == FrameHeaders && testFlag flags flagPriority
-    then stripPriority bs1
-    else Just bs1
-  where
-    stripPadding fl bs
-      | not (testFlag fl flagPadded) = Just bs
-      | BS.null bs = Nothing
-      | otherwise =
-          let padLen = fromIntegral (BS.head bs)
-              total = BS.length bs
-          in if padLen + 1 > total
-               then Nothing
-               else Just (BS.take (total - padLen - 1) (BS.drop 1 bs))
-
-    stripPriority bs
-      | BS.length bs >= 5 = Just (BS.drop 5 bs)
-      | otherwise = Nothing
-
 buildRequest
   :: Connection
   -> IORef Int      -- ^ connection-level recv-unacked counter
   -> IORef Int      -- ^ connection-level recv-window mirror
   -> StreamId
-  -> [(ByteString, ByteString)]
+  -> RequestHead
   -> StreamRec
   -> Request
-buildRequest conn connUnackedRef connWindowRef sid headers sr =
-  let findHeader name = maybe "" id (lookup name headers)
-  in Request
-    { requestMethod = findHeader ":method"
-    , requestPath = findHeader ":path"
-    , requestScheme = findHeader ":scheme"
-    , requestAuthority = findHeader ":authority"
-    , requestHeaders = filter (\(k, _) -> not (BS.isPrefixOf ":" k)) headers
+buildRequest conn connUnackedRef connWindowRef sid requestHead sr =
+  Request
+    { requestMethod = requestHeadMethod requestHead
+    , requestPath = requestHeadPath requestHead
+    , requestScheme = requestHeadScheme requestHead
+    , requestAuthority = requestHeadAuthority requestHead
+    , requestHeaders = requestHeadFields requestHead
     , requestBody = makeRequestBody conn connUnackedRef connWindowRef sid sr
     , requestStreamId = sid
-    , requestTrailers = readMVar (srTrailers sr)
+    , requestTrailers = readMVar (srTrailers sr) >>= either throwIO pure
     }
 
 sendResponse :: Connection -> StreamId -> FlowControl -> Response -> IO ()
@@ -1334,24 +1073,29 @@ sendResponse conn sid sendWin resp = do
   -- two responses encode in one order and reach the wire in the other,
   -- desyncing the peer's decoder.
   case responseBody resp of
+    _ | responseStatus resp >= 100 && responseStatus resp < 200 ->
+      encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
     ResponseBodyEmpty
       | hasTrailers -> do
+          checkResponseTrailers trailers
           encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
           sendTrailers conn sid trailers
       | otherwise ->
           encodeAndSendHeaderBlock conn sid True 0 allHeaders maxFrame
     ResponseBodyBS body -> do
+      checkResponseTrailers trailers
       encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
-      sendBytes conn sendWin sid (not hasTrailers) body maxFrame
+      when (not hasTrailers || not (BS.null body)) $
+        sendBytes conn sendWin sid (not hasTrailers) body maxFrame
       if hasTrailers
         then sendTrailers conn sid trailers
         else pure ()
     ResponseBodyStream producer -> do
       encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
-      streamBody conn sendWin sid producer hasTrailers
-      if hasTrailers
-        then sendTrailers conn sid trailers
-        else pure ()
+      streamBody conn sendWin sid producer (pure trailers)
+    ResponseBodyStreamWithTrailers producer produceTrailers -> do
+      encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
+      streamBody conn sendWin sid producer ((trailers <>) <$> produceTrailers)
 
 -- | Send a contiguous DATA payload chunked to MAX_FRAME_SIZE, with the
 -- final frame carrying @END_STREAM@ when @endStream@ is 'True'.
@@ -1431,23 +1175,38 @@ sendTrailers conn sid trailers = do
   maxFrame <- peerMaxFrameSize conn
   encodeAndSendHeaderBlock conn sid True 0 trailers maxFrame
 
+checkResponseTrailers :: [(ByteString, ByteString)] -> IO ()
+checkResponseTrailers trailers =
+  case validateTrailerBlock flagEndStream trailers of
+    Just reason -> fail (BS8.unpack reason)
+    Nothing -> pure ()
+{-# INLINE checkResponseTrailers #-}
+
 streamBody
-  :: Connection -> FlowControl -> StreamId -> IO (Maybe ByteString) -> Bool -> IO ()
-streamBody conn sendWin sid producer hasTrailers = do
+  :: Connection
+  -> FlowControl
+  -> StreamId
+  -> IO (Maybe ByteString)
+  -> IO [(ByteString, ByteString)]
+  -> IO ()
+streamBody conn sendWin sid producer produceTrailers = do
   maxFrame <- peerMaxFrameSize conn
   loop maxFrame
   where
     -- Send each chunk immediately as it is produced — never hold a frame
     -- waiting for the next one, which would deadlock full-duplex bidi
     -- streaming (the peer won't send the next request, hence the next
-    -- response chunk, until it receives the one we'd be holding). The end
-    -- of the body is marked with an empty DATA + END_STREAM terminator;
-    -- that terminator is exempt from peers' empty-frame flood defenses
-    -- because it carries END_STREAM (it ends the stream = makes progress).
+    -- response chunk, until it receives the one we'd be holding).
     loop maxFrame = do
       mChunk <- producer
       case mChunk of
-        Nothing -> sendDataFrame conn sendWin sid (not hasTrailers) BS.empty
+        Nothing -> do
+          trailers <- produceTrailers
+          case trailers of
+            [] -> sendDataFrame conn sendWin sid True BS.empty
+            _ -> do
+              checkResponseTrailers trailers
+              sendTrailers conn sid trailers
         Just chunk
           | BS.null chunk -> loop maxFrame
           | otherwise -> do

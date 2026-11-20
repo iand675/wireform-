@@ -1,68 +1,79 @@
-{- |
-@PEP@ — the general header of the (abandoned) W3C \"PEP - an Extension
-Mechanism for HTTP\" draft, the precursor to the RFC 2774 HTTP Extension
-Framework.
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
-The @PEP@ header carries one or more /protocol declarations/, each
-associating an extension with a URI and a brace-delimited @{ … }@ map of
-@strength@ / @map@ / instance directives, e.g.
+{- | @PEP@ declares which extensions have already been applied to an HTTP request or response.
 
-@
-PEP: {{map \"/Pep/Inventory\"}{strength must}}
-@
+Spec: <https://www.w3.org/TR/WD-http-pep-971121>
 
-This mechanism never advanced beyond an Internet-Draft and the nested,
-brace-delimited grammar is effectively dead; per the depth guidance for
-obsolete/host-specific values we do not fabricate a structured type but
-preserve the field value verbatim as a round-tripping 'ST.ShortText'
-(mirroring 'Network.HTTP.Headers.Referer.Referer').
-
-Spec: W3C draft \"PEP - an Extension Mechanism for HTTP\" <https://www.w3.org/TR/WD-http-pep-971121> (Internet-Draft <https://datatracker.ietf.org/doc/html/draft-nielsen-pep-http-00>).
-
-See also: "Network.HTTP.Headers.PEPInfo", "Network.HTTP.Headers.Man", "Network.HTTP.Headers.Opt", "Network.HTTP.Headers.Ext".
+See also: "Network.HTTP.Headers.PEPInfo", "Network.HTTP.Headers.Man", "Network.HTTP.Headers.Opt".
 -}
 module Network.HTTP.Headers.PEP (
-  PEP (..),
+  PEP (PEP, rawPEP),
+  pepDeclarations,
+  pepFromDeclarations,
   pepParser,
   renderPEP,
 ) where
 
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.PEP (PepDeclaration, pepDeclarationParser, renderPepDeclaration)
+import Network.HTTP.Grammar.Parser (ParserT, httpList)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPEP)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import qualified Network.HTTP.Headers.RetainedList as R
 
 
--- | The raw, verbatim value of a @PEP@ protocol-declaration header.
-newtype PEP = PEP {rawPEP :: ST.ShortText}
-  deriving stock (Eq, Show)
+newtype PEP = PEPList (R.RetainedList PepDeclaration)
+  deriving stock (Eq)
+
+
+-- | Legacy wire spelling. Use 'pepFromDeclarations' for checked authoring.
+pattern PEP :: ST.ShortText -> PEP
+pattern PEP {rawPEP} <- (fieldText -> rawPEP)
+  where
+    PEP text = PEPList (R.RawList text)
+
+
+{-# COMPLETE PEP #-}
+
+
+instance Show PEP where
+  showsPrec precedence (PEP text) =
+    showParen (precedence > 10) $ showString "PEP {rawPEP = " . shows text . showChar '}'
+
+
+fieldText :: PEP -> ST.ShortText
+fieldText (PEPList entries) = R.legacyText entries
+
+
+pepDeclarations :: PEP -> Either String (NE.NonEmpty PepDeclaration)
+pepDeclarations (PEPList entries) = R.listEntries "PEP" (httpList pepDeclarationParser) entries
+
+
+pepFromDeclarations :: NE.NonEmpty PepDeclaration -> Either String PEP
+pepFromDeclarations = fmap PEPList . R.listFromEntries "PEP" (httpList pepDeclarationParser) renderPepDeclaration
 
 
 instance KnownHeader PEP where
   type ParseFailure PEP = String
-  type Cardinality PEP = 'ZeroOrOne
+  type Cardinality PEP = 'ZeroOrMore
   type Direction PEP = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser pepParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing PEP header: " <> show rest
-    Fail -> Left "Failed to parse PEP header"
-    Err e -> Left e
+  parseFromHeaders _ fields = PEPList <$> R.decodeList "PEP" (httpList pepDeclarationParser) fields
 
 
-  renderToHeaders _ = M.toStrictByteString . renderPEP
+  renderToHeaders _ (PEPList entries) = NE.toList (R.fieldLines entries)
 
 
   headerName _ = hPEP
 
 
 pepParser :: ParserT st String PEP
-pepParser = PEP <$> takeRestShortText
+pepParser = PEPList <$> R.listParser "PEP" (httpList pepDeclarationParser)
 
 
 renderPEP :: PEP -> M.Builder
-renderPEP (PEP v) = shortText v
+renderPEP (PEPList entries) = R.renderList entries

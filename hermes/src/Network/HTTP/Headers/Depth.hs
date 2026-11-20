@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 {- |
 RFC 4918 §10.2 @Depth@ request header — controls how far a WebDAV
@@ -21,7 +22,7 @@ module Network.HTTP.Headers.Depth (
   renderDepth,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hDepth)
 import qualified Network.HTTP.Headers.Mason as M
@@ -39,11 +40,10 @@ instance KnownHeader Depth where
   type Direction Depth = 'Request
 
 
-  parseFromHeaders _ headers = case runParser depthParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Depth header: " <> show rest
-    Fail -> Left "Failed to parse Depth header"
-    Err e -> Left e
+  parseFromHeaders _ ("0" :| []) = Right Depth0
+  parseFromHeaders _ ("1" :| []) = Right Depth1
+  parseFromHeaders _ ("infinity" :| []) = Right DepthInfinity
+  parseFromHeaders _ fields = parseSingleFieldLine "Depth" depthParser fields
 
 
   renderToHeaders _ = M.toStrictByteString . renderDepth
@@ -54,13 +54,13 @@ instance KnownHeader Depth where
 
 depthParser :: ParserT st String Depth
 depthParser =
-  $( switch
-      [|
-        case _ of
-          "0" -> pure Depth0
-          "1" -> pure Depth1
-          "infinity" -> pure DepthInfinity
-        |]
+  $( switchAsciiCI
+       [|
+         case _ of
+           "0" -> pure Depth0
+           "1" -> pure Depth1
+           "infinity" -> pure DepthInfinity
+         |]
    )
 
 

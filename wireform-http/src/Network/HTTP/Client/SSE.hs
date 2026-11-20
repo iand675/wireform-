@@ -174,6 +174,7 @@ import Control.Monad.IO.Unlift (MonadUnliftIO, withRunInIO)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.IORef
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Maybe (mapMaybe)
 import Network.HTTP.Client.Body (Body)
 import Network.HTTP.Client.BodyStream (Popper)
@@ -186,13 +187,16 @@ import Network.HTTP.Client.Media (
   contentTypeOf,
   maxQuality,
  )
-import Network.HTTP.Client.Request (Request, setHeader)
+import Network.HTTP.Client.Request (Request, removeHeader, setHeader)
+import Network.HTTP.Client.Request qualified as Request
 import Network.HTTP.Client.Response (
   RawResponse (bodyPopper, statusCode),
   headers,
  )
 import Network.HTTP.Client.Send (withResponse)
 import Network.HTTP.Client.Transport (Transport)
+import Network.HTTP.Headers qualified as Typed
+import Network.HTTP.Headers.LastEventID (LastEventID)
 import Network.HTTP.Types.Body qualified as B
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Status qualified as S
@@ -281,6 +285,9 @@ data SseParser = SseParser
   even when functionally empty).
   -}
   , spLastEventId :: !(Maybe ByteString)
+  -- ^ The ID buffer, including any ID in the unfinished block.
+  , spCommittedEventId :: !(Maybe ByteString)
+  -- ^ Resume cursor from the most recent complete block.
   , spBomChecked :: !Bool
   -- ^ Whether the optional leading UTF-8 BOM has been consumed.
   }
@@ -298,6 +305,7 @@ newSseParser =
     , spDataBuf = mempty
     , spDataNonEmpty = False
     , spLastEventId = Nothing
+    , spCommittedEventId = Nothing
     , spBomChecked = False
     }
 
@@ -362,12 +370,16 @@ popper as needed to surface the next frame. It returns
 subsequent call.
 -}
 sseFramePopper :: Popper -> IO (IO (Maybe SseFrame))
-sseFramePopper popper = do
+sseFramePopper = sseFramePopperWith newSseParser (const (pure ()))
+
+
+sseFramePopperWith :: SseParser -> (Maybe ByteString -> IO ()) -> Popper -> IO (IO (Maybe SseFrame))
+sseFramePopperWith initial commit popper = do
   -- State: parser + a small queue of frames already extracted but
   -- not yet returned. We need the queue because one chunk can
   -- produce more than one frame (consider a server flushing many
   -- buffered events into a single TCP segment).
-  ref <- newIORef (newSseParser, [] :: [SseFrame], False)
+  ref <- newIORef (initial, [] :: [SseFrame], False)
   let loop = do
         (p, queued, eofSeen) <- readIORef ref
         case queued of
@@ -385,6 +397,7 @@ sseFramePopper popper = do
                     pure Nothing
                   else do
                     let (p', newFrames) = feedSseParser p chunk
+                    commit (spCommittedEventId p')
                     case newFrames of
                       (f : rest) -> do
                         writeIORef ref (p', rest, False)
@@ -393,6 +406,7 @@ sseFramePopper popper = do
                         writeIORef ref (p', [], False)
                         loop
   pure loop
+{-# INLINE sseFramePopperWith #-}
 
 
 {- | Like 'sseFramePopper' but filters to dispatched events,
@@ -459,10 +473,21 @@ withSSEFrames
   -> (IO (Maybe SseFrame) -> m a)
   -> m a
 withSSEFrames t req k =
+  withSSEBody t req $ \popper -> do
+    framePopper <- liftIO (sseFramePopper popper)
+    k framePopper
+
+
+withSSEBody
+  :: (MonadUnliftIO m, Body body)
+  => Transport IO
+  -> Request body
+  -> (Popper -> m a)
+  -> m a
+withSSEBody t req k =
   withResponse t (sseRequestHeaders req) acceptList $ \raw -> do
     liftIO (assertSseResponse raw)
-    framePopper <- liftIO (sseFramePopper (bodyPopper raw))
-    k framePopper
+    k (bodyPopper raw)
   where
     acceptList :: [(MediaType, Quality)]
     acceptList = [(mediaType @EventStream, maxQuality)]
@@ -508,7 +533,7 @@ assertSseResponse raw = do
 {- | Reconnection knobs for 'withReconnectingSSE'. Mirrors the
 behaviour of the WHATWG EventSource interface: on disconnect
 (or non-fatal status), sleep and reissue the request with a
-@Last-Event-ID@ header echoing the most recent dispatched id.
+@Last-Event-ID@ header with the cursor from the last complete block.
 -}
 data ReconnectPolicy = ReconnectPolicy
   { rpInitialRetryMs :: !Int
@@ -565,8 +590,9 @@ data SseStopReason
 
 {- | Reconnecting EventSource client. Behaves like 'withSSE' but
 reissues the request when the server hangs up, sending
-@Last-Event-ID@ with the most recent dispatched id and honoring
-the server's @retry:@ directives.
+@Last-Event-ID@ with the cursor from the last complete block and
+honoring the server's @retry:@ directives. An empty ID clears the
+resume header. A valid caller-supplied header seeds the cursor.
 
 The callback's popper returns 'Nothing' only when the loop has
 given up (server sent @204 No Content@, max attempts hit, or a
@@ -610,7 +636,7 @@ withReconnectingSSEFrames transport req0 policy k = withRunInIO $ \runInIO -> do
   -- big buffer adds latency without adding value, and the worker
   -- is happy to block when the consumer is slow.
   q <- newTBQueueIO 16
-  lastId <- newIORef Nothing
+  lastId <- newIORef (if maySendCursor then resumeSeed req0 else Nothing)
   retryMs <- newIORef (clampRetry (rpInitialRetryMs policy))
   stopRef <- newIORef (Nothing :: Maybe SseStopReason)
   -- A flag the consumer flips when its callback exits so the
@@ -638,6 +664,11 @@ withReconnectingSSEFrames transport req0 policy k = withRunInIO $ \runInIO -> do
     (\_ -> runInIO (k consumer))
   where
     clampRetry n = max 0 (min n (rpMaxRetryMs policy))
+    baseRequest = removeHeader H.hLastEventID req0
+    baseFields = Request.headers baseRequest
+    maySendCursor =
+      not (H.hasHeader H.hConnection baseFields)
+        || H.hasHeader H.hLastEventID (H.stripHopByHop ((H.hLastEventID, BS.empty) : baseFields))
 
     -- Reconnect loop runs in the worker thread.
     reconnectLoop q lastId retryMs stopRef done = go 0
@@ -650,16 +681,19 @@ withReconnectingSSEFrames transport req0 policy k = withRunInIO $ \runInIO -> do
               -- Build the per-attempt request, injecting
               -- Last-Event-ID if we have one.
               mLast <- readIORef lastId
-              let req = case mLast of
-                    Nothing -> req0
-                    Just lid -> setHeader H.hLastEventID lid req0
+              let req
+                    | maySendCursor, Just lid <- mLast >>= resumeHeader =
+                        setHeader H.hLastEventID lid baseRequest
+                    | otherwise = baseRequest
+                  initial = newSseParser{spLastEventId = mLast, spCommittedEventId = mLast}
               -- Reset the failure counter on a connection that
               -- dispatches at least one event.
               succeededRef <- newIORef False
               outcome :: Either SomeException () <-
                 try $
-                  withSSEFrames transport req $ \fp ->
-                    pumpFrames fp q lastId retryMs succeededRef done
+                  withSSEBody transport req $ \popper -> do
+                    fp <- sseFramePopperWith initial (writeIORef lastId) popper
+                    pumpFrames fp q retryMs succeededRef done
               succeeded <- readIORef succeededRef
               let newFailCount = if succeeded then 0 else failCount + 1
               case outcome of
@@ -697,9 +731,9 @@ withReconnectingSSEFrames transport req0 policy k = withRunInIO $ \runInIO -> do
               writeIORef stopRef (Just reason)
               atomically (writeTBQueue q Nothing)
 
-    -- Pump frames from the popper into the queue, updating
-    -- last-event-id and retry as we go.
-    pumpFrames fp q lastId retryMs succeededRef done = loop
+    -- Pump frames from the popper into the queue, updating retry
+    -- accounting as they arrive.
+    pumpFrames fp q retryMs succeededRef done = loop
       where
         loop = do
           mf <- fp
@@ -707,11 +741,7 @@ withReconnectingSSEFrames transport req0 policy k = withRunInIO $ \runInIO -> do
             Nothing -> pure ()
             Just f -> do
               case f of
-                SseDispatch ev -> do
-                  case sseEventId ev of
-                    Just lid -> writeIORef lastId (Just lid)
-                    Nothing -> pure ()
-                  writeIORef succeededRef True
+                SseDispatch _ -> writeIORef succeededRef True
                 SseRetry ms -> do
                   let clamped = max 0 (min ms (rpMaxRetryMs policy))
                   writeIORef retryMs clamped
@@ -720,6 +750,21 @@ withReconnectingSSEFrames transport req0 policy k = withRunInIO $ \runInIO -> do
               -- Bail early if the consumer signalled done.
               d <- readIORef done
               when (not d) loop
+
+
+resumeSeed :: Request body -> Maybe ByteString
+resumeSeed request = do
+  field <- either (const Nothing) id (H.lookupSingletonHeader H.hLastEventID (Request.headers request))
+  resumeHeader field
+
+
+resumeHeader :: ByteString -> Maybe ByteString
+resumeHeader field
+  | BS.null field = Nothing
+  | otherwise =
+      case Typed.parseFromHeaders @LastEventID Typed.defaultHeaderSettings (field :| []) of
+        Right cursor -> Just (Typed.renderToHeaders Typed.defaultHeaderSettings cursor)
+        Left _ -> Nothing
 
 
 -- ---------------------------------------------------------------------------
@@ -1182,11 +1227,60 @@ applyField p name value = case name of
     -- Spec: ignore the field entirely if the value contains a NUL.
     if 0x00 `BS.elem` value
       then (p, [])
-      else (p {spLastEventId = Just value}, [])
+      else (p {spLastEventId = Just (eventIdUtf8 value)}, [])
   "retry" -> case parseAsciiDigits value of
     Just n -> (p, [SseRetry n])
     Nothing -> (p, [])
   _ -> (p, [])
+
+
+-- SSE reads IDs as UTF-8. Copy valid runs only when an ill-formed
+-- sequence needs replacement, consuming its maximal valid prefix.
+eventIdUtf8 :: ByteString -> ByteString
+eventIdUtf8 bytes
+  | BS.isValidUtf8 bytes = bytes
+  | otherwise = repairEventIdUtf8 bytes
+{-# INLINE eventIdUtf8 #-}
+
+
+repairEventIdUtf8 :: ByteString -> ByteString
+repairEventIdUtf8 bytes = WB.toStrictByteString (scan 0 0 mempty)
+  where
+    size = BS.length bytes
+    at = BS.index bytes
+
+    scan start i !out
+      | i >= size = out <> WB.byteString (BS.drop start bytes)
+      | lead < 0x80 = scan start (i + 1) out
+      | lead < 0xC2 || lead > 0xF4 = replace start i (i + 1) out
+      | j < size && at j >= secondMin && at j <= secondMax =
+          continue start i (j + 1) (width - 2) out
+      | otherwise = replace start i j out
+      where
+        lead = at i
+        j = i + 1
+        width
+          | lead < 0xE0 = 2
+          | lead < 0xF0 = 3
+          | otherwise = 4
+        secondMin
+          | lead == 0xE0 = 0xA0
+          | lead == 0xF0 = 0x90
+          | otherwise = 0x80
+        secondMax
+          | lead == 0xED = 0x9F
+          | lead == 0xF4 = 0x8F
+          | otherwise = 0xBF
+
+    continue start i j (remaining :: Int) out
+      | remaining == 0 = scan start j out
+      | j < size && at j >= 0x80 && at j <= 0xBF =
+          continue start i (j + 1) (remaining - 1) out
+      | otherwise = replace start i j out
+
+    replace start i resume out =
+      let prefix = BS.take (i - start) (BS.drop start bytes)
+      in scan resume resume (out <> WB.byteString prefix <> WB.byteString "\xEF\xBF\xBD")
 
 
 dispatch :: SseParser -> (SseParser, [SseFrame])
@@ -1198,6 +1292,7 @@ dispatch p
       ( p
           { spEventType = Nothing
           , spDataBuf = mempty
+          , spCommittedEventId = spLastEventId p
           }
       , []
       )
@@ -1215,6 +1310,7 @@ dispatch p
               { spEventType = Nothing
               , spDataBuf = mempty
               , spDataNonEmpty = False
+              , spCommittedEventId = spLastEventId p
               }
       in (p', [SseDispatch ev])
 

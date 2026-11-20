@@ -96,15 +96,15 @@ addHeaders m p hs = (":method", m) : (":path", p) : hs
 
 requestNoBody :: ByteString -> Path -> RequestHeaders -> Request
 requestNoBody m p hdr =
-  Request (OutObj (addHeaders m p hdr) OutBodyNone defaultTrailersMaker)
+  Request (outObjWithNoTrailers (addHeaders m p hdr) OutBodyNone)
 
 requestFile :: ByteString -> Path -> RequestHeaders -> FileSpec -> Request
 requestFile m p hdr fs =
-  Request (OutObj (addHeaders m p hdr) (OutBodyFile fs) defaultTrailersMaker)
+  Request (outObjWithNoTrailers (addHeaders m p hdr) (OutBodyFile fs))
 
 requestBuilder :: ByteString -> Path -> RequestHeaders -> BSB.Builder -> Request
 requestBuilder m p hdr b =
-  Request (OutObj (addHeaders m p hdr) (OutBodyBuilder b) defaultTrailersMaker)
+  Request (outObjWithNoTrailers (addHeaders m p hdr) (OutBodyBuilder b))
 
 requestStreaming
   :: ByteString
@@ -113,7 +113,7 @@ requestStreaming
   -> ((BSB.Builder -> IO ()) -> IO () -> IO ())
   -> Request
 requestStreaming m p hdr body =
-  Request (OutObj (addHeaders m p hdr) (OutBodyStreaming body) defaultTrailersMaker)
+  Request (outObjWithNoTrailers (addHeaders m p hdr) (OutBodyStreaming body))
 
 requestStreamingUnmask
   :: ByteString
@@ -132,7 +132,7 @@ requestStreamingIface
   -> (OutBodyIface -> IO ())
   -> Request
 requestStreamingIface m p hdr body =
-  Request (OutObj (addHeaders m p hdr) (OutBodyStreamingIface body) defaultTrailersMaker)
+  Request (outObjWithNoTrailers (addHeaders m p hdr) (OutBodyStreamingIface body))
 
 setRequestTrailersMaker :: Request -> TrailersMaker -> Request
 setRequestTrailersMaker (Request o) tm = Request o { outObjTrailers = tm }

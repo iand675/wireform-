@@ -1,40 +1,64 @@
-{- |
-Module      : Network.HTTP.Headers.GetProfile
-Description : The obsolete @GetProfile@ HTTP header (Open Profiling Standard).
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
-The @GetProfile@ header was defined by the Open Profiling Standard (OPS), a
-1997 W3C Note describing the exchange of user profile information over HTTP. A
-server emits @GetProfile@ to request profile elements (with credentials) from a
-user agent. OPS was never standardized and was superseded by P3P; its value is
-an opaque, host-specific encoding.
+{- | @GetProfile@ is an OPS response field requesting profile information. It carries
+the escaped profile-read object.
+The OPS note describes the payload and leaves its wire encoding open.
+The codec validates the HTTP field and preserves its octets.
 
-Because the grammar is historic and effectively opaque, this module preserves
-the field value verbatim as a faithful raw newtype rather than fabricating a
-dead grammar.
-
-Spec: W3C Note \"Implementation of OPS over HTTP\" (NOTE-OPS-OverHTTP, 1997-06-02)
-<https://www.w3.org/TR/NOTE-OPS-OverHTTP>
+Spec: <https://www.w3.org/TR/NOTE-OPS-OverHTTP>
 
 See also: "Network.HTTP.Headers.SetProfile", "Network.HTTP.Headers.ProfileObject", "Network.HTTP.Headers.P3P".
 -}
 module Network.HTTP.Headers.GetProfile (
-  GetProfile (..),
+  GetProfile (GetProfile, getProfileValue),
+  getProfileBytes,
+  getProfileFromBytes,
   getProfileParser,
   renderGetProfile,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.ByteString (ByteString)
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hGetProfile)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.OpaqueField
 
 
--- | @GetProfile@ header value, preserved verbatim (opaque OPS profile request).
-newtype GetProfile = GetProfile {getProfileValue :: ST.ShortText}
-  deriving stock (Eq, Show)
+newtype GetProfile = GetProfileBytes ByteString
+  deriving stock (Eq)
+
+
+{- | Legacy text view. Use 'getProfileBytes' for exact wire data and
+'getProfileFromBytes' for checked authoring.
+-}
+pattern GetProfile :: ST.ShortText -> GetProfile
+pattern GetProfile {getProfileValue} <- (fieldText -> getProfileValue)
+  where
+    GetProfile text = GetProfileBytes (ST.toByteString text)
+
+
+{-# COMPLETE GetProfile #-}
+
+
+instance Show GetProfile where
+  showsPrec precedence (GetProfile text) =
+    showParen (precedence > 10) $ showString "GetProfile {getProfileValue = " . shows text . showChar '}'
+
+
+fieldText :: GetProfile -> ST.ShortText
+fieldText = opaqueFieldText . getProfileBytes
+
+
+-- | The original field bytes, including any received optional whitespace.
+getProfileBytes :: GetProfile -> ByteString
+getProfileBytes (GetProfileBytes wire) = wire
+
+
+getProfileFromBytes :: ByteString -> Either String GetProfile
+getProfileFromBytes = checkOpaqueField "GetProfile" GetProfileBytes
 
 
 instance KnownHeader GetProfile where
@@ -43,22 +67,18 @@ instance KnownHeader GetProfile where
   type Direction GetProfile = 'Response
 
 
-  parseFromHeaders _ headers = case runParser getProfileParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing GetProfile header: " <> show rest
-    Fail -> Left "Failed to parse GetProfile header"
-    Err e -> Left e
+  parseFromHeaders _ = parseOpaqueFieldLine "GetProfile" GetProfileBytes
 
 
-  renderToHeaders _ = M.toStrictByteString . renderGetProfile
+  renderToHeaders _ = getProfileBytes
 
 
   headerName _ = hGetProfile
 
 
 getProfileParser :: ParserT st String GetProfile
-getProfileParser = GetProfile <$> takeRestShortText
+getProfileParser = opaqueFieldParser "GetProfile" GetProfileBytes
 
 
 renderGetProfile :: GetProfile -> M.Builder
-renderGetProfile (GetProfile v) = shortText v
+renderGetProfile = M.byteString . getProfileBytes

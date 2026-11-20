@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- |
 @Authentication-Info@ — a response header carrying the final,
 scheme-specific data a server communicates at the end of a successful
@@ -33,16 +31,12 @@ module Network.HTTP.Headers.AuthenticationInfo (
   CredentialParam (..),
 ) where
 
-import Control.Monad.Combinators (sepBy)
-import qualified Data.ByteString as B
-import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Authorization (CredentialParam (..))
+import Network.HTTP.Headers.Authorization (CredentialParam (..), authParamParser, renderAuthParam)
 import Network.HTTP.Headers.HeaderFieldName (hAuthenticationInfo)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import qualified Network.HTTP.Headers.Rendering.Util as R
 
 
 -- ---------------------------------------------------------------------------
@@ -62,18 +56,7 @@ instance KnownHeader AuthenticationInfo where
   type Direction AuthenticationInfo = 'Response
 
 
-  parseFromHeaders _ headers = do
-    pss <- traverse parseOne (NE.toList headers)
-    pure (AuthenticationInfo (concat pss))
-    where
-      parseOne hdr = case runParser authenticationInfoParser hdr of
-        OK (AuthenticationInfo ps) leftover
-          | B.null (dropOws leftover) -> Right ps
-          | otherwise ->
-              Left ("Unconsumed input after parsing Authentication-Info: " <> show leftover)
-        Fail -> Left "Failed to parse Authentication-Info header"
-        Err err -> Left err
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = fmap AuthenticationInfo . parseListFieldLines "Authentication-Info" (httpList authParamParser)
 
 
   renderToHeaders _ ai = [M.toStrictByteString (renderAuthenticationInfo ai)]
@@ -88,24 +71,7 @@ instance KnownHeader AuthenticationInfo where
 
 -- | Parse an @Authentication-Info@ value: a comma-separated @auth-param@ list.
 authenticationInfoParser :: ParserT st String AuthenticationInfo
-authenticationInfoParser = do
-  ows
-  ps <- authParamParser `sepBy` (ows *> $(char ',') *> ows)
-  ows
-  pure (AuthenticationInfo ps)
-
-
--- | @token BWS "=" BWS ( token / quoted-string )@.
-authParamParser :: ParserT st String (ShortText, CredentialParam)
-authParamParser = do
-  key <- rfc9110Token
-  bws
-  $(char '=')
-  bws
-  val <-
-    (CredentialParamString <$> rfc8941String)
-      <|> (CredentialParamToken <$> rfc9110Token)
-  pure (key, val)
+authenticationInfoParser = AuthenticationInfo <$> httpList authParamParser
 
 
 -- ---------------------------------------------------------------------------
@@ -114,11 +80,4 @@ authParamParser = do
 
 renderAuthenticationInfo :: AuthenticationInfo -> M.Builder
 renderAuthenticationInfo (AuthenticationInfo ps) =
-  M.intersperse ", " (map renderParam ps)
-
-
-renderParam :: (ShortText, CredentialParam) -> M.Builder
-renderParam (k, v) =
-  R.shortText k <> M.char7 '=' <> case v of
-    CredentialParamToken t -> R.shortText t
-    CredentialParamString s -> R.rfc8941String s
+  M.intersperse ", " (map renderAuthParam ps)

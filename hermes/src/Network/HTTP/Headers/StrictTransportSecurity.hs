@@ -1,4 +1,6 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 {- |
 @Strict-Transport-Security@ (HSTS) — a response header by which a
@@ -8,16 +10,16 @@ secure transport (HTTPS), for a duration of @max-age@ seconds.
 == Grammar
 
 @
-Strict-Transport-Security = directive *( OWS ";" OWS directive )
+Strict-Transport-Security = [ directive ] *( OWS ";" OWS [ directive ] )
 directive                 = directive-name [ "=" directive-value ]
 directive-name            = token
 directive-value           = token / quoted-string
 @
 
 The defined directives are @max-age=<delta-seconds>@ (REQUIRED), and
-the valueless flags @includeSubDomains@ and @preload@. Directive
-names are case-insensitive; the first occurrence of @max-age@ wins
-and unrecognised directives are ignored (RFC 6797 §6.1).
+the valueless @includeSubDomains@ flag. The @preload@ extension is
+also supported. Directive names are case-insensitive and unique.
+Unknown directives are ignored.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc6797#section-6.1>
 
@@ -29,16 +31,16 @@ module Network.HTTP.Headers.StrictTransportSecurity (
   renderStrictTransportSecurity,
 ) where
 
-import qualified Control.Applicative
-import Control.Monad (void)
-import qualified Data.ByteString as B
-import Data.Char (toLower)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import Data.CaseInsensitive (CI)
 import qualified Data.List.NonEmpty as NE
-import qualified Data.Text.Short as ST
+import qualified Data.Set as Set
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hStrictTransportSecurity)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Network.HTTP.Headers.TransportPolicy (directiveEnd, extension, policyAge, valueless)
 
 
 -- | Parsed @Strict-Transport-Security@ policy (RFC 6797 §6.1).
@@ -59,15 +61,8 @@ instance KnownHeader StrictTransportSecurity where
   type Direction StrictTransportSecurity = 'Response
 
 
-  parseFromHeaders _ headers = case runParser strictTransportSecurityParser (NE.head headers) of
-    OK sts leftover
-      | B.null (dropOws leftover) -> Right sts
-      | otherwise ->
-          Left ("Unconsumed input after parsing Strict-Transport-Security: " <> show leftover)
-    Fail -> Left "Failed to parse Strict-Transport-Security header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  -- RFC 6797 section 8.1 uses the first occurrence of this field.
+  parseFromHeaders _ = parseSTSField . NE.head
 
 
   renderToHeaders _ = M.toStrictByteString . renderStrictTransportSecurity
@@ -76,48 +71,61 @@ instance KnownHeader StrictTransportSecurity where
   headerName _ = hStrictTransportSecurity
 
 
--- | One parsed directive (internal).
 data Directive
-  = DMaxAge !Word
-  | DIncludeSubDomains
-  | DPreload
-  | DOther
+  = MaxAge !Word
+  | IncludeSubDomains
+  | Preload
+  | Extension !(CI ByteString)
+
+
+parseSTSField :: ByteString -> Either String StrictTransportSecurity
+parseSTSField wire
+  | BS.length wire <= BS.length prefix + 9
+  , Just digits <- BS.stripPrefix prefix wire =
+      withShortDecimal digits (\n -> Right (StrictTransportSecurity (fromIntegral n) False False)) fallback
+  | otherwise = fallback
+  where
+    prefix = "max-age="
+    fallback = parseFieldLine "Strict-Transport-Security" strictTransportSecurityParser wire
 
 
 strictTransportSecurityParser :: ParserT st String StrictTransportSecurity
-strictTransportSecurityParser = do
-  ows
-  first <- directive
-  rest <- many (ows *> $(char ';') *> ows *> directive)
-  ows
-  maybe failed pure (applyDirectives (first : rest))
+strictTransportSecurityParser =
+  listWithEmptySlots $(char ';') directive >>= applyDirectives
   where
-    directive = do
-      name <- rfc9110Token
-      case map toLower (ST.toString name) of
-        "max-age" -> DMaxAge <$> (ows *> $(char '=') *> ows *> maxAgeValue)
-        "includesubdomains" -> pure DIncludeSubDomains
-        "preload" -> pure DPreload
-        _ -> DOther <$ optional (ows *> $(char '=') *> ows *> directiveValue)
-    maxAgeValue =
-      ($(char '"') *> anyAsciiDecimalWord <* $(char '"'))
-        <|> anyAsciiDecimalWord
-    directiveValue = void quotedString <|> void rfc9110Token
+    directive =
+      $( switchAsciiCI
+           [|
+             case _ of
+               "max-age" -> known (MaxAge <$> policyAge)
+               "includesubdomains" -> known (IncludeSubDomains <$ valueless)
+               "preload" -> known (Preload <$ valueless)
+             |]
+       )
+        <|> (Extension <$> extension)
+    known action = directiveEnd *> (action <|> err "Invalid Strict-Transport-Security directive")
 
 
-{- | Fold parsed directives into the structured record. @max-age@ is
-required (first occurrence wins); booleans accumulate.
--}
-applyDirectives :: [Directive] -> Maybe StrictTransportSecurity
-applyDirectives = go Nothing False False
+applyDirectives :: [Directive] -> ParserT st String StrictTransportSecurity
+applyDirectives = go Nothing False False Set.empty
   where
-    go (Just ma) inc pre [] = Just (StrictTransportSecurity ma inc pre)
-    go Nothing _ _ [] = Nothing
-    go ma inc pre (d : ds) = case d of
-      DMaxAge n -> go (ma Control.Applicative.<|> Just n) inc pre ds
-      DIncludeSubDomains -> go ma True pre ds
-      DPreload -> go ma inc True ds
-      DOther -> go ma inc pre ds
+    go !age !subdomains !preload !seen = \case
+      [] -> case age of
+        Just n -> pure (StrictTransportSecurity n subdomains preload)
+        Nothing -> err "Strict-Transport-Security requires max-age"
+      d : ds -> case d of
+        MaxAge n -> case age of
+          Just _ -> err "Duplicate max-age directive"
+          Nothing -> go (Just n) subdomains preload seen ds
+        IncludeSubDomains
+          | subdomains -> err "Duplicate includeSubDomains directive"
+          | otherwise -> go age True preload seen ds
+        Preload
+          | preload -> err "Duplicate preload directive"
+          | otherwise -> go age subdomains True seen ds
+        Extension name
+          | Set.member name seen -> err "Duplicate Strict-Transport-Security extension"
+          | otherwise -> go age subdomains preload (Set.insert name seen) ds
 
 
 renderStrictTransportSecurity :: StrictTransportSecurity -> M.Builder

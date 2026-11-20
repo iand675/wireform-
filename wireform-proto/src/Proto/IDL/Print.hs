@@ -22,6 +22,8 @@ module Proto.IDL.Print (
   printField,
   printOption,
   printConstant,
+  printProtoFloat,
+  escapeProtoBytes,
   printComment,
   printCommentBlock,
 
@@ -30,10 +32,18 @@ module Proto.IDL.Print (
   clearSpan,
 ) where
 
+import Data.ByteString qualified as BS
 import Data.List (sortBy)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Text.Lazy.Builder.RealFloat qualified as TBF
+import Data.Set qualified as Set
+import Data.Word (Word8)
 import Proto.IDL.AST
 
 
@@ -46,8 +56,16 @@ printProtoFile pf =
         <> maybe [] (\pkg -> ["", "package " <> pkg <> ";"]) (protoPackage pf)
         <> (if null (protoImports pf) then [] else "" : fmap printImport (protoImports pf))
         <> (if null (protoOptions pf) then [] else "" : fmap printTopLevelOption (protoOptions pf))
-        <> concatMap (\tl -> ["", printTopLevel tl]) (protoTopLevels pf)
+        <> concatMap render (protoTopLevels pf)
         <> [""]
+  where
+    groups = groupBodies (concatMap extensionFields (protoTopLevels pf)) (mapMaybe topMessage (protoTopLevels pf))
+    extensionFields (TLExtend _ fields) = fields
+    extensionFields _ = []
+    topMessage (TLMessage message) = Just message
+    topMessage _ = Nothing
+    render (TLMessage message) | Map.member (msgName message) groups = []
+    render definition = ["", printTopLevelWith groups definition]
 
 
 printSyntax :: Syntax -> Text
@@ -64,6 +82,7 @@ printImport (ImportDef _span modifier path) =
 printImportMod :: ImportModifier -> Text
 printImportMod ImportPublic = "public "
 printImportMod ImportWeak = "weak "
+printImportMod ImportOption = "option "
 
 
 printTopLevelOption :: OptionDef -> Text
@@ -72,7 +91,11 @@ printTopLevelOption opt = "option " <> printOptionAssignment opt <> ";"
 
 -- | Render a top-level definition.
 printTopLevel :: TopLevel -> Text
-printTopLevel = \case
+printTopLevel = printTopLevelWith Map.empty
+
+
+printTopLevelWith :: Map.Map Text MessageDef -> TopLevel -> Text
+printTopLevelWith groups = \case
   TLMessage msg -> printMessage 0 msg
   TLEnum ed -> printEnum 0 ed
   TLService svc -> printService svc
@@ -80,7 +103,7 @@ printTopLevel = \case
     "extend "
       <> name
       <> " {\n"
-      <> T.concat (fmap (\f -> indent 1 <> printField f <> "\n") fields)
+      <> foldMap (printFieldWithGroup groups 1) fields
       <> "}"
   TLOption opt -> "option " <> printOptionAssignment opt <> ";"
   TLComment cs -> printCommentBlock 0 cs
@@ -94,16 +117,29 @@ printMessage depth msg =
     <> "message "
     <> msgName msg
     <> " {\n"
-    <> T.concat (fmap (printMessageElement (depth + 1)) (msgElements msg))
+    <> printMessageElements (depth + 1) (msgElements msg)
     <> indent depth
     <> "}"
 
 
-printMessageElement :: Int -> MessageElement -> Text
-printMessageElement depth = \case
-  MEField fd -> printDoc depth (fieldDoc fd) <> indent depth <> printField fd <> "\n"
+printMessageElements :: Int -> [MessageElement] -> Text
+printMessageElements depth elements = foldMap (printMessageElement groups depth) elements
+  where
+    groups = groupBodies (concatMap fields elements) (mapMaybe message elements)
+    fields (MEField field) = [field]
+    fields (MEExtend _ extensions) = extensions
+    fields _ = []
+    message (MEMessage child) = Just child
+    message _ = Nothing
+
+
+printMessageElement :: Map.Map Text MessageDef -> Int -> MessageElement -> Text
+printMessageElement groups depth = \case
+  MEField fd -> printFieldWithGroup groups depth fd
   MEEnum ed -> printEnum depth ed <> "\n"
-  MEMessage msg -> printMessage depth msg <> "\n"
+  MEMessage msg
+    | Map.member (msgName msg) groups -> ""
+    | otherwise -> printMessage depth msg <> "\n"
   MEOneof od -> printOneof depth od <> "\n"
   MEMapField mf -> printDoc depth (mapDoc mf) <> indent depth <> printMapField mf <> "\n"
   MEReserved rd -> indent depth <> printReserved rd <> "\n"
@@ -113,11 +149,37 @@ printMessageElement depth = \case
       <> "extend "
       <> name
       <> " {\n"
-      <> T.concat (fmap (\f -> indent (depth + 1) <> printField f <> "\n") fields)
+      <> foldMap (printFieldWithGroup groups (depth + 1)) fields
       <> indent depth
       <> "}\n"
   MEOption opt -> indent depth <> "option " <> printOptionAssignment opt <> ";\n"
   MEComment cs -> printCommentBlock depth cs <> "\n"
+
+
+groupBodies :: [FieldDef] -> [MessageDef] -> Map.Map Text MessageDef
+groupBodies fields = Map.fromList . mapMaybe groupBody
+  where
+    names = Set.fromList (mapMaybe legacyGroupName fields)
+    groupBody message
+      | Set.member (msgName message) names = Just (msgName message, message)
+      | otherwise = Nothing
+
+
+legacyGroupName :: FieldDef -> Maybe Text
+legacyGroupName field
+  | isLegacyGroupField field, FTNamed name <- fieldType field = Just (T.takeWhileEnd (/= '.') name)
+  | otherwise = Nothing
+
+
+printFieldWithGroup :: Map.Map Text MessageDef -> Int -> FieldDef -> Text
+printFieldWithGroup groups depth field =
+  printDoc depth (fieldDoc field) <> indent depth <> case legacyGroupName field >>= (`Map.lookup` groups) of
+    Just body ->
+      maybe "" (\label -> printLabel label <> " ") (fieldLabel field)
+        <> "group " <> msgName body <> " = " <> intToText (unFieldNumber (fieldNumber field))
+        <> printFieldOptions (fieldOptions field) <> " {\n"
+        <> printMessageElements (depth + 1) (msgElements body) <> indent depth <> "}\n"
+    Nothing -> printField field <> "\n"
 
 
 -- | Render a field definition.
@@ -293,14 +355,44 @@ printOptionNamePart = \case
 printConstant :: Constant -> Text
 printConstant = \case
   CIdent t -> t
+  CSpelledInt spelling _ -> spelling
   CInt n -> integerToText n
-  CFloat d -> T.pack (show d)
+  CFloat d -> printProtoFloat d
   CString s -> "\"" <> escapeProtoString s <> "\""
+  CBytes bytes -> "\"" <> escapeProtoBytes bytes <> "\""
   CBool True -> "true"
   CBool False -> "false"
   CAggregate kvs -> "{ " <> T.intercalate " " (fmap printAggField kvs) <> " }"
   where
     printAggField (k, v) = k <> ": " <> printConstant v
+
+
+-- | Format a protobuf floating-point literal using its native precision.
+printProtoFloat :: RealFloat a => a -> Text
+printProtoFloat number
+  | isNaN number = "nan"
+  | isInfinite number = if number < 0 then "-inf" else "inf"
+  | otherwise = TL.toStrict (TB.toLazyText (TBF.realFloat number))
+
+
+-- | C-escaped contents of a protobuf bytes literal, without delimiters.
+escapeProtoBytes :: BS.ByteString -> Text
+escapeProtoBytes = TL.toStrict . TB.toLazyText . BS.foldr (\byte rest -> byteEscape byte <> rest) mempty
+  where
+    byteEscape :: Word8 -> TB.Builder
+    byteEscape 9 = "\\t"
+    byteEscape 10 = "\\n"
+    byteEscape 13 = "\\r"
+    byteEscape 34 = "\\\""
+    byteEscape 39 = "\\'"
+    byteEscape 92 = "\\\\"
+    byteEscape byte
+      | byte >= 32 && byte <= 126 = TB.singleton (toEnum (fromIntegral byte))
+      | otherwise =
+          let (high, low) = fromIntegral byte `quotRem` 8
+              (first, second) = high `quotRem` 8
+          in "\\" <> digit first <> digit second <> digit low
+    digit n = TB.singleton (toEnum (fromEnum '0' + n))
 
 
 escapeProtoString :: Text -> Text
@@ -311,6 +403,7 @@ escapeProtoString = T.concatMap escChar
     escChar '\n' = "\\n"
     escChar '\r' = "\\r"
     escChar '\t' = "\\t"
+    escChar '\0' = "\\000"
     escChar c = T.singleton c
 
 

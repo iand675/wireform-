@@ -1,49 +1,47 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
-RFC 2295 §8.4 @Negotiate@ — request header carrying directives for the
-content-negotiation process initiated by the request.
+RFC 2295 §8.4 @Negotiate@ conveys the transparent content negotiation
+directives and remote variant selection algorithms a client allows.
 
-== Grammar
+The nonempty list retains its wire spelling and order across field lines.
+'negotiateDirectiveKind' recognizes the RFC keywords and versions. Other
+syntactically valid directives are available as extensions.
 
-@
-Negotiate           = \"Negotiate\" \":\" 1#negotiate-directive
-negotiate-directive = \"trans\" | \"vlist\" | \"guess-small\"
-                    | rvsa-version | \"*\" | negotiate-extension
-rvsa-version        = major \".\" minor
-negotiate-extension = token [ \"=\" token ]
-@
-
-Each directive — the @trans@\\/@vlist@\\/@guess-small@ keywords, the
-@\"*\"@ wildcard, an @rvsa-version@ such as @1.0@, and any extension —
-matches @token [ \"=\" token ]@ (a @.@ and @*@ are valid token
-characters), so directives are surfaced as a non-empty list of
-name\\/optional-token-value pairs.
-
-Spec: <https://www.rfc-editor.org/rfc/rfc2295#section-8.4>
-
-See also: "Network.HTTP.Headers.AcceptFeatures", "Network.HTTP.Headers.Alternates", "Network.HTTP.Headers.TCN", "Network.HTTP.Headers.VariantVary".
+Spec: <https://www.rfc-editor.org/rfc/rfc2295.html#section-8.4>
 -}
 module Network.HTTP.Headers.Negotiate (
   Negotiate (..),
   NegotiateDirective (..),
+  NegotiateDirectiveKind (..),
+  RvsaVersion,
+  rvsaMajor,
+  rvsaMinor,
+  mkRvsaVersion,
+  parseRvsaVersion,
+  renderRvsaVersion,
+  negotiateDirectiveKind,
+  negotiateDirectiveFromKind,
   negotiateParser,
   renderNegotiate,
 ) where
 
-import Control.Monad.Combinators.NonEmpty (sepBy1)
-import qualified Data.ByteString as B
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
+import Control.Monad (guard)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import Data.Char (isAsciiUpper, toLower)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
+import Data.Word (Word16)
+import Network.HTTP.Grammar.Parser
+import Network.HTTP.Grammar.Rendering (shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hNegotiate)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util
-import qualified Network.HTTP.Headers.Rendering.Util as R
 
 
--- | A single negotiate directive: a token, optionally with a token value.
 data NegotiateDirective = NegotiateDirective
   { negName :: !ST.ShortText
   , negValue :: !(Maybe ST.ShortText)
@@ -51,9 +49,87 @@ data NegotiateDirective = NegotiateDirective
   deriving stock (Eq, Show)
 
 
--- | The non-empty list of directives carried by a @Negotiate@ header.
 newtype Negotiate = Negotiate {negotiateDirectives :: NonEmpty NegotiateDirective}
   deriving stock (Eq, Show)
+
+
+data NegotiateDirectiveKind
+  = NegotiateTrans
+  | NegotiateVariantList
+  | NegotiateGuessSmall
+  | NegotiateAnyAlgorithm
+  | NegotiateAlgorithmVersion !RvsaVersion
+  | NegotiateExtension !ST.ShortText !(Maybe ST.ShortText)
+  deriving stock (Eq, Show)
+
+
+-- | RFC 2295 §7.1 allows one through four digits per component.
+data RvsaVersion = RvsaVersion {-# UNPACK #-} !Word16 {-# UNPACK #-} !Word16
+  deriving stock (Eq, Ord, Show)
+
+
+rvsaMajor :: RvsaVersion -> Word16
+rvsaMajor (RvsaVersion major _) = major
+
+
+rvsaMinor :: RvsaVersion -> Word16
+rvsaMinor (RvsaVersion _ minor) = minor
+
+
+mkRvsaVersion :: Word16 -> Word16 -> Maybe RvsaVersion
+mkRvsaVersion major minor
+  | major <= 9999 && minor <= 9999 = Just (RvsaVersion major minor)
+  | otherwise = Nothing
+
+
+parseRvsaVersion :: ByteString -> Maybe RvsaVersion
+parseRvsaVersion bytes = do
+  guard (BS.length bytes >= 3 && BS.length bytes <= 9)
+  let (major, dotMinor) = BSC.break (== '.') bytes
+  ('.', minor) <- BSC.uncons dotMinor
+  RvsaVersion <$> decimal major <*> decimal minor
+  where
+    decimal component = do
+      guard (BS.length component <= 4)
+      (number, rest) <- BSC.readWord16 component
+      guard (BS.null rest)
+      pure number
+
+
+renderRvsaVersion :: RvsaVersion -> M.Builder
+renderRvsaVersion (RvsaVersion major minor) =
+  M.word16Dec major <> M.char7 '.' <> M.word16Dec minor
+
+
+-- | Recognize bare RFC directives. Extension arguments preserve their spelling.
+negotiateDirectiveKind :: NegotiateDirective -> NegotiateDirectiveKind
+negotiateDirectiveKind (NegotiateDirective name value) = case value of
+  Just _ -> extension
+  Nothing -> case folded of
+    "trans" -> NegotiateTrans
+    "vlist" -> NegotiateVariantList
+    "guess-small" -> NegotiateGuessSmall
+    "*" -> NegotiateAnyAlgorithm
+    _ -> maybe extension NegotiateAlgorithmVersion (parseRvsaVersion raw)
+  where
+    extension = NegotiateExtension name value
+    raw = ST.toByteString name
+    folded
+      | BSC.any isAsciiUpper raw = BSC.map toLower raw
+      | otherwise = raw
+
+
+negotiateDirectiveFromKind :: NegotiateDirectiveKind -> NegotiateDirective
+negotiateDirectiveFromKind = \case
+  NegotiateTrans -> bare "trans"
+  NegotiateVariantList -> bare "vlist"
+  NegotiateGuessSmall -> bare "guess-small"
+  NegotiateAnyAlgorithm -> bare "*"
+  NegotiateAlgorithmVersion version ->
+    bare (STU.fromByteStringUnsafe (M.toStrictByteString (renderRvsaVersion version)))
+  NegotiateExtension name value -> NegotiateDirective name value
+  where
+    bare name = NegotiateDirective name Nothing
 
 
 instance KnownHeader Negotiate where
@@ -62,14 +138,8 @@ instance KnownHeader Negotiate where
   type Direction Negotiate = 'Request
 
 
-  parseFromHeaders _ headers = case runParser negotiateParser (NE.head headers) of
-    OK v leftover
-      | B.null (dropOws leftover) -> Right v
-      | otherwise -> Left ("Unconsumed input after parsing Negotiate: " <> show leftover)
-    Fail -> Left "Failed to parse Negotiate header"
-    Err err -> Left err
-    where
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ fields =
+    Negotiate <$> (parseListFieldLines "Negotiate" directiveList fields >>= requireNonEmptyList "Negotiate")
 
 
   renderToHeaders _ = M.toStrictByteString . renderNegotiate
@@ -79,17 +149,21 @@ instance KnownHeader Negotiate where
 
 
 negotiateParser :: ParserT st String Negotiate
-negotiateParser = Negotiate <$> (ows *> directive `sepBy1` (ows *> $(char ',') *> ows))
-  where
-    directive = do
-      name <- rfc9110Token
-      val <- optional ($(char '=') *> rfc9110Token)
-      pure (NegotiateDirective name val)
+negotiateParser = directiveList >>= either err (pure . Negotiate) . requireNonEmptyList "Negotiate"
+
+
+directiveList :: ParserT st String [NegotiateDirective]
+directiveList = httpList $ do
+  name <- rfc9110Token
+  ows
+  value <- optional ($(char '=') *> ows *> rfc9110Token)
+  pure (NegotiateDirective name value)
 
 
 renderNegotiate :: Negotiate -> M.Builder
-renderNegotiate (Negotiate ds) = M.intersperse ", " (map renderDirective (NE.toList ds))
+renderNegotiate (Negotiate (first :| rest)) =
+  renderDirective first <> foldMap ((", " <>) . renderDirective) rest
   where
-    renderDirective (NegotiateDirective name Nothing) = R.shortText name
-    renderDirective (NegotiateDirective name (Just v)) =
-      R.shortText name <> M.char7 '=' <> R.shortText v
+    renderDirective (NegotiateDirective name value) =
+      shortText name <> maybe mempty (\v -> M.char7 '=' <> shortText v) value
+{-# INLINE renderNegotiate #-}

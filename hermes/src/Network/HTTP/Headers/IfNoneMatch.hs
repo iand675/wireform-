@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 {- | The @If-None-Match@ precondition request header makes a method conditional on
 none of the listed entity-tags matching the selected representation (or, with
 @*@, on no current representation existing). On @GET@ or @HEAD@ a match yields
@@ -11,8 +9,8 @@ revalidate a cached response.
 If-None-Match = "*" / #entity-tag
 @
 
-Either the wildcard @*@ (matching any current representation) or a non-empty,
-comma-separated list of entity-tags. Entity-tags are reused from
+Either the wildcard @*@ (matching any current representation) or a
+comma-separated list of entity-tags that can be empty. Entity-tags are reused from
 "Network.HTTP.Headers.ETag".
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-13.1.2>
@@ -27,7 +25,7 @@ module Network.HTTP.Headers.IfNoneMatch (
 
 import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
-import Network.HTTP.Headers.ETag (EntityTag, entityTagParser, renderEntityTag)
+import Network.HTTP.Headers.ETag (EntityTag, conditionalEntityTagParser, parseConditionalEntityTagFields, renderEntityTag)
 import Network.HTTP.Headers.HeaderFieldName (hIfNoneMatch)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -39,6 +37,8 @@ data IfNoneMatch
     IfNoneMatchAny
   | -- | A non-empty list of candidate entity-tags.
     IfNoneMatchTags (NE.NonEmpty EntityTag)
+  | -- | A present field whose list contains no tags.
+    IfNoneMatchNoTags
   deriving stock (Eq, Show)
 
 
@@ -48,11 +48,7 @@ instance KnownHeader IfNoneMatch where
   type Direction IfNoneMatch = 'Request
 
 
-  parseFromHeaders _ headers = case runParser ifNoneMatchParser $ NE.head headers of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing If-None-Match header: " <> show rest
-    Fail -> Left "Failed to parse If-None-Match header"
-    Err e -> Left e
+  parseFromHeaders _ = parseConditionalEntityTagFields "If-None-Match" IfNoneMatchAny fromTags
 
 
   renderToHeaders _ = M.toStrictByteString . renderIfNoneMatch
@@ -62,17 +58,15 @@ instance KnownHeader IfNoneMatch where
 
 
 ifNoneMatchParser :: ParserT st String IfNoneMatch
-ifNoneMatchParser =
-  (IfNoneMatchAny <$ $(char '*'))
-    <|> (IfNoneMatchTags <$> tagList)
-  where
-    tagList = do
-      t <- entityTagParser
-      ts <- many (ows *> $(char ',') *> ows *> entityTagParser)
-      pure (t NE.:| ts)
+ifNoneMatchParser = conditionalEntityTagParser IfNoneMatchAny fromTags
+
+
+fromTags :: [EntityTag] -> IfNoneMatch
+fromTags = maybe IfNoneMatchNoTags IfNoneMatchTags . NE.nonEmpty
 
 
 renderIfNoneMatch :: IfNoneMatch -> M.Builder
 renderIfNoneMatch = \case
   IfNoneMatchAny -> M.char8 '*'
   IfNoneMatchTags tags -> M.intersperse ", " $ map renderEntityTag $ NE.toList tags
+  IfNoneMatchNoTags -> mempty

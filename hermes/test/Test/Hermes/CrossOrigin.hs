@@ -1,13 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Test.Hermes.CrossOrigin (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Proxy (Proxy (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (HeaderCardinality (..), KnownHeader (..), headerMapFromList, insertRawHeader, lookupHeader, lookupRawHeader, setHeader)
 import qualified Network.HTTP.Headers.CrossOriginEmbedderPolicy as COEP
 import qualified Network.HTTP.Headers.CrossOriginEmbedderPolicyReportOnly as COEPRO
 import qualified Network.HTTP.Headers.CrossOriginOpenerPolicy as COOP
@@ -235,6 +240,72 @@ prop_oac_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+typedPolicies :: Spec
+typedPolicies = describe "typed policy fields" $ do
+  it "reads Embedder policy endpoints after arbitrary valid Structured Field parameters" $
+    checkField
+      (COEP.CrossOriginEmbedderPolicy COEP.CoepRequireCorp (Just (RFC8941String "new\"\\site")))
+      "require-corp;report-to=\"new\\\"\\\\site\""
+      [ "\t require-corp;report-to=\"old\";sample=0.5;report-to=\"new\\\"\\\\site\" \t"
+      , "require-corp;level=token;epoch=@0;data=:YQ==:;display=%\"caf%c3%a9\"; report-to=\"new\\\"\\\\site\";enabled"
+      ]
+      [ "REQUIRE-CORP"
+      , "\"require-corp\""
+      , "require-corp ;flag"
+      , "require-corp;\tflag"
+      , "require-corp;flag="
+      , "require-corp;report-to=\"bad\\q\""
+      ]
+  it "uses the last report-to value and ignores it if it is not an SF String" $
+    checkField
+      (COEP.CrossOriginEmbedderPolicy COEP.CoepCredentialless Nothing)
+      "credentialless"
+      ["credentialless;report-to=\"old\";report-to", "credentialless;report-to=\"old\";report-to=token", "credentialless;report-to=?0"]
+      ["credentialless;report-To=\"ignored\"", "credentialless;report-to=(\"array\")"]
+  it "applies the same Item grammar to Embedder-Policy-Report-Only" $
+    checkField
+      (COEPRO.CrossOriginEmbedderPolicyReportOnly (COEP.CrossOriginEmbedderPolicy COEP.CoepRequireCorp (Just (RFC8941String ""))))
+      "require-corp;report-to=\"\""
+      [" require-corp;report-to=\"obsolete\";report-to=\"\";other"]
+      ["require-corp, require-corp", "require-corp;report-to= \"space\""]
+  it "reads the complete Opener policy token and an endpoint surrounded by extensions" $
+    checkField
+      (COOP.CrossOriginOpenerPolicy COOP.CoopSameOriginAllowPopups (Just (RFC8941String "group")))
+      "same-origin-allow-popups;report-to=\"group\""
+      [" same-origin-allow-popups;report-to-alt=foo;report-to=\"group\";limit=999999999999999\t"]
+      ["same-origin-plus-coep", "same-origin-allow-popups-extra", "same-origin-allow-popups;limit=1000000000000000"]
+  it "applies the same Item grammar to Opener-Policy-Report-Only" $
+    checkField
+      (COOPRO.CrossOriginOpenerPolicyReportOnly (COOP.CrossOriginOpenerPolicy COOP.CoopSameOrigin Nothing))
+      "same-origin"
+      ["same-origin;report-to=\"old\";report-to=:YQ==:;sample=?1"]
+      ["same-origin;report-to=\"old\";", "same-origin;report-to==\"extra\""]
+  it "uses exact Resource policy tokens and accepts field OWS" $
+    checkField
+      CORP.CorpSameSite
+      "same-site"
+      ["\t same-site \t"]
+      ["SAME-SITE", "same-site;flag", "same-site, same-origin", "same-siteing"]
+  it "parses a Boolean Item for Origin-Agent-Cluster" $ do
+    checkField
+      OAC.OriginAgentClusterEnabled
+      "?1"
+      [" \t?1;flag;parameter=\"extension\"\t"]
+      ["?2", "1", "true", "?1;bad=", "?1;\tflag", "?1, ?0"]
+    checkField OAC.OriginAgentClusterDisabled "?0" ["?0;sample=?1"] []
+  where
+    checkField :: forall a. (KnownHeader a, Cardinality a ~ 'ZeroOrOne, ParseFailure a ~ String, Eq a, Show a) => a -> ByteString -> [ByteString] -> [ByteString] -> IO ()
+    checkField value canonical accepted rejected = do
+      let name = headerName (Proxy @a)
+          empty = headerMapFromList []
+          field bytes = insertRawHeader name bytes empty
+          lookupOne = lookupHeader @a . field
+      lookupRawHeader name (setHeader value empty) `shouldBe` Just (canonical :| [])
+      mapM_ (\wire -> lookupOne wire `shouldBe` Right (Just value)) (canonical : accepted)
+      mapM_ (\wire -> lookupOne wire `shouldSatisfy` isLeft) rejected
+      lookupHeader @a (insertRawHeader name canonical (field canonical)) `shouldSatisfy` isLeft
+
+
 tests :: Spec
 tests =
   describe "CrossOrigin" $
@@ -258,4 +329,5 @@ tests =
       , unit_oac_parse
       , unit_oac_render
       , it "Origin-Agent-Cluster round-trip" prop_oac_roundtrip
+      , typedPolicies
       ]

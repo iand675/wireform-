@@ -4,12 +4,16 @@ module Test.Hermes.DefactoForwarding (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.Foldable (for_)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import qualified GHC.Generics as G
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
 import qualified Network.HTTP.Headers.XForwardedFor as XFF
@@ -18,8 +22,9 @@ import qualified Network.HTTP.Headers.XForwardedPort as XFP
 import qualified Network.HTTP.Headers.XForwardedProto as XFPr
 import qualified Network.HTTP.Headers.XHttpMethodOverride as XMO
 import qualified Network.HTTP.Headers.XRealIP as XRI
-import Network.HTTP.Methods (mConnect, mDelete, mGet, mHead, mOptions, mPatch, mPost, mPut, mTrace)
-import Network.IPAddress (IPAddress (..), IPv4 (..))
+import Network.HTTP.Methods (mConnect, mDelete, mGet, mHead, mOptions, mPatch, mPost, mPut, mTrace, methodFromBytes)
+import qualified Network.HTTP.Methods as HTTP
+import Network.IPAddress (IPAddress (..), IPv4 (..), IPv6 (..))
 import Test.Syd
 import Test.Syd.Hedgehog ()
 
@@ -154,8 +159,10 @@ protoGen =
     ]
   where
     otherTok =
-      Gen.filter (\t -> t /= "http" && t /= "https") $
-        ST.fromString <$> Gen.list (Range.linear 1 8) (Gen.element schemeChars)
+      Gen.filter (\t -> t /= "http" && t /= "https") $ do
+        first <- Gen.element ['a' .. 'z']
+        rest <- Gen.list (Range.linear 0 7) (Gen.element schemeChars)
+        pure (ST.fromString (first : rest))
     schemeChars = ['a' .. 'z'] ++ ['0' .. '9'] ++ "+-."
 
 
@@ -270,6 +277,54 @@ unit_xmo_render =
     renderXMO (XMO.XHttpMethodOverride mDelete) `shouldBe` "DELETE"
 
 
+unit_xmo_field_lines :: Spec
+unit_xmo_field_lines = it "validates a single complete, case-sensitive override token" $ do
+  let typed = lookupHeader @XMO.XHttpMethodOverride . headerMapFromList . map (\value -> ("X-HTTP-Method-Override", value))
+      token = "CuStOm-Verb!~"
+      custom = XMO.XHttpMethodOverride (methodFromBytes token)
+  typed ["\tPATCH "] `shouldBe` Right (Just (XMO.XHttpMethodOverride mPatch))
+  typed ["\t" <> token <> " "] `shouldBe` Right (Just custom)
+  let field = "\t " <> token <> " \t"
+      slice = BS.take (BS.length field) (BS.drop 3 ("bad" <> field <> "\r\n"))
+  typed [slice] `shouldBe` Right (Just custom)
+  typed ["patch"] `shouldBe` Right (Just (XMO.XHttpMethodOverride (methodFromBytes "patch")))
+  renderXMO custom `shouldBe` token
+  typed ["PATCH", "PATCH"] `shouldSatisfy` isLeft
+  typed ["PATCH", "DELETE"] `shouldSatisfy` isLeft
+  mapM_ (\value -> typed [value] `shouldSatisfy` isLeft)
+    ["", "\t  \t", "PATCH, DELETE", "PATCH DELETE", "PATCH\n", BS.singleton 0x80]
+  for_ [minBound .. maxBound] $ \byte -> do
+    let extension = "X" <> BS.singleton byte <> "X"
+        expected = XMO.XHttpMethodOverride (methodFromBytes extension)
+        allowed = BS.elem byte "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    for_ [extension, "\t" <> extension <> " "] $ \wire ->
+      if allowed
+        then do
+          typed [wire] `shouldBe` Right (Just expected)
+          runFully XMO.xHttpMethodOverrideParser wire `shouldBe` Right expected
+        else do
+          typed [wire] `shouldSatisfy` isLeft
+          runFully XMO.xHttpMethodOverrideParser wire `shouldSatisfy` isLeft
+
+
+unit_xmo_extension_compatibility :: Spec
+unit_xmo_extension_compatibility = it "preserves the extension symbol view and generic representation" $ do
+  let wire = "CuStOm-Verb!"
+      explicit = HTTP.NonStandard "CuStOm-Verb!"
+  case HTTP.mkMethod wire of
+    Right method@(HTTP.NonStandard symbol) -> do
+      HTTP.methodToBytes (HTTP.NonStandard symbol) `shouldBe` wire
+      method `shouldBe` explicit
+      compare method explicit `shouldBe` EQ
+      G.to (G.from method) `shouldBe` explicit
+      HTTP.methodToBytes method `shouldBe` wire
+    result -> expectationFailure (show result)
+  let explicitStandard = HTTP.NonStandard "PATCH"
+  G.to (G.from explicitStandard) `shouldBe` explicitStandard
+  explicitStandard `shouldSatisfy` (/= HTTP.PATCH)
+  HTTP.methodToBytes (HTTP.methodFromBytes "\xff") `shouldBe` "\xef\xbf\xbd"
+
+
 methodGen :: Gen XMO.XHttpMethodOverride
 methodGen =
   XMO.XHttpMethodOverride
@@ -287,11 +342,80 @@ prop_xmo_roundtrip = property $ do
 
 -- ---------------------------------------------------------------------------
 
+forwardingFieldTests :: Spec
+forwardingFieldTests = describe "typed forwarding fields" $ do
+  it "combines X-Forwarded-For field lines in order and preserves visible node spellings" $ do
+    let typed = lookupHeader @XFF.XForwardedFor
+        fields = headerMapFromList [("X-Forwarded-For", ", 192.0.2.1 ,, "), ("X-Forwarded-For", " [::1]:1234, _proxy")]
+        value = XFF.XForwardedFor ("192.0.2.1" :| ["[::1]:1234", "_proxy"])
+    typed fields `shouldBe` Right (Just value)
+    headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("x-forwarded-for", "192.0.2.1, [::1]:1234, _proxy")]
+    mapM_
+      (\wire -> typed (headerMapFromList [("X-Forwarded-For", wire)]) `shouldSatisfy` isLeft)
+      [",, ", "node part", "node" <> BS.singleton 0, "node" <> BS.singleton 127, BS.singleton 255]
+
+  it "copies only visible nodes from an unaligned field slice" $
+    for_ [7, 8, 9, 15, 16, 17, 4096] $ \size -> do
+      let node = BS.replicate size 97
+          wire = "\t[::1]:443,\t" <> node
+          slice = BS.take (BS.length wire) (BS.drop 1 (BS.singleton 0 <> wire <> "extra"))
+          canonical = "[::1]:443, " <> node
+      case lookupHeader @XFF.XForwardedFor (headerMapFromList [("X-Forwarded-For", slice)]) of
+        Right (Just value) -> do
+          headerMapToList (setHeader value (headerMapFromList []))
+            `shouldBe` [("x-forwarded-for", canonical)]
+          M.toStrictByteString ("prefix=" <> XFF.renderXForwardedFor value <> ";suffix")
+            `shouldBe` "prefix=" <> canonical <> ";suffix"
+        other -> expectationFailure (show other)
+
+  it "validates X-Forwarded-Host authorities and retains their chain spelling" $ do
+    let field wire = ("X-Forwarded-Host", wire)
+        typed = lookupHeader @XFH.XForwardedHost . headerMapFromList
+    typed [field " ExAmPle:00443,\t[::1]:443 "]
+      `shouldBe` Right (Just (XFH.XForwardedHost "ExAmPle:00443,\t[::1]:443"))
+    typed [field "example.com", field "other.example"] `shouldSatisfy` isLeft
+    mapM_
+      (\wire -> typed [field wire] `shouldSatisfy` isLeft)
+      ["", "example,,other", "user@example", "host/path", "[::bogus]", "example:65536"]
+
+  it "validates URI schemes and canonicalizes the HTTP schemes" $ do
+    let field wire = ("X-Forwarded-Proto", wire)
+        typed = lookupHeader @XFPr.XForwardedProto . headerMapFromList
+    typed [field "http"] `shouldBe` Right (Just XFPr.XForwardedProtoHttp)
+    typed [field "https"] `shouldBe` Right (Just XFPr.XForwardedProtoHttps)
+    typed [field " \tHtTpS "] `shouldBe` Right (Just XFPr.XForwardedProtoHttps)
+    typed [field "Https+Custom"] `shouldBe` Right (Just (XFPr.XForwardedProtoOther "Https+Custom"))
+    typed [field "https", field "http"] `shouldSatisfy` isLeft
+    mapM_ (\wire -> typed [field wire] `shouldSatisfy` isLeft) ["", "0http", "http_https", "https://example"]
+
+  it "checks X-Forwarded-Port before conversion and validates single physical fields" $ do
+    let field wire = ("X-Forwarded-Port", wire)
+        typed = lookupHeader @XFP.XForwardedPort . headerMapFromList
+    typed [field " 065535\t"] `shouldBe` Right (Just (XFP.XForwardedPort 65535))
+    typed [field "000065535"] `shouldBe` Right (Just (XFP.XForwardedPort 65535))
+    typed [field "0000065535"] `shouldBe` Right (Just (XFP.XForwardedPort 65535))
+    typed [field "443", field "80"] `shouldSatisfy` isLeft
+    mapM_ (\wire -> typed [field wire] `shouldSatisfy` isLeft) ["65536", "18446744073709551616", "+443", "443,80", ""]
+
+  it "accepts only a single IPv4 or IPv6 address for X-Real-IP" $ do
+    let field wire = ("X-Real-IP", wire)
+        typed = lookupHeader @XRI.XRealIP . headerMapFromList
+        sliced = BS.take 10 (BS.drop 1 "x255.0.20.10")
+        mixed = XRI.XRealIP (IPv6Address (IPv6 0 0 0 0 0 0xffff 0xc000 0x0201))
+    typed [field "\t192.0.2.1 "] `shouldBe` Right (Just (XRI.XRealIP (IPv4Address (IPv4 192 0 2 1))))
+    typed [field sliced] `shouldBe` Right (Just (XRI.XRealIP (IPv4Address (IPv4 255 0 20 1))))
+    typed [field (BS.drop 1 "x::FFFF:192.0.2.1")] `shouldBe` Right (Just mixed)
+    typed [field "\t::FFFF:192.0.2.1 "] `shouldBe` Right (Just mixed)
+    typed [field "192.0.2.1", field "::1"] `shouldSatisfy` isLeft
+    mapM_ (\wire -> typed [field wire] `shouldSatisfy` isLeft) ["001.0.2.1", "192.0.2.1:443", "v1.xyz", "[::1]", "0.0.0.256"]
+
+
 tests :: Spec
 tests =
   describe "DefactoForwarding" $
     sequence_
-      [ describe "X-Forwarded-For" $
+      [ forwardingFieldTests
+      , describe "X-Forwarded-For" $
           sequence_
             [ unit_xff_parse
             , unit_xff_parse_mixed
@@ -328,6 +452,8 @@ tests =
           sequence_
             [ unit_xmo_parse
             , unit_xmo_render
+            , unit_xmo_field_lines
+            , unit_xmo_extension_compatibility
             , it "round-trip" prop_xmo_roundtrip
             ]
       ]

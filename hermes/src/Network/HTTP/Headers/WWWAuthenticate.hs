@@ -64,6 +64,7 @@ module Network.HTTP.Headers.WWWAuthenticate (
   wwwAuthenticateParser,
   challengesParser,
   challengeParser,
+  parseChallengeFieldLines,
 
   -- * Rendering
   renderWWWAuthenticate,
@@ -76,13 +77,16 @@ module Network.HTTP.Headers.WWWAuthenticate (
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.Authorization (
   AuthScheme (..),
   CredentialParam (..),
+  authParamParser,
+  authParamsUnique,
+  renderAuthParam,
+  token68Parser,
  )
 import Network.HTTP.Headers.HeaderFieldName (hWWWAuthenticate)
 import qualified Network.HTTP.Headers.Mason as M
@@ -107,25 +111,25 @@ data AuthChallenge = AuthChallenge
 
 -- | The shape of a challenge's payload.
 data ChallengeContents
-  = -- | Just the scheme (rare; some legacy schemes can omit
-    --     everything after the scheme name).
+  = {- | Just the scheme (rare; some legacy schemes can omit
+    everything after the scheme name).
+    -}
     ChallengeBare
-  | -- | Single @token68@ payload (used for schemes like @Bearer@
-    --     that may carry a single opaque token, though the
-    --     challenge form usually still provides parameters).
+  | {- | Single @token68@ payload (used for schemes like @Bearer@
+    that may carry a single opaque token, though the
+    challenge form usually still provides parameters).
+    -}
     ChallengeToken68 !ByteString
-  | -- | @auth-param@ list, in document order.  Parameter names are
-    --     case-insensitive per RFC 9110 §11.2; we preserve the
-    --     on-the-wire spelling so renderers can round-trip.
+  | {- | @auth-param@ list, in document order.  Parameter names are
+    case-insensitive per RFC 9110 §11.2; we preserve the
+    on-the-wire spelling so renderers can round-trip.
+    -}
     ChallengeParams ![(ShortText, CredentialParam)]
   deriving stock (Eq, Show)
 
 
-{- | @WWW-Authenticate@ header value: zero-or-more challenges.
-An empty list is technically out-of-grammar (RFC 9110 requires
-at least one challenge on 401), but parsing leniently here
-lets callers report \"server sent something we couldn't make
-sense of\" rather than throw.
+{- | @WWW-Authenticate@ header value. The field grammar permits an empty
+list, while a 401 response is required to contain at least one challenge.
 -}
 newtype WWWAuthenticate = WWWAuthenticate
   { authChallenges :: [AuthChallenge]
@@ -139,18 +143,7 @@ instance KnownHeader WWWAuthenticate where
   type Direction WWWAuthenticate = 'Response
 
 
-  parseFromHeaders _ headers = do
-    challenges <- traverse parseOne (NE.toList headers)
-    pure (WWWAuthenticate (concat challenges))
-    where
-      parseOne hdr = case runParser challengesParser hdr of
-        OK cs leftover
-          | B.null (dropOws leftover) -> Right cs
-          | otherwise ->
-              Left ("Unconsumed input after parsing WWW-Authenticate: " <> show leftover)
-        Fail -> Left "Failed to parse WWW-Authenticate header"
-        Err err -> Left err
-      dropOws = B.dropWhile (\w -> w == 0x20 || w == 0x09)
+  parseFromHeaders _ = fmap WWWAuthenticate . parseChallengeFieldLines "WWW-Authenticate"
 
 
   renderToHeaders _ (WWWAuthenticate cs) =
@@ -177,24 +170,18 @@ splitting.  Tolerates the RFC 9110 §5.6.1 \"empty list element\"
 form (leading \/ trailing \/ stacked commas).
 -}
 challengesParser :: ParserT st String [AuthChallenge]
-challengesParser = do
-  ows
-  _ <- skipMany (ows *> $(char ','))
-  ows
-  first <- challengeParser
-  rest <- many continueChallenge
-  ows
-  _ <- skipMany (ows *> $(char ','))
-  ows
-  pure (first : rest)
-  where
-    continueChallenge = do
-      ows
-      $(char ',')
-      ows
-      _ <- skipMany (ows *> $(char ','))
-      ows
-      challengeParser
+challengesParser = httpList challengeParser
+
+
+{- | Challenge and parameter separators share a comma. Interpret repeated
+lines as one value so a parameter can continue a challenge on the next line.
+-}
+parseChallengeFieldLines :: String -> NonEmpty ByteString -> Either String [AuthChallenge]
+parseChallengeFieldLines name (first :| rest) =
+  parseFieldLine name challengesParser $
+    case rest of
+      [] -> first
+      _ -> B.intercalate "," (first : rest)
 
 
 {- | Parse a single challenge: an @auth-scheme@ optionally followed
@@ -207,10 +194,11 @@ challengeParser = do
   pure AuthChallenge {challengeScheme = scheme, challengeContents = contents}
   where
     challengePayload = do
-      _ <- skipSome $(char ' ')
-      ows
-      (ChallengeParams <$> authParamList)
-        <|> (ChallengeToken68 <$> token68Parser)
+      skipSome $(char ' ')
+      (token <* lookahead (ows *> ($(char ',') <|> eof)))
+        <|> (ChallengeParams <$> authParamList)
+        <|> token
+    token = ChallengeToken68 <$> token68Parser
 
 
 {- | The auth-param list, scheme-aware: stops at any @\",\"@ that
@@ -219,45 +207,13 @@ auth-param.
 -}
 authParamList :: ParserT st String [(ShortText, CredentialParam)]
 authParamList = do
-  first <- authParamP
-  rest <- many continueParam
-  pure (first : rest)
+  skipMany comma
+  first <- authParamParser
+  rest <- many (comma *> skipMany comma *> authParamParser)
+  let params = first : rest
+  if authParamsUnique params then pure params else err "Duplicate authentication parameter"
   where
-    continueParam = do
-      lookahead $ do
-        ows
-        $(char ',')
-        ows
-        _ <- rfc9110Token
-        bws
-        $(char '=')
-      ows
-      $(char ',')
-      ows
-      authParamP
-
-    authParamP = do
-      key <- rfc9110Token
-      bws
-      $(char '=')
-      bws
-      val <-
-        (CredentialParamString <$> rfc8941String)
-          <|> (CredentialParamToken <$> rfc9110Token)
-      pure (key, val)
-
-
-{- | RFC 9110 §11.4: @token68 = 1*tchar68 *\"=\"@ where the
-@tchar68@ set is the unreserved URI chars plus a few more.
--}
-token68Parser :: ParserT st e ByteString
-token68Parser =
-  byteStringOf $ do
-    skipSome (skipSatisfyAscii (`CharSet.member` token68Chars))
-    skipMany (skipSatisfyAscii (== '='))
-  where
-    token68Chars =
-      CharSet.fromList (['A' .. 'Z'] <> ['a' .. 'z'] <> ['0' .. '9']) <> "-._~+/"
+    comma = ows *> $(char ',') *> ows
 
 
 -- ---------------------------------------------------------------------------
@@ -278,9 +234,4 @@ renderAuthChallenge (AuthChallenge (AuthScheme scheme) contents) =
     ChallengeParams ps ->
       R.shortText scheme
         <> M.char7 ' '
-        <> M.intersperse ", " (map renderParam ps)
-  where
-    renderParam (k, v) =
-      R.shortText k <> M.char7 '=' <> case v of
-        CredentialParamToken t -> R.shortText t
-        CredentialParamString s -> R.rfc8941String s
+        <> M.intersperse ", " (map renderAuthParam ps)

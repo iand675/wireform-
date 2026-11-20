@@ -1,0 +1,2531 @@
+
+==================== Tidy Core ====================
+
+Result size of Tidy Core
+  = {terms: 3,927, types: 4,306, coercions: 276, joins: 11/41}
+
+lvl_rw5o = "invalid UTF-8"#
+
+lvl1_rw5p = unpackCString# lvl_rw5o
+
+lvl2_rw5q = Left lvl1_rw5p
+
+lvl3_rw5r
+  = \ e1_amMp eta1_amMq ->
+      case e1_amMp of wild_amMr
+      { SomeException @e2_amMs $dException1_amMt $dIP6_amMu e3_amMv ->
+      case sameTypeRep
+             (($p1Exception $dException1_amMt) `cast` <Co:3> :: ...)
+             $fExceptionUnicodeException8
+      of {
+        False -> raiseIO# wild_amMr eta1_amMq;
+        True ->
+          case unsafeEqualityProof of { UnsafeRefl co_amMA ->
+          (# eta1_amMq, Left (e3_amMv `cast` <Co:10> :: ...) #)
+          }
+      }
+      }
+
+decodeTextFast
+  = \ bs_av0q ->
+      runRW#
+        (\ s_amMj ->
+           case catch#
+                  (\ s1_amMk ->
+                     case seq#
+                            (decodeUtf8With1 strictDecode invalidUtf8Msg bs_av0q) s1_amMk
+                     of
+                     { (# ipv_amMm, ipv1_amMn #) ->
+                     (# ipv_amMm, Right ipv1_amMn #)
+                     })
+                  lvl3_rw5r
+                  s_amMj
+           of
+           { (# ipv_amME, ipv1_amMF #) ->
+           case lazy ipv1_amMF of {
+             Left ds_dvz6 -> lvl2_rw5q;
+             Right t_av0r -> Right t_av0r
+           }
+           })
+
+$trModule4 = "main"#
+
+$trModule3 = TrNameS $trModule4
+
+$trModule2 = "Wireform.FFI"#
+
+$trModule1 = TrNameS $trModule2
+
+$trModule = Module $trModule3 $trModule1
+
+fastRandomWord64
+  = (\ ds_dvAM ->
+       case {__ffi_static_ccall_unsafe main:hs_xoshiro256pp_next :: State#
+                                                          RealWorld
+                                                        -> (# State# RealWorld, Word64# #)}_dvAN
+              ds_dvAM
+       of
+       { (# ds1_dvAL, ds2_dvAK #) ->
+       (# ds1_dvAL, W64# ds2_dvAK #)
+       })
+    `cast` <Co:3> :: ...
+
+xorRepeatingKeyBS
+  = (\ bs_av0g key_av0h eta_afHp ->
+       case bs_av0g of { BS bx_afHu bx1_afHx bx2_afHA ->
+       keepAlive#
+         bx1_afHx
+         eta_afHp
+         (\ eta1_B0 ->
+            case key_av0h of { W32# ds1_dvAX ->
+            case {__ffi_static_ccall_unsafe main:hs_ws_mask :: Addr#
+                                              -> Word64#
+                                              -> Word32#
+                                              -> State# RealWorld
+                                              -> (# State# RealWorld #)}_dvB0
+                   bx_afHu (int64ToWord64# (intToInt64# bx2_afHA)) ds1_dvAX eta1_B0
+            of
+            { (# ds2_dvAY #) ->
+            (# ds2_dvAY, () #)
+            }
+            })
+       })
+    `cast` <Co:9> :: ...
+
+xorRepeatingKey
+  = (\ ptr_av0d len_av0e key_av0f eta_B0 ->
+       case ptr_av0d of { Ptr ds1_dvAT ->
+       case len_av0e of { I# i_afeU ->
+       case key_av0f of { W32# ds3_dvAX ->
+       case {__ffi_static_ccall_unsafe main:hs_ws_mask :: Addr#
+                                              -> Word64#
+                                              -> Word32#
+                                              -> State# RealWorld
+                                              -> (# State# RealWorld #)}_dvB0
+              ds1_dvAT (int64ToWord64# (intToInt64# i_afeU)) ds3_dvAX eta_B0
+       of
+       { (# ds4_dvAY #) ->
+       (# ds4_dvAY, () #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+isAscii
+  = \ ptr_av0k offset_av0l len_av0m ->
+      case ptr_av0k of { Ptr ipv_svDp ->
+      case offset_av0l of { I# ipv1_svDr ->
+      case len_av0m of { I# ipv2_svDt ->
+      case {__ffi_static_ccall_unsafe main:hs_proto_is_ascii :: Addr#
+                                                     -> Int64#
+                                                     -> Int64#
+                                                     -> State# RealWorld
+                                                     -> (# State# RealWorld, Int32# #)}_dvAI
+             ipv_svDp (intToInt64# ipv1_svDr) (intToInt64# ipv2_svDt) realWorld#
+      of
+      { (# ds_dvAH, ds1_dvAG #) ->
+      case int32ToInt# ds1_dvAG of {
+        __DEFAULT -> True;
+        0# -> False
+      }
+      }
+      }
+      }
+      }
+
+lvl4_rw5s = \ s_aeX3 -> (# s_aeX3, True #)
+
+lvl5_rw5t = \ s_aeX3 -> (# s_aeX3, False #)
+
+isAsciiBS
+  = \ bs_av0n ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_av0n of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_is_ascii :: Addr#
+                                                     -> Int64#
+                                                     -> Int64#
+                                                     -> State# RealWorld
+                                                     -> (# State# RealWorld, Int32# #)}_dvAI
+                  bx_afHu 0#Int64 (intToInt64# bx2_afHA) realWorld#
+           of
+           { (# ds_dvAH, ds1_dvAG #) ->
+           case int32ToInt# ds1_dvAG of {
+             __DEFAULT ->
+               case keepAlive# bx1_afHx s'_aeDu lvl4_rw5s of
+               { (# ipv_aeDH, ipv1_aeDJ #) ->
+               lazy ipv1_aeDJ
+               };
+             0# ->
+               case keepAlive# bx1_afHx s'_aeDu lvl5_rw5t of
+               { (# ipv_aeDH, ipv1_aeDJ #) ->
+               lazy ipv1_aeDJ
+               }
+           }
+           }
+           }
+           })
+
+relocatePageBoundary
+  = \ bs_auZy ->
+      case bs_auZy of wild_af1U { BS bx_af1V bx1_af1W bx2_af1X ->
+      case <=# bx2_af1X 0# of {
+        __DEFAULT ->
+          runRW#
+            (\ s_aeDp ->
+               case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+               case keepAlive#
+                      bx1_af1W
+                      s'_aeDu
+                      (\ s1_aec9 ->
+                         let { outLen_svMM = +# bx2_af1X 7# } in
+                         case {__ffi_static_ccall_unsafe ghc-internal:malloc :: Word64#
+                                                  -> State# RealWorld
+                                                  -> (# State# RealWorld, Addr# #)}_avEd
+                                (int64ToWord64# (intToInt64# outLen_svMM)) s1_aec9
+                         of
+                         { (# ds_avEh, ds1_avEi #) ->
+                         case eqAddr# ds1_avEi __NULL of {
+                           __DEFAULT ->
+                             case {__ffi_static_ccall_unsafe main:hs_proto_relocate_page_boundary :: Addr#
+                                                                   -> Word64#
+                                                                   -> Addr#
+                                                                   -> Word64#
+                                                                   -> State# RealWorld
+                                                                   -> (# State# RealWorld,
+                                                                         Int32# #)}_dvCy
+                                    bx_af1V
+                                    (int64ToWord64# (intToInt64# bx2_af1X))
+                                    ds1_avEi
+                                    (int64ToWord64# (intToInt64# outLen_svMM))
+                                    realWorld#
+                             of
+                             { (# ds2_dvCx, ds3_dvCw #) ->
+                             case int32ToInt# ds3_dvCw of {
+                               __DEFAULT ->
+                                 case {__ffi_static_ccall_unsafe ghc-internal:free :: Addr#
+                                                -> State# RealWorld -> (# State# RealWorld #)}_avFc
+                                        ds1_avEi ds_avEh
+                                 of
+                                 { (# ds4_avFg #) ->
+                                 (# ds4_avFg, wild_af1U #)
+                                 };
+                               1# ->
+                                 case >=# bx2_af1X 0# of {
+                                   __DEFAULT -> packCString3 ds_avEh (I# bx2_af1X);
+                                   1# ->
+                                     case <# bx2_af1X 0# of {
+                                       __DEFAULT ->
+                                         case newPinnedByteArray# bx2_af1X ds_avEh of
+                                         { (# ipv_avTE, ipv1_avTF #) ->
+                                         let { ipv2_avTI = mutableByteArrayContents# ipv1_avTF } in
+                                         case copyAddrToAddrNonOverlapping#
+                                                ds1_avEi ipv2_avTI bx2_af1X ipv_avTE
+                                         of wild4_avTL
+                                         { __DEFAULT ->
+                                         case touch# (PlainPtr ipv1_avTF) wild4_avTL of s'1_avTM
+                                         { __DEFAULT ->
+                                         case lazy runRW# (\ _ -> (# s'1_avTM, ipv2_avTI #)) of
+                                         { (# ipv6_avTP, ipv7_avTQ #) ->
+                                         case {__ffi_static_ccall_unsafe ghc-internal:free :: Addr#
+                                                -> State# RealWorld -> (# State# RealWorld #)}_avFc
+                                                ds1_avEi ipv6_avTP
+                                         of
+                                         { (# ds6_avFg #) ->
+                                         (# ds6_avFg, BS ipv7_avTQ (PlainPtr ipv1_avTF) bx2_af1X #)
+                                         }
+                                         }
+                                         }
+                                         }
+                                         };
+                                       1# -> case mallocPlainForeignPtrBytes2 of {}
+                                     }
+                                 }
+                             }
+                             };
+                           1# -> case malloc1 ds_avEh of {}
+                         }
+                         })
+               of
+               { (# ipv_aeDH, ipv1_aeDJ #) ->
+               lazy ipv1_aeDJ
+               }
+               });
+        1# -> wild_af1U
+      }
+      }
+
+validateUtf8SWAR
+  = \ bs_auZ5 ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_auZ5 of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_validate_utf8_fast :: Addr#
+                                                               -> Word64#
+                                                               -> State# RealWorld
+                                                               -> (# State# RealWorld, Int32# #)}_dvCV
+                  bx_afHu (int64ToWord64# (intToInt64# bx2_afHA)) realWorld#
+           of
+           { (# ds_dvCU, ds1_dvCT #) ->
+           case int32ToInt# ds1_dvCT of {
+             __DEFAULT ->
+               case keepAlive# bx1_afHx s'_aeDu lvl4_rw5s of
+               { (# ipv_aeDH, ipv1_aeDJ #) ->
+               lazy ipv1_aeDJ
+               };
+             0# ->
+               case keepAlive# bx1_afHx s'_aeDu lvl5_rw5t of
+               { (# ipv_aeDH, ipv1_aeDJ #) ->
+               lazy ipv1_aeDJ
+               }
+           }
+           }
+           }
+           })
+
+packedAllSingleByte
+  = \ bs_auYP ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_auYP of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_packed_all_single_byte :: Addr#
+                                                                   -> Word64#
+                                                                   -> State# RealWorld
+                                                                   -> (# State# RealWorld,
+                                                                         Int32# #)}_dvD5
+                  bx_afHu (int64ToWord64# (intToInt64# bx2_afHA)) realWorld#
+           of
+           { (# ds_dvD4, ds1_dvD3 #) ->
+           case int32ToInt# ds1_dvD3 of {
+             __DEFAULT ->
+               case keepAlive# bx1_afHx s'_aeDu lvl4_rw5s of
+               { (# ipv_aeDH, ipv1_aeDJ #) ->
+               lazy ipv1_aeDJ
+               };
+             0# ->
+               case keepAlive# bx1_afHx s'_aeDu lvl5_rw5t of
+               { (# ipv_aeDH, ipv1_aeDJ #) ->
+               lazy ipv1_aeDJ
+               }
+           }
+           }
+           }
+           })
+
+skipWhitespace
+  = \ ptr_av0K offset_av0L len_av0M ->
+      case ptr_av0K of { Ptr ipv_svFw ->
+      case offset_av0L of { I# ipv1_svFy ->
+      case len_av0M of { I# ipv2_svFA ->
+      case {__ffi_static_ccall_unsafe main:hs_proto_skip_ws :: Addr#
+                                                    -> Int64#
+                                                    -> Int64#
+                                                    -> State# RealWorld
+                                                    -> (# State# RealWorld, Int64# #)}_dvAi
+             ipv_svFw (intToInt64# ipv1_svFy) (intToInt64# ipv2_svFA) realWorld#
+      of
+      { (# ds_dvAh, ds1_dvAg #) ->
+      I# (int64ToInt# ds1_dvAg)
+      }
+      }
+      }
+      }
+
+skipWhitespaceBS
+  = \ bs_av0N off_av0O ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_av0N of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case off_av0O of { I# ipv_svFK ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_skip_ws :: Addr#
+                                                    -> Int64#
+                                                    -> Int64#
+                                                    -> State# RealWorld
+                                                    -> (# State# RealWorld, Int64# #)}_dvAi
+                  bx_afHu (intToInt64# ipv_svFK) (intToInt64# bx2_afHA) realWorld#
+           of
+           { (# ds_dvAh, ds1_dvAg #) ->
+           case keepAlive#
+                  bx1_afHx
+                  s'_aeDu
+                  (\ s1_aeX3 -> (# s1_aeX3, I# (int64ToInt# ds1_dvAg) #))
+           of
+           { (# ipv1_aeDH, ipv2_aeDJ #) ->
+           lazy ipv2_aeDJ
+           }
+           }
+           }
+           }
+           })
+
+findJsonEscape
+  = \ ptr_av0s offset_av0t len_av0u ->
+      case ptr_av0s of { Ptr ipv_svFQ ->
+      case offset_av0t of { I# ipv1_svFS ->
+      case len_av0u of { I# ipv2_svFU ->
+      case {__ffi_static_ccall_unsafe main:hs_proto_find_json_escape :: Addr#
+                                                             -> Int64#
+                                                             -> Int64#
+                                                             -> State# RealWorld
+                                                             -> (# State# RealWorld, Int64# #)}_dvAv
+             ipv_svFQ (intToInt64# ipv1_svFS) (intToInt64# ipv2_svFU) realWorld#
+      of
+      { (# ds_dvAu, ds1_dvAt #) ->
+      I# (int64ToInt# ds1_dvAt)
+      }
+      }
+      }
+      }
+
+findJsonEscapeBS
+  = \ bs_av0v off_av0w ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_av0v of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case off_av0w of { I# ipv_svG0 ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_find_json_escape :: Addr#
+                                                             -> Int64#
+                                                             -> Int64#
+                                                             -> State# RealWorld
+                                                             -> (# State# RealWorld, Int64# #)}_dvAv
+                  bx_afHu
+                  (intToInt64# ipv_svG0)
+                  (intToInt64# (-# bx2_afHA ipv_svG0))
+                  realWorld#
+           of
+           { (# ds_dvAu, ds1_dvAt #) ->
+           case keepAlive#
+                  bx1_afHx
+                  s'_aeDu
+                  (\ s1_aeX3 -> (# s1_aeX3, I# (int64ToInt# ds1_dvAt) #))
+           of
+           { (# ipv1_aeDH, ipv2_aeDJ #) ->
+           lazy ipv2_aeDJ
+           }
+           }
+           }
+           }
+           })
+
+lvl6_rw5u = \ _ bs_ivGv -> bs_ivGv
+
+lvl7_rw5v = "\\u00"#
+
+lvl8_rw5w = BS lvl7_rw5v FinalPtr 4#
+
+lvl9_rw5x = "\\t"#
+
+lvl10_rw5y = BS lvl9_rw5x FinalPtr 2#
+
+lvl11_rw5z = "\\r"#
+
+lvl12_rw5A = BS lvl11_rw5z FinalPtr 2#
+
+lvl13_rw5B = "\\n"#
+
+lvl14_rw5C = BS lvl13_rw5B FinalPtr 2#
+
+lvl15_rw5D = "\\f"#
+
+lvl16_rw5E = BS lvl15_rw5D FinalPtr 2#
+
+lvl17_rw5F = "\\b"#
+
+lvl18_rw5G = BS lvl17_rw5F FinalPtr 2#
+
+lvl19_rw5H = "\\\\"#
+
+lvl20_rw5I = BS lvl19_rw5H FinalPtr 2#
+
+lvl21_rw5J = "\\\""#
+
+lvl22_rw5K = BS lvl21_rw5J FinalPtr 2#
+
+escapeJSONStringBS
+  = \ bs_av0z ->
+      case bs_av0z of { BS bx_afws bx1_afwt bx2_afwu ->
+      letrec {
+        $wgo_sw1c
+          = \ ww_sw19 ->
+              case >=# ww_sw19 bx2_afwu of {
+                __DEFAULT ->
+                  runRW#
+                    (\ s_aeDp ->
+                       case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+                       case {__ffi_static_ccall_unsafe main:hs_proto_find_json_escape :: Addr#
+                                                             -> Int64#
+                                                             -> Int64#
+                                                             -> State# RealWorld
+                                                             -> (# State# RealWorld, Int64# #)}_dvAv
+                              bx_afws
+                              (intToInt64# ww_sw19)
+                              (intToInt64# (-# bx2_afwu ww_sw19))
+                              realWorld#
+                       of
+                       { (# ds_dvAu, ds1_dvAt #) ->
+                       case keepAlive#
+                              bx1_afwt
+                              s'_aeDu
+                              (\ s1_aeX3 -> (# s1_aeX3, I# (int64ToInt# ds1_dvAt) #))
+                       of
+                       { (# ipv_aeDH, ipv1_aeDJ #) ->
+                       case lazy ipv1_aeDJ of { I# ipv2_svGq ->
+                       (\ v_isbu v1_isbv ->
+                          case v1_isbv of wild2_sw2B { (# cur_sw2C, end_sw2D, s1_sw2E #) ->
+                          let { safeLen_svMQ = -# ipv2_svGq ww_sw19 } in
+                          join {
+                            $s$j_sw4d sc_sw43 sc1_sw44 sc2_sw45
+                              = case >=# ipv2_svGq bx2_afwu of {
+                                  __DEFAULT ->
+                                    case readWord8OffAddr#
+                                           (plusAddr# bx_afws ipv2_svGq) 0# realWorld#
+                                    of
+                                    { (# ipv3_amNq, ipv4_amNr #) ->
+                                    case touch# bx1_afwt ipv3_amNq of { __DEFAULT ->
+                                    (($wgo_sw1c (+# ipv2_svGq 1#)) `cast` <Co:1> :: ...)
+                                      v_isbu
+                                      (case word8ToWord# ipv4_amNr of {
+                                         __DEFAULT ->
+                                           join {
+                                             $s$j1_sw4k sc3_sw4e sc4_sw4f sc5_sw4g
+                                               = let { n_svXs = quotWord8# ipv4_amNr 16#Word8 } in
+                                                 let { n1_svXu = remWord8# ipv4_amNr 16#Word8 } in
+                                                 case <# (minusAddr# sc4_sw4f sc3_sw4e) 2# of {
+                                                   __DEFAULT ->
+                                                     case ltWord8# n_svXs 10#Word8 of {
+                                                       __DEFAULT ->
+                                                         case writeWord8OffAddr#
+                                                                sc3_sw4e
+                                                                0#
+                                                                (plusWord8# 87#Word8 n_svXs)
+                                                                sc5_sw4g
+                                                         of s2_ivHk
+                                                         { __DEFAULT ->
+                                                         let { ds4_svN2 = plusAddr# sc3_sw4e 1# } in
+                                                         case ltWord8# n1_svXu 10#Word8 of {
+                                                           __DEFAULT ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svN2
+                                                                    0#
+                                                                    (plusWord8# 87#Word8 n1_svXu)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svN2 1#, sc4_sw4f,
+                                                                s3_Xk #)
+                                                             };
+                                                           1# ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svN2
+                                                                    0#
+                                                                    (plusWord8# 48#Word8 n1_svXu)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svN2 1#, sc4_sw4f,
+                                                                s3_Xk #)
+                                                             }
+                                                         }
+                                                         };
+                                                       1# ->
+                                                         case writeWord8OffAddr#
+                                                                sc3_sw4e
+                                                                0#
+                                                                (plusWord8# 48#Word8 n_svXs)
+                                                                sc5_sw4g
+                                                         of s2_ivHk
+                                                         { __DEFAULT ->
+                                                         let { ds4_svN2 = plusAddr# sc3_sw4e 1# } in
+                                                         case ltWord8# n1_svXu 10#Word8 of {
+                                                           __DEFAULT ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svN2
+                                                                    0#
+                                                                    (plusWord8# 87#Word8 n1_svXu)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svN2 1#, sc4_sw4f,
+                                                                s3_Xk #)
+                                                             };
+                                                           1# ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svN2
+                                                                    0#
+                                                                    (plusWord8# 48#Word8 n1_svXu)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svN2 1#, sc4_sw4f,
+                                                                s3_Xk #)
+                                                             }
+                                                         }
+                                                         }
+                                                     };
+                                                   1# ->
+                                                     case $fIsStringBuilder1
+                                                            2#
+                                                            v_isbu
+                                                            (# sc3_sw4e, sc4_sw4f, sc5_sw4g #)
+                                                     of
+                                                     { (# ipv5_isbi, ipv6_isbj, ipv7_isbk #) ->
+                                                     case ltWord8# n_svXs 10#Word8 of {
+                                                       __DEFAULT ->
+                                                         case writeWord8OffAddr#
+                                                                ipv5_isbi
+                                                                0#
+                                                                (plusWord8# 87#Word8 n_svXs)
+                                                                ipv7_isbk
+                                                         of s2_ivHk
+                                                         { __DEFAULT ->
+                                                         let {
+                                                           ds4_svN2 = plusAddr# ipv5_isbi 1# } in
+                                                         case ltWord8# n1_svXu 10#Word8 of {
+                                                           __DEFAULT ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svN2
+                                                                    0#
+                                                                    (plusWord8# 87#Word8 n1_svXu)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svN2 1#, ipv6_isbj,
+                                                                s3_Xk #)
+                                                             };
+                                                           1# ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svN2
+                                                                    0#
+                                                                    (plusWord8# 48#Word8 n1_svXu)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svN2 1#, ipv6_isbj,
+                                                                s3_Xk #)
+                                                             }
+                                                         }
+                                                         };
+                                                       1# ->
+                                                         case writeWord8OffAddr#
+                                                                ipv5_isbi
+                                                                0#
+                                                                (plusWord8# 48#Word8 n_svXs)
+                                                                ipv7_isbk
+                                                         of s2_ivHk
+                                                         { __DEFAULT ->
+                                                         let {
+                                                           ds4_svN2 = plusAddr# ipv5_isbi 1# } in
+                                                         case ltWord8# n1_svXu 10#Word8 of {
+                                                           __DEFAULT ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svN2
+                                                                    0#
+                                                                    (plusWord8# 87#Word8 n1_svXu)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svN2 1#, ipv6_isbj,
+                                                                s3_Xk #)
+                                                             };
+                                                           1# ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svN2
+                                                                    0#
+                                                                    (plusWord8# 48#Word8 n1_svXu)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svN2 1#, ipv6_isbj,
+                                                                s3_Xk #)
+                                                             }
+                                                         }
+                                                         }
+                                                     }
+                                                     }
+                                                 } } in
+                                           case >=# (minusAddr# sc1_sw44 sc_sw43) 4# of {
+                                             __DEFAULT ->
+                                               case byteString2
+                                                      lvl8_rw5w
+                                                      v_isbu
+                                                      (# sc_sw43, sc1_sw44, sc2_sw45 #)
+                                               of
+                                               { (# ipv5_svZG, ipv6_svZH, ipv7_svZI #) ->
+                                               jump $s$j1_sw4k ipv5_svZG ipv6_svZH ipv7_svZI
+                                               };
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw45
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl7_rw5v sc_sw43 4# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               jump $s$j1_sw4k
+                                                 (plusAddr# sc_sw43 4#) sc1_sw44 ipv5_ivH1
+                                               }
+                                           };
+                                         8## ->
+                                           case >=# (minusAddr# sc1_sw44 sc_sw43) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl18_rw5G
+                                                 v_isbu
+                                                 (# sc_sw43, sc1_sw44, sc2_sw45 #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw45
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl17_rw5F sc_sw43 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw43 2#, sc1_sw44, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         9## ->
+                                           case >=# (minusAddr# sc1_sw44 sc_sw43) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl10_rw5y
+                                                 v_isbu
+                                                 (# sc_sw43, sc1_sw44, sc2_sw45 #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw45
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl9_rw5x sc_sw43 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw43 2#, sc1_sw44, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         10## ->
+                                           case >=# (minusAddr# sc1_sw44 sc_sw43) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl14_rw5C
+                                                 v_isbu
+                                                 (# sc_sw43, sc1_sw44, sc2_sw45 #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw45
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl13_rw5B sc_sw43 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw43 2#, sc1_sw44, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         12## ->
+                                           case >=# (minusAddr# sc1_sw44 sc_sw43) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl16_rw5E
+                                                 v_isbu
+                                                 (# sc_sw43, sc1_sw44, sc2_sw45 #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw45
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl15_rw5D sc_sw43 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw43 2#, sc1_sw44, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         13## ->
+                                           case >=# (minusAddr# sc1_sw44 sc_sw43) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl12_rw5A
+                                                 v_isbu
+                                                 (# sc_sw43, sc1_sw44, sc2_sw45 #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw45
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl11_rw5z sc_sw43 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw43 2#, sc1_sw44, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         34## ->
+                                           case >=# (minusAddr# sc1_sw44 sc_sw43) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl22_rw5K
+                                                 v_isbu
+                                                 (# sc_sw43, sc1_sw44, sc2_sw45 #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw45
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl21_rw5J sc_sw43 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw43 2#, sc1_sw44, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         92## ->
+                                           case >=# (minusAddr# sc1_sw44 sc_sw43) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl20_rw5I
+                                                 v_isbu
+                                                 (# sc_sw43, sc1_sw44, sc2_sw45 #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw45
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl19_rw5H sc_sw43 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw43 2#, sc1_sw44, ipv5_ivH1 #)
+                                               }
+                                           }
+                                       })
+                                    }
+                                    };
+                                  1# -> (# sc_sw43, sc1_sw44, sc2_sw45 #)
+                                } } in
+                          case ># safeLen_svMQ 0# of {
+                            __DEFAULT -> jump $s$j_sw4d cur_sw2C end_sw2D s1_sw2E;
+                            1# ->
+                              case >=# safeLen_svMQ 8160# of {
+                                __DEFAULT ->
+                                  case >=# (minusAddr# end_sw2D cur_sw2C) safeLen_svMQ of {
+                                    __DEFAULT ->
+                                      case byteString2
+                                             (BS (plusAddr# bx_afws ww_sw19) bx1_afwt safeLen_svMQ)
+                                             v_isbu
+                                             wild2_sw2B
+                                      of
+                                      { (# ipv3_svZL, ipv4_svZM, ipv5_svZN #) ->
+                                      jump $s$j_sw4d ipv3_svZL ipv4_svZM ipv5_svZN
+                                      };
+                                    1# ->
+                                      case keepAlive#
+                                             bx1_afwt
+                                             s1_sw2E
+                                             (\ s2_ivGZ ->
+                                                (# copyAddrToAddrNonOverlapping#
+                                                     (plusAddr# bx_afws ww_sw19)
+                                                     cur_sw2C
+                                                     safeLen_svMQ
+                                                     s2_ivGZ,
+                                                   () #))
+                                      of
+                                      { (# ipv3_ivH1, ipv4_ivH2 #) ->
+                                      jump $s$j_sw4d
+                                        (plusAddr# cur_sw2C safeLen_svMQ) end_sw2D ipv3_ivH1
+                                      }
+                                  };
+                                1# ->
+                                  case byteString1
+                                         (BS (plusAddr# bx_afws ww_sw19) bx1_afwt safeLen_svMQ)
+                                         v_isbu
+                                         wild2_sw2B
+                                  of eta_B1
+                                  { (# ipv3_sw5c, ipv4_sw5d, ipv5_sw5e #) ->
+                                  case >=# ipv2_svGq bx2_afwu of {
+                                    __DEFAULT ->
+                                      case readWord8OffAddr#
+                                             (plusAddr# bx_afws ipv2_svGq) 0# realWorld#
+                                      of
+                                      { (# ipv6_amNq, ipv7_amNr #) ->
+                                      case touch# bx1_afwt ipv6_amNq of { __DEFAULT ->
+                                      (($wgo_sw1c (+# ipv2_svGq 1#)) `cast` <Co:1> :: ...)
+                                        v_isbu
+                                        (case word8ToWord# ipv7_amNr of {
+                                           __DEFAULT ->
+                                             join {
+                                               $s$j1_sw42 sc_sw3W sc1_sw3X sc2_sw3Y
+                                                 = let { n_svXs = quotWord8# ipv7_amNr 16#Word8 } in
+                                                   let { n1_svXu = remWord8# ipv7_amNr 16#Word8 } in
+                                                   case <# (minusAddr# sc1_sw3X sc_sw3W) 2# of {
+                                                     __DEFAULT ->
+                                                       case ltWord8# n_svXs 10#Word8 of {
+                                                         __DEFAULT ->
+                                                           case writeWord8OffAddr#
+                                                                  sc_sw3W
+                                                                  0#
+                                                                  (plusWord8# 87#Word8 n_svXs)
+                                                                  sc2_sw3Y
+                                                           of s2_ivHk
+                                                           { __DEFAULT ->
+                                                           let {
+                                                             ds4_svN2 = plusAddr# sc_sw3W 1# } in
+                                                           case ltWord8# n1_svXu 10#Word8 of {
+                                                             __DEFAULT ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svN2
+                                                                      0#
+                                                                      (plusWord8# 87#Word8 n1_svXu)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svN2 1#, sc1_sw3X,
+                                                                  s3_Xk #)
+                                                               };
+                                                             1# ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svN2
+                                                                      0#
+                                                                      (plusWord8# 48#Word8 n1_svXu)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svN2 1#, sc1_sw3X,
+                                                                  s3_Xk #)
+                                                               }
+                                                           }
+                                                           };
+                                                         1# ->
+                                                           case writeWord8OffAddr#
+                                                                  sc_sw3W
+                                                                  0#
+                                                                  (plusWord8# 48#Word8 n_svXs)
+                                                                  sc2_sw3Y
+                                                           of s2_ivHk
+                                                           { __DEFAULT ->
+                                                           let {
+                                                             ds4_svN2 = plusAddr# sc_sw3W 1# } in
+                                                           case ltWord8# n1_svXu 10#Word8 of {
+                                                             __DEFAULT ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svN2
+                                                                      0#
+                                                                      (plusWord8# 87#Word8 n1_svXu)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svN2 1#, sc1_sw3X,
+                                                                  s3_Xk #)
+                                                               };
+                                                             1# ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svN2
+                                                                      0#
+                                                                      (plusWord8# 48#Word8 n1_svXu)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svN2 1#, sc1_sw3X,
+                                                                  s3_Xk #)
+                                                               }
+                                                           }
+                                                           }
+                                                       };
+                                                     1# ->
+                                                       case $fIsStringBuilder1
+                                                              2#
+                                                              v_isbu
+                                                              (# sc_sw3W, sc1_sw3X, sc2_sw3Y #)
+                                                       of
+                                                       { (# ipv8_isbi, ipv9_isbj, ipv10_isbk #) ->
+                                                       case ltWord8# n_svXs 10#Word8 of {
+                                                         __DEFAULT ->
+                                                           case writeWord8OffAddr#
+                                                                  ipv8_isbi
+                                                                  0#
+                                                                  (plusWord8# 87#Word8 n_svXs)
+                                                                  ipv10_isbk
+                                                           of s2_ivHk
+                                                           { __DEFAULT ->
+                                                           let {
+                                                             ds4_svN2 = plusAddr# ipv8_isbi 1# } in
+                                                           case ltWord8# n1_svXu 10#Word8 of {
+                                                             __DEFAULT ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svN2
+                                                                      0#
+                                                                      (plusWord8# 87#Word8 n1_svXu)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svN2 1#, ipv9_isbj,
+                                                                  s3_Xk #)
+                                                               };
+                                                             1# ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svN2
+                                                                      0#
+                                                                      (plusWord8# 48#Word8 n1_svXu)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svN2 1#, ipv9_isbj,
+                                                                  s3_Xk #)
+                                                               }
+                                                           }
+                                                           };
+                                                         1# ->
+                                                           case writeWord8OffAddr#
+                                                                  ipv8_isbi
+                                                                  0#
+                                                                  (plusWord8# 48#Word8 n_svXs)
+                                                                  ipv10_isbk
+                                                           of s2_ivHk
+                                                           { __DEFAULT ->
+                                                           let {
+                                                             ds4_svN2 = plusAddr# ipv8_isbi 1# } in
+                                                           case ltWord8# n1_svXu 10#Word8 of {
+                                                             __DEFAULT ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svN2
+                                                                      0#
+                                                                      (plusWord8# 87#Word8 n1_svXu)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svN2 1#, ipv9_isbj,
+                                                                  s3_Xk #)
+                                                               };
+                                                             1# ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svN2
+                                                                      0#
+                                                                      (plusWord8# 48#Word8 n1_svXu)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svN2 1#, ipv9_isbj,
+                                                                  s3_Xk #)
+                                                               }
+                                                           }
+                                                           }
+                                                       }
+                                                       }
+                                                   } } in
+                                             case >=# (minusAddr# ipv4_sw5d ipv3_sw5c) 4# of {
+                                               __DEFAULT ->
+                                                 case byteString2 lvl8_rw5w v_isbu eta_B1 of
+                                                 { (# ipv8_svZG, ipv9_svZH, ipv10_svZI #) ->
+                                                 jump $s$j1_sw42 ipv8_svZG ipv9_svZH ipv10_svZI
+                                                 };
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5e
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl7_rw5v ipv3_sw5c 4# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 jump $s$j1_sw42
+                                                   (plusAddr# ipv3_sw5c 4#) ipv4_sw5d ipv8_ivH1
+                                                 }
+                                             };
+                                           8## ->
+                                             case >=# (minusAddr# ipv4_sw5d ipv3_sw5c) 2# of {
+                                               __DEFAULT -> byteString2 lvl18_rw5G v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5e
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl17_rw5F ipv3_sw5c 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5c 2#, ipv4_sw5d, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           9## ->
+                                             case >=# (minusAddr# ipv4_sw5d ipv3_sw5c) 2# of {
+                                               __DEFAULT -> byteString2 lvl10_rw5y v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5e
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl9_rw5x ipv3_sw5c 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5c 2#, ipv4_sw5d, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           10## ->
+                                             case >=# (minusAddr# ipv4_sw5d ipv3_sw5c) 2# of {
+                                               __DEFAULT -> byteString2 lvl14_rw5C v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5e
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl13_rw5B ipv3_sw5c 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5c 2#, ipv4_sw5d, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           12## ->
+                                             case >=# (minusAddr# ipv4_sw5d ipv3_sw5c) 2# of {
+                                               __DEFAULT -> byteString2 lvl16_rw5E v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5e
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl15_rw5D ipv3_sw5c 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5c 2#, ipv4_sw5d, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           13## ->
+                                             case >=# (minusAddr# ipv4_sw5d ipv3_sw5c) 2# of {
+                                               __DEFAULT -> byteString2 lvl12_rw5A v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5e
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl11_rw5z ipv3_sw5c 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5c 2#, ipv4_sw5d, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           34## ->
+                                             case >=# (minusAddr# ipv4_sw5d ipv3_sw5c) 2# of {
+                                               __DEFAULT -> byteString2 lvl22_rw5K v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5e
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl21_rw5J ipv3_sw5c 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5c 2#, ipv4_sw5d, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           92## ->
+                                             case >=# (minusAddr# ipv4_sw5d ipv3_sw5c) 2# of {
+                                               __DEFAULT -> byteString2 lvl20_rw5I v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5e
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl19_rw5H ipv3_sw5c 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5c 2#, ipv4_sw5d, ipv8_ivH1 #)
+                                                 }
+                                             }
+                                         })
+                                      }
+                                      };
+                                    1# -> eta_B1
+                                  }
+                                  }
+                              }
+                          }
+                          })
+                       `cast` <Co:2> :: ...
+                       }
+                       }
+                       }
+                       });
+                1# -> lvl6_rw5u `cast` <Co:2> :: ...
+              }; } in
+      $wgo_sw1c 0#
+      }
+
+$j_rw5L
+  = \ bx_afws bx1_afwt bx2_afwu ->
+      letrec {
+        $wgo_sw1J
+          = \ ww_sw1G ->
+              case >=# ww_sw1G bx2_afwu of {
+                __DEFAULT ->
+                  runRW#
+                    (\ s_aeDp ->
+                       case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+                       case {__ffi_static_ccall_unsafe main:hs_proto_find_json_escape :: Addr#
+                                                             -> Int64#
+                                                             -> Int64#
+                                                             -> State# RealWorld
+                                                             -> (# State# RealWorld, Int64# #)}_dvAv
+                              bx_afws
+                              (intToInt64# ww_sw1G)
+                              (intToInt64# (-# bx2_afwu ww_sw1G))
+                              realWorld#
+                       of
+                       { (# ds_dvAu, ds1_dvAt #) ->
+                       case keepAlive#
+                              bx1_afwt
+                              s'_aeDu
+                              (\ s1_aeX3 -> (# s1_aeX3, I# (int64ToInt# ds1_dvAt) #))
+                       of
+                       { (# ipv_aeDH, ipv1_aeDJ #) ->
+                       case lazy ipv1_aeDJ of { I# ipv2_svHZ ->
+                       (\ v_isbu v1_isbv ->
+                          case v1_isbv of wild1_sw3e { (# cur_sw3f, end_sw3g, s1_sw3h #) ->
+                          let { safeLen_svN8 = -# ipv2_svHZ ww_sw1G } in
+                          join {
+                            $s$j_sw4F sc_sw4v sc1_sw4w sc2_sw4x
+                              = case >=# ipv2_svHZ bx2_afwu of {
+                                  __DEFAULT ->
+                                    case readWord8OffAddr#
+                                           (plusAddr# bx_afws ipv2_svHZ) 0# realWorld#
+                                    of
+                                    { (# ipv3_amNq, ipv4_amNr #) ->
+                                    case touch# bx1_afwt ipv3_amNq of { __DEFAULT ->
+                                    (($wgo_sw1J (+# ipv2_svHZ 1#)) `cast` <Co:1> :: ...)
+                                      v_isbu
+                                      (case word8ToWord# ipv4_amNr of {
+                                         __DEFAULT ->
+                                           join {
+                                             $s$j1_sw4M sc3_sw4G sc4_sw4H sc5_sw4I
+                                               = let { n_svYu = quotWord8# ipv4_amNr 16#Word8 } in
+                                                 let { n1_svYw = remWord8# ipv4_amNr 16#Word8 } in
+                                                 case <# (minusAddr# sc4_sw4H sc3_sw4G) 2# of {
+                                                   __DEFAULT ->
+                                                     case ltWord8# n_svYu 10#Word8 of {
+                                                       __DEFAULT ->
+                                                         case writeWord8OffAddr#
+                                                                sc3_sw4G
+                                                                0#
+                                                                (plusWord8# 87#Word8 n_svYu)
+                                                                sc5_sw4I
+                                                         of s2_ivHk
+                                                         { __DEFAULT ->
+                                                         let { ds4_svNk = plusAddr# sc3_sw4G 1# } in
+                                                         case ltWord8# n1_svYw 10#Word8 of {
+                                                           __DEFAULT ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svNk
+                                                                    0#
+                                                                    (plusWord8# 87#Word8 n1_svYw)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svNk 1#, sc4_sw4H,
+                                                                s3_Xk #)
+                                                             };
+                                                           1# ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svNk
+                                                                    0#
+                                                                    (plusWord8# 48#Word8 n1_svYw)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svNk 1#, sc4_sw4H,
+                                                                s3_Xk #)
+                                                             }
+                                                         }
+                                                         };
+                                                       1# ->
+                                                         case writeWord8OffAddr#
+                                                                sc3_sw4G
+                                                                0#
+                                                                (plusWord8# 48#Word8 n_svYu)
+                                                                sc5_sw4I
+                                                         of s2_ivHk
+                                                         { __DEFAULT ->
+                                                         let { ds4_svNk = plusAddr# sc3_sw4G 1# } in
+                                                         case ltWord8# n1_svYw 10#Word8 of {
+                                                           __DEFAULT ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svNk
+                                                                    0#
+                                                                    (plusWord8# 87#Word8 n1_svYw)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svNk 1#, sc4_sw4H,
+                                                                s3_Xk #)
+                                                             };
+                                                           1# ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svNk
+                                                                    0#
+                                                                    (plusWord8# 48#Word8 n1_svYw)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svNk 1#, sc4_sw4H,
+                                                                s3_Xk #)
+                                                             }
+                                                         }
+                                                         }
+                                                     };
+                                                   1# ->
+                                                     case $fIsStringBuilder1
+                                                            2#
+                                                            v_isbu
+                                                            (# sc3_sw4G, sc4_sw4H, sc5_sw4I #)
+                                                     of
+                                                     { (# ipv5_isbi, ipv6_isbj, ipv7_isbk #) ->
+                                                     case ltWord8# n_svYu 10#Word8 of {
+                                                       __DEFAULT ->
+                                                         case writeWord8OffAddr#
+                                                                ipv5_isbi
+                                                                0#
+                                                                (plusWord8# 87#Word8 n_svYu)
+                                                                ipv7_isbk
+                                                         of s2_ivHk
+                                                         { __DEFAULT ->
+                                                         let {
+                                                           ds4_svNk = plusAddr# ipv5_isbi 1# } in
+                                                         case ltWord8# n1_svYw 10#Word8 of {
+                                                           __DEFAULT ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svNk
+                                                                    0#
+                                                                    (plusWord8# 87#Word8 n1_svYw)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svNk 1#, ipv6_isbj,
+                                                                s3_Xk #)
+                                                             };
+                                                           1# ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svNk
+                                                                    0#
+                                                                    (plusWord8# 48#Word8 n1_svYw)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svNk 1#, ipv6_isbj,
+                                                                s3_Xk #)
+                                                             }
+                                                         }
+                                                         };
+                                                       1# ->
+                                                         case writeWord8OffAddr#
+                                                                ipv5_isbi
+                                                                0#
+                                                                (plusWord8# 48#Word8 n_svYu)
+                                                                ipv7_isbk
+                                                         of s2_ivHk
+                                                         { __DEFAULT ->
+                                                         let {
+                                                           ds4_svNk = plusAddr# ipv5_isbi 1# } in
+                                                         case ltWord8# n1_svYw 10#Word8 of {
+                                                           __DEFAULT ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svNk
+                                                                    0#
+                                                                    (plusWord8# 87#Word8 n1_svYw)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svNk 1#, ipv6_isbj,
+                                                                s3_Xk #)
+                                                             };
+                                                           1# ->
+                                                             case writeWord8OffAddr#
+                                                                    ds4_svNk
+                                                                    0#
+                                                                    (plusWord8# 48#Word8 n1_svYw)
+                                                                    s2_ivHk
+                                                             of s3_Xk
+                                                             { __DEFAULT ->
+                                                             (# plusAddr# ds4_svNk 1#, ipv6_isbj,
+                                                                s3_Xk #)
+                                                             }
+                                                         }
+                                                         }
+                                                     }
+                                                     }
+                                                 } } in
+                                           case >=# (minusAddr# sc1_sw4w sc_sw4v) 4# of {
+                                             __DEFAULT ->
+                                               case byteString2
+                                                      lvl8_rw5w
+                                                      v_isbu
+                                                      (# sc_sw4v, sc1_sw4w, sc2_sw4x #)
+                                               of
+                                               { (# ipv5_sw0n, ipv6_sw0o, ipv7_sw0p #) ->
+                                               jump $s$j1_sw4M ipv5_sw0n ipv6_sw0o ipv7_sw0p
+                                               };
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw4x
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl7_rw5v sc_sw4v 4# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               jump $s$j1_sw4M
+                                                 (plusAddr# sc_sw4v 4#) sc1_sw4w ipv5_ivH1
+                                               }
+                                           };
+                                         8## ->
+                                           case >=# (minusAddr# sc1_sw4w sc_sw4v) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl18_rw5G
+                                                 v_isbu
+                                                 (# sc_sw4v, sc1_sw4w, sc2_sw4x #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw4x
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl17_rw5F sc_sw4v 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw4v 2#, sc1_sw4w, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         9## ->
+                                           case >=# (minusAddr# sc1_sw4w sc_sw4v) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl10_rw5y
+                                                 v_isbu
+                                                 (# sc_sw4v, sc1_sw4w, sc2_sw4x #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw4x
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl9_rw5x sc_sw4v 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw4v 2#, sc1_sw4w, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         10## ->
+                                           case >=# (minusAddr# sc1_sw4w sc_sw4v) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl14_rw5C
+                                                 v_isbu
+                                                 (# sc_sw4v, sc1_sw4w, sc2_sw4x #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw4x
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl13_rw5B sc_sw4v 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw4v 2#, sc1_sw4w, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         12## ->
+                                           case >=# (minusAddr# sc1_sw4w sc_sw4v) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl16_rw5E
+                                                 v_isbu
+                                                 (# sc_sw4v, sc1_sw4w, sc2_sw4x #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw4x
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl15_rw5D sc_sw4v 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw4v 2#, sc1_sw4w, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         13## ->
+                                           case >=# (minusAddr# sc1_sw4w sc_sw4v) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl12_rw5A
+                                                 v_isbu
+                                                 (# sc_sw4v, sc1_sw4w, sc2_sw4x #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw4x
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl11_rw5z sc_sw4v 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw4v 2#, sc1_sw4w, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         34## ->
+                                           case >=# (minusAddr# sc1_sw4w sc_sw4v) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl22_rw5K
+                                                 v_isbu
+                                                 (# sc_sw4v, sc1_sw4w, sc2_sw4x #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw4x
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl21_rw5J sc_sw4v 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw4v 2#, sc1_sw4w, ipv5_ivH1 #)
+                                               }
+                                           };
+                                         92## ->
+                                           case >=# (minusAddr# sc1_sw4w sc_sw4v) 2# of {
+                                             __DEFAULT ->
+                                               byteString2
+                                                 lvl20_rw5I
+                                                 v_isbu
+                                                 (# sc_sw4v, sc1_sw4w, sc2_sw4x #);
+                                             1# ->
+                                               case keepAlive#
+                                                      FinalPtr
+                                                      sc2_sw4x
+                                                      (\ s2_ivGZ ->
+                                                         (# copyAddrToAddrNonOverlapping#
+                                                              lvl19_rw5H sc_sw4v 2# s2_ivGZ,
+                                                            () #))
+                                               of
+                                               { (# ipv5_ivH1, ipv6_ivH2 #) ->
+                                               (# plusAddr# sc_sw4v 2#, sc1_sw4w, ipv5_ivH1 #)
+                                               }
+                                           }
+                                       })
+                                    }
+                                    };
+                                  1# -> (# sc_sw4v, sc1_sw4w, sc2_sw4x #)
+                                } } in
+                          case ># safeLen_svN8 0# of {
+                            __DEFAULT -> jump $s$j_sw4F cur_sw3f end_sw3g s1_sw3h;
+                            1# ->
+                              case >=# safeLen_svN8 8160# of {
+                                __DEFAULT ->
+                                  case >=# (minusAddr# end_sw3g cur_sw3f) safeLen_svN8 of {
+                                    __DEFAULT ->
+                                      case byteString2
+                                             (BS (plusAddr# bx_afws ww_sw1G) bx1_afwt safeLen_svN8)
+                                             v_isbu
+                                             wild1_sw3e
+                                      of
+                                      { (# ipv3_sw0s, ipv4_sw0t, ipv5_sw0u #) ->
+                                      jump $s$j_sw4F ipv3_sw0s ipv4_sw0t ipv5_sw0u
+                                      };
+                                    1# ->
+                                      case keepAlive#
+                                             bx1_afwt
+                                             s1_sw3h
+                                             (\ s2_ivGZ ->
+                                                (# copyAddrToAddrNonOverlapping#
+                                                     (plusAddr# bx_afws ww_sw1G)
+                                                     cur_sw3f
+                                                     safeLen_svN8
+                                                     s2_ivGZ,
+                                                   () #))
+                                      of
+                                      { (# ipv3_ivH1, ipv4_ivH2 #) ->
+                                      jump $s$j_sw4F
+                                        (plusAddr# cur_sw3f safeLen_svN8) end_sw3g ipv3_ivH1
+                                      }
+                                  };
+                                1# ->
+                                  case byteString1
+                                         (BS (plusAddr# bx_afws ww_sw1G) bx1_afwt safeLen_svN8)
+                                         v_isbu
+                                         wild1_sw3e
+                                  of eta_B1
+                                  { (# ipv3_sw5g, ipv4_sw5h, ipv5_sw5i #) ->
+                                  case >=# ipv2_svHZ bx2_afwu of {
+                                    __DEFAULT ->
+                                      case readWord8OffAddr#
+                                             (plusAddr# bx_afws ipv2_svHZ) 0# realWorld#
+                                      of
+                                      { (# ipv6_amNq, ipv7_amNr #) ->
+                                      case touch# bx1_afwt ipv6_amNq of { __DEFAULT ->
+                                      (($wgo_sw1J (+# ipv2_svHZ 1#)) `cast` <Co:1> :: ...)
+                                        v_isbu
+                                        (case word8ToWord# ipv7_amNr of {
+                                           __DEFAULT ->
+                                             join {
+                                               $s$j1_sw4u sc_sw4o sc1_sw4p sc2_sw4q
+                                                 = let { n_svYu = quotWord8# ipv7_amNr 16#Word8 } in
+                                                   let { n1_svYw = remWord8# ipv7_amNr 16#Word8 } in
+                                                   case <# (minusAddr# sc1_sw4p sc_sw4o) 2# of {
+                                                     __DEFAULT ->
+                                                       case ltWord8# n_svYu 10#Word8 of {
+                                                         __DEFAULT ->
+                                                           case writeWord8OffAddr#
+                                                                  sc_sw4o
+                                                                  0#
+                                                                  (plusWord8# 87#Word8 n_svYu)
+                                                                  sc2_sw4q
+                                                           of s2_ivHk
+                                                           { __DEFAULT ->
+                                                           let {
+                                                             ds4_svNk = plusAddr# sc_sw4o 1# } in
+                                                           case ltWord8# n1_svYw 10#Word8 of {
+                                                             __DEFAULT ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svNk
+                                                                      0#
+                                                                      (plusWord8# 87#Word8 n1_svYw)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svNk 1#, sc1_sw4p,
+                                                                  s3_Xk #)
+                                                               };
+                                                             1# ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svNk
+                                                                      0#
+                                                                      (plusWord8# 48#Word8 n1_svYw)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svNk 1#, sc1_sw4p,
+                                                                  s3_Xk #)
+                                                               }
+                                                           }
+                                                           };
+                                                         1# ->
+                                                           case writeWord8OffAddr#
+                                                                  sc_sw4o
+                                                                  0#
+                                                                  (plusWord8# 48#Word8 n_svYu)
+                                                                  sc2_sw4q
+                                                           of s2_ivHk
+                                                           { __DEFAULT ->
+                                                           let {
+                                                             ds4_svNk = plusAddr# sc_sw4o 1# } in
+                                                           case ltWord8# n1_svYw 10#Word8 of {
+                                                             __DEFAULT ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svNk
+                                                                      0#
+                                                                      (plusWord8# 87#Word8 n1_svYw)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svNk 1#, sc1_sw4p,
+                                                                  s3_Xk #)
+                                                               };
+                                                             1# ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svNk
+                                                                      0#
+                                                                      (plusWord8# 48#Word8 n1_svYw)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svNk 1#, sc1_sw4p,
+                                                                  s3_Xk #)
+                                                               }
+                                                           }
+                                                           }
+                                                       };
+                                                     1# ->
+                                                       case $fIsStringBuilder1
+                                                              2#
+                                                              v_isbu
+                                                              (# sc_sw4o, sc1_sw4p, sc2_sw4q #)
+                                                       of
+                                                       { (# ipv8_isbi, ipv9_isbj, ipv10_isbk #) ->
+                                                       case ltWord8# n_svYu 10#Word8 of {
+                                                         __DEFAULT ->
+                                                           case writeWord8OffAddr#
+                                                                  ipv8_isbi
+                                                                  0#
+                                                                  (plusWord8# 87#Word8 n_svYu)
+                                                                  ipv10_isbk
+                                                           of s2_ivHk
+                                                           { __DEFAULT ->
+                                                           let {
+                                                             ds4_svNk = plusAddr# ipv8_isbi 1# } in
+                                                           case ltWord8# n1_svYw 10#Word8 of {
+                                                             __DEFAULT ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svNk
+                                                                      0#
+                                                                      (plusWord8# 87#Word8 n1_svYw)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svNk 1#, ipv9_isbj,
+                                                                  s3_Xk #)
+                                                               };
+                                                             1# ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svNk
+                                                                      0#
+                                                                      (plusWord8# 48#Word8 n1_svYw)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svNk 1#, ipv9_isbj,
+                                                                  s3_Xk #)
+                                                               }
+                                                           }
+                                                           };
+                                                         1# ->
+                                                           case writeWord8OffAddr#
+                                                                  ipv8_isbi
+                                                                  0#
+                                                                  (plusWord8# 48#Word8 n_svYu)
+                                                                  ipv10_isbk
+                                                           of s2_ivHk
+                                                           { __DEFAULT ->
+                                                           let {
+                                                             ds4_svNk = plusAddr# ipv8_isbi 1# } in
+                                                           case ltWord8# n1_svYw 10#Word8 of {
+                                                             __DEFAULT ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svNk
+                                                                      0#
+                                                                      (plusWord8# 87#Word8 n1_svYw)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svNk 1#, ipv9_isbj,
+                                                                  s3_Xk #)
+                                                               };
+                                                             1# ->
+                                                               case writeWord8OffAddr#
+                                                                      ds4_svNk
+                                                                      0#
+                                                                      (plusWord8# 48#Word8 n1_svYw)
+                                                                      s2_ivHk
+                                                               of s3_Xk
+                                                               { __DEFAULT ->
+                                                               (# plusAddr# ds4_svNk 1#, ipv9_isbj,
+                                                                  s3_Xk #)
+                                                               }
+                                                           }
+                                                           }
+                                                       }
+                                                       }
+                                                   } } in
+                                             case >=# (minusAddr# ipv4_sw5h ipv3_sw5g) 4# of {
+                                               __DEFAULT ->
+                                                 case byteString2 lvl8_rw5w v_isbu eta_B1 of
+                                                 { (# ipv8_sw0n, ipv9_sw0o, ipv10_sw0p #) ->
+                                                 jump $s$j1_sw4u ipv8_sw0n ipv9_sw0o ipv10_sw0p
+                                                 };
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5i
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl7_rw5v ipv3_sw5g 4# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 jump $s$j1_sw4u
+                                                   (plusAddr# ipv3_sw5g 4#) ipv4_sw5h ipv8_ivH1
+                                                 }
+                                             };
+                                           8## ->
+                                             case >=# (minusAddr# ipv4_sw5h ipv3_sw5g) 2# of {
+                                               __DEFAULT -> byteString2 lvl18_rw5G v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5i
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl17_rw5F ipv3_sw5g 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5g 2#, ipv4_sw5h, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           9## ->
+                                             case >=# (minusAddr# ipv4_sw5h ipv3_sw5g) 2# of {
+                                               __DEFAULT -> byteString2 lvl10_rw5y v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5i
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl9_rw5x ipv3_sw5g 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5g 2#, ipv4_sw5h, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           10## ->
+                                             case >=# (minusAddr# ipv4_sw5h ipv3_sw5g) 2# of {
+                                               __DEFAULT -> byteString2 lvl14_rw5C v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5i
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl13_rw5B ipv3_sw5g 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5g 2#, ipv4_sw5h, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           12## ->
+                                             case >=# (minusAddr# ipv4_sw5h ipv3_sw5g) 2# of {
+                                               __DEFAULT -> byteString2 lvl16_rw5E v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5i
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl15_rw5D ipv3_sw5g 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5g 2#, ipv4_sw5h, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           13## ->
+                                             case >=# (minusAddr# ipv4_sw5h ipv3_sw5g) 2# of {
+                                               __DEFAULT -> byteString2 lvl12_rw5A v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5i
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl11_rw5z ipv3_sw5g 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5g 2#, ipv4_sw5h, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           34## ->
+                                             case >=# (minusAddr# ipv4_sw5h ipv3_sw5g) 2# of {
+                                               __DEFAULT -> byteString2 lvl22_rw5K v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5i
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl21_rw5J ipv3_sw5g 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5g 2#, ipv4_sw5h, ipv8_ivH1 #)
+                                                 }
+                                             };
+                                           92## ->
+                                             case >=# (minusAddr# ipv4_sw5h ipv3_sw5g) 2# of {
+                                               __DEFAULT -> byteString2 lvl20_rw5I v_isbu eta_B1;
+                                               1# ->
+                                                 case keepAlive#
+                                                        FinalPtr
+                                                        ipv5_sw5i
+                                                        (\ s2_ivGZ ->
+                                                           (# copyAddrToAddrNonOverlapping#
+                                                                lvl19_rw5H ipv3_sw5g 2# s2_ivGZ,
+                                                              () #))
+                                                 of
+                                                 { (# ipv8_ivH1, ipv9_ivH2 #) ->
+                                                 (# plusAddr# ipv3_sw5g 2#, ipv4_sw5h, ipv8_ivH1 #)
+                                                 }
+                                             }
+                                         })
+                                      }
+                                      };
+                                    1# -> eta_B1
+                                  }
+                                  }
+                              }
+                          }
+                          })
+                       `cast` <Co:2> :: ...
+                       }
+                       }
+                       }
+                       });
+                1# -> lvl6_rw5u `cast` <Co:2> :: ...
+              }; } in
+      $wgo_sw1J 0#
+
+lvl23_rw5M = $j_rw5L __NULL FinalPtr 0#
+
+escapeJSONText
+  = \ x_ae7g ->
+      case x_ae7g of { Text ww_avTV ww1_avTW ww2_avTX ->
+      case ww2_avTX of wild1_avU2 {
+        __DEFAULT ->
+          runRW#
+            (\ s_avU3 ->
+               case newPinnedByteArray# wild1_avU2 s_avU3 of
+               { (# ipv_avU5, ipv1_avU6 #) ->
+               case copyByteArray#
+                      ww_avTV ww1_avTW ipv1_avU6 0# wild1_avU2 ipv_avU5
+               of
+               { __DEFAULT ->
+               case lazy
+                      (case unsafeEqualityProof of { UnsafeRefl v2_avUa ->
+                       BS
+                         (byteArrayContents# (ipv1_avU6 `cast` <Co:2> :: ...))
+                         (PlainPtr ipv1_avU6)
+                         wild1_avU2
+                       })
+               of
+               { BS bx_afws bx1_afwt bx2_afwu ->
+               $j_rw5L bx_afws bx1_afwt bx2_afwu
+               }
+               }
+               });
+        0# -> lvl23_rw5M
+      }
+      }
+
+findByte
+  = \ ptr_av04 offset_av05 len_av06 target_av07 ->
+      case ptr_av04 of { Ptr ipv_svI4 ->
+      case offset_av05 of { I# ipv1_svI6 ->
+      case len_av06 of { I# ipv2_svI8 ->
+      case target_av07 of { W8# ipv3_svIa ->
+      case {__ffi_static_ccall_unsafe main:hs_find_byte :: Addr#
+                                                -> Int64#
+                                                -> Int64#
+                                                -> Word8#
+                                                -> State# RealWorld
+                                                -> (# State# RealWorld, Int64# #)}_dvBg
+             ipv_svI4
+             (intToInt64# ipv1_svI6)
+             (intToInt64# ipv2_svI8)
+             ipv3_svIa
+             realWorld#
+      of
+      { (# ds_dvBf, ds1_dvBe #) ->
+      I# (int64ToInt# ds1_dvBe)
+      }
+      }
+      }
+      }
+      }
+
+findByteBS
+  = \ bs_av08 off_av09 target_av0a ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_av08 of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case off_av09 of { I# ipv_svIg ->
+           case target_av0a of { W8# ipv1_svIk ->
+           case {__ffi_static_ccall_unsafe main:hs_find_byte :: Addr#
+                                                -> Int64#
+                                                -> Int64#
+                                                -> Word8#
+                                                -> State# RealWorld
+                                                -> (# State# RealWorld, Int64# #)}_dvBg
+                  bx_afHu
+                  (intToInt64# ipv_svIg)
+                  (intToInt64# bx2_afHA)
+                  ipv1_svIk
+                  realWorld#
+           of
+           { (# ds_dvBf, ds1_dvBe #) ->
+           case keepAlive#
+                  bx1_afHx
+                  s'_aeDu
+                  (\ s1_aeX3 -> (# s1_aeX3, I# (int64ToInt# ds1_dvBe) #))
+           of
+           { (# ipv2_aeDH, ipv3_aeDJ #) ->
+           lazy ipv3_aeDJ
+           }
+           }
+           }
+           }
+           }
+           })
+
+findNul
+  = \ ptr_auZW offset_auZX len_auZY ->
+      case ptr_auZW of { Ptr ipv_svIo ->
+      case offset_auZX of { I# ipv1_svIq ->
+      case len_auZY of { I# ipv2_svIs ->
+      case {__ffi_static_ccall_unsafe main:hs_proto_find_nul :: Addr#
+                                                     -> Int64#
+                                                     -> Int64#
+                                                     -> State# RealWorld
+                                                     -> (# State# RealWorld, Int64# #)}_dvBt
+             ipv_svIo (intToInt64# ipv1_svIq) (intToInt64# ipv2_svIs) realWorld#
+      of
+      { (# ds_dvBs, ds1_dvBr #) ->
+      case ltInt64# ds1_dvBr 0#Int64 of {
+        __DEFAULT -> Just (I# (int64ToInt# ds1_dvBr));
+        1# -> Nothing
+      }
+      }
+      }
+      }
+      }
+
+lvl24_rw5N = \ s_aeX3 -> (# s_aeX3, Nothing #)
+
+findNulBS
+  = \ bs_av00 off_av01 ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_av00 of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case off_av01 of { I# ipv_svIz ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_find_nul :: Addr#
+                                                     -> Int64#
+                                                     -> Int64#
+                                                     -> State# RealWorld
+                                                     -> (# State# RealWorld, Int64# #)}_dvBt
+                  bx_afHu (intToInt64# ipv_svIz) (intToInt64# bx2_afHA) realWorld#
+           of
+           { (# ds_dvBs, ds1_dvBr #) ->
+           case ltInt64# ds1_dvBr 0#Int64 of {
+             __DEFAULT ->
+               case keepAlive#
+                      bx1_afHx
+                      s'_aeDu
+                      (\ s1_aeX3 -> (# s1_aeX3, Just (I# (int64ToInt# ds1_dvBr)) #))
+               of
+               { (# ipv1_aeDH, ipv2_aeDJ #) ->
+               lazy ipv2_aeDJ
+               };
+             1# ->
+               case keepAlive# bx1_afHx s'_aeDu lvl24_rw5N of
+               { (# ipv1_aeDH, ipv2_aeDJ #) ->
+               lazy ipv2_aeDJ
+               }
+           }
+           }
+           }
+           }
+           })
+
+encodeBoolFieldC
+  = (\ buf_auZ1 off_auZ2 tag_auZ3 val_auZ4 eta_B0 ->
+       case buf_auZ1 `cast` <Co:6> :: ... of { Ptr ds1_dvBA ->
+       case off_auZ2 of { I# i_afeU ->
+       case tag_auZ3 of { W8# ds3_dvBE ->
+       case val_auZ4 of {
+         False ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_encode_bool_field :: Addr#
+                                                              -> Word64#
+                                                              -> Word8#
+                                                              -> Int32#
+                                                              -> State# RealWorld
+                                                              -> (# State# RealWorld, Word64# #)}_dvBJ
+                  ds1_dvBA
+                  (int64ToWord64# (intToInt64# i_afeU))
+                  ds3_dvBE
+                  0#Int32
+                  realWorld#
+           of
+           { (# ds4_dvBI, ds5_dvBH #) ->
+           (# eta_B0, I# (word2Int# (word64ToWord# ds5_dvBH)) #)
+           };
+         True ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_encode_bool_field :: Addr#
+                                                              -> Word64#
+                                                              -> Word8#
+                                                              -> Int32#
+                                                              -> State# RealWorld
+                                                              -> (# State# RealWorld, Word64# #)}_dvBJ
+                  ds1_dvBA
+                  (int64ToWord64# (intToInt64# i_afeU))
+                  ds3_dvBE
+                  1#Int32
+                  realWorld#
+           of
+           { (# ds4_dvBI, ds5_dvBH #) ->
+           (# eta_B0, I# (word2Int# (word64ToWord# ds5_dvBH)) #)
+           }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+encodeVarintFieldC
+  = (\ buf_auYX off_auYY tag_auYZ val_auZ0 eta_B0 ->
+       case buf_auYX `cast` <Co:6> :: ... of { Ptr ds1_dvBQ ->
+       case off_auYY of { I# i_afeU ->
+       case tag_auYZ of { W8# ds3_dvBU ->
+       case val_auZ0 of { W64# ds5_dvBW ->
+       case {__ffi_static_ccall_unsafe main:hs_proto_encode_varint_field :: Addr#
+                                                                -> Word64#
+                                                                -> Word8#
+                                                                -> Word64#
+                                                                -> State# RealWorld
+                                                                -> (# State# RealWorld, Word64# #)}_dvBZ
+              ds1_dvBQ
+              (int64ToWord64# (intToInt64# i_afeU))
+              ds3_dvBU
+              ds5_dvBW
+              realWorld#
+       of
+       { (# ds6_dvBY, ds7_dvBX #) ->
+       (# eta_B0, I# (word2Int# (word64ToWord# ds7_dvBX)) #)
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:16> :: ...
+
+encodeLengthDelimitedC
+  = (\ buf_auYS off_auYT tag_auYU dataPtr_auYV dataLen_auYW eta_B0 ->
+       case buf_auYS `cast` <Co:6> :: ... of { Ptr ds1_dvC7 ->
+       case off_auYT of { I# i_afeU ->
+       case tag_auYU of { W8# ds3_dvCb ->
+       case dataPtr_auYV `cast` <Co:6> :: ... of { Ptr ds5_dvCd ->
+       case dataLen_auYW of { I# i1_X2 ->
+       case {__ffi_static_ccall_unsafe main:hs_proto_encode_length_delimited :: Addr#
+                                                                    -> Word64#
+                                                                    -> Word8#
+                                                                    -> Addr#
+                                                                    -> Word64#
+                                                                    -> State# RealWorld
+                                                                    -> (# State# RealWorld,
+                                                                          Word64# #)}_dvCi
+              ds1_dvC7
+              (int64ToWord64# (intToInt64# i_afeU))
+              ds3_dvCb
+              ds5_dvCd
+              (int64ToWord64# (intToInt64# i1_X2))
+              realWorld#
+       of
+       { (# ds6_dvCh, ds7_dvCg #) ->
+       (# eta_B0, I# (word2Int# (word64ToWord# ds7_dvCg)) #)
+       }
+       }
+       }
+       }
+       }
+       })
+    `cast` <Co:20> :: ...
+
+countPackedVarints
+  = \ bs_auYM ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_auYM of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case {__ffi_static_ccall_unsafe main:hs_proto_count_packed_varints :: Addr#
+                                                                 -> Word64#
+                                                                 -> State# RealWorld
+                                                                 -> (# State# RealWorld, Word64# #)}_dvDf
+                  bx_afHu (int64ToWord64# (intToInt64# bx2_afHA)) realWorld#
+           of
+           { (# ds_dvDe, ds1_dvDd #) ->
+           case keepAlive#
+                  bx1_afHx
+                  s'_aeDu
+                  (\ s1_aeX3 ->
+                     (# s1_aeX3, I# (word2Int# (word64ToWord# ds1_dvDd)) #))
+           of
+           { (# ipv_aeDH, ipv1_aeDJ #) ->
+           lazy ipv1_aeDJ
+           }
+           }
+           }
+           })
+
+validateArrowBuffers
+  = \ ptr_av14 count_av15 bodyLength_av16 ->
+      case ptr_av14 of { Ptr ipv_svIS ->
+      case count_av15 of { I# ipv1_svIU ->
+      case bodyLength_av16 of { I64# ipv2_svIW ->
+      case <# ipv1_svIU 0# of {
+        __DEFAULT ->
+          case ltInt64# ipv2_svIW 0#Int64 of {
+            __DEFAULT ->
+              case <=# ipv1_svIU 4096# of {
+                __DEFAULT ->
+                  case {__ffi_static_ccall_safe main:hs_proto_validate_arrow_buffers :: Addr#
+                                                                 -> Word64#
+                                                                 -> Int64#
+                                                                 -> State# RealWorld
+                                                                 -> (# State# RealWorld, Int32# #)}_dvzC
+                         ipv_svIS
+                         (int64ToWord64# (intToInt64# ipv1_svIU))
+                         ipv2_svIW
+                         realWorld#
+                  of
+                  { (# ds_dvzB, ds1_dvzA #) ->
+                  case int32ToInt# ds1_dvzA of {
+                    __DEFAULT -> True;
+                    0# -> False
+                  }
+                  };
+                1# ->
+                  case {__ffi_static_ccall_unsafe main:hs_proto_validate_arrow_buffers :: Addr#
+                                                                   -> Word64#
+                                                                   -> Int64#
+                                                                   -> State# RealWorld
+                                                                   -> (# State# RealWorld,
+                                                                         Int32# #)}_dvzP
+                         ipv_svIS
+                         (int64ToWord64# (intToInt64# ipv1_svIU))
+                         ipv2_svIW
+                         realWorld#
+                  of
+                  { (# ds_dvzO, ds1_dvzN #) ->
+                  case int32ToInt# ds1_dvzN of {
+                    __DEFAULT -> True;
+                    0# -> False
+                  }
+                  }
+              };
+            1# -> False
+          };
+        1# -> False
+      }
+      }
+      }
+      }
+
+lvl25_rw5O = I# 0#
+
+compareBounds
+  = \ boundsPtr_av0R count_av0S width_av0T searchPtr_av0U ->
+      case boundsPtr_av0R of { Ptr ipv_svJh ->
+      case count_av0S of { I# ipv1_svJj ->
+      case width_av0T of { I# ipv2_svJl ->
+      case searchPtr_av0U of { Ptr ipv3_svJn ->
+      case <# ipv1_svJj 0# of {
+        __DEFAULT ->
+          case <# ipv2_svJl 0# of {
+            __DEFAULT ->
+              case {__ffi_static_ccall_unsafe main:hs_proto_compare_bounds :: Addr#
+                                                           -> Word64#
+                                                           -> Word64#
+                                                           -> Addr#
+                                                           -> State# RealWorld
+                                                           -> (# State# RealWorld, Int32# #)}_dvA5
+                     ipv_svJh
+                     (int64ToWord64# (intToInt64# ipv1_svJj))
+                     (int64ToWord64# (intToInt64# ipv2_svJl))
+                     ipv3_svJn
+                     realWorld#
+              of
+              { (# ds_dvA4, ds1_dvA3 #) ->
+              I# (int32ToInt# ds1_dvA3)
+              };
+            1# -> lvl25_rw5O
+          };
+        1# -> lvl25_rw5O
+      }
+      }
+      }
+      }
+      }
+
+lvl26_rw5P = \ s_aeX3 -> (# s_aeX3, lvl25_rw5O #)
+
+compareBoundsBS
+  = \ boundsBs_av0V count_av0W width_av0X searchBs_av0Y ->
+      case width_av0X of { I# x1_affC ->
+      case searchBs_av0Y of { BS bx_afws bx1_afwt bx2_afwu ->
+      join {
+        $w$j_sw2s y1_sw2m ww_sw2p
+          = join {
+              $w$j1_sw2k ipv_sw2e ww1_sw2h
+                = join {
+                    $w$j2_sw2c ipv1_sw26 ww2_sw29
+                      = case count_av0W of { I# x2_X5 ->
+                        join {
+                          $w$j3_sw24 y2_sw1Y ww3_sw21
+                            = join {
+                                $w$j4_sw1W ipv2_sw1Q ww4_sw1T
+                                  = runRW#
+                                      (\ s_aeDp ->
+                                         case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+                                         case boundsBs_av0V of { BS bx4_afHu bx5_afHx bx6_afHA ->
+                                         case keepAlive#
+                                                bx5_afHx
+                                                s'_aeDu
+                                                (\ eta_afHp ->
+                                                   case <# ww4_sw1T 0# of {
+                                                     __DEFAULT ->
+                                                       case <# ww1_sw2h 0# of {
+                                                         __DEFAULT ->
+                                                           case {__ffi_static_ccall_unsafe main:hs_proto_compare_bounds :: Addr#
+                                                           -> Word64#
+                                                           -> Word64#
+                                                           -> Addr#
+                                                           -> State# RealWorld
+                                                           -> (# State# RealWorld, Int32# #)}_dvA5
+                                                                  bx4_afHu
+                                                                  (int64ToWord64#
+                                                                     (intToInt64# ipv2_sw1Q))
+                                                                  (int64ToWord64#
+                                                                     (intToInt64# ipv_sw2e))
+                                                                  bx_afws
+                                                                  realWorld#
+                                                           of
+                                                           { (# ds_dvA4, ds1_dvA3 #) ->
+                                                           keepAlive#
+                                                             bx1_afwt
+                                                             eta_afHp
+                                                             (\ s1_aeX3 ->
+                                                                (# s1_aeX3,
+                                                                   I# (int32ToInt# ds1_dvA3) #))
+                                                           };
+                                                         1# ->
+                                                           keepAlive# bx1_afwt eta_afHp lvl26_rw5P
+                                                       };
+                                                     1# -> keepAlive# bx1_afwt eta_afHp lvl26_rw5P
+                                                   })
+                                         of
+                                         { (# ipv3_aeDH, ipv4_aeDJ #) ->
+                                         lazy ipv4_aeDJ
+                                         }
+                                         }
+                                         }) } in
+                              case <=# 0# y2_sw1Y of {
+                                __DEFAULT -> jump $w$j4_sw1W 0# 0#;
+                                1# -> jump $w$j4_sw1W y2_sw1Y ww3_sw21
+                              } } in
+                        case <=# x2_X5 ipv1_sw26 of {
+                          __DEFAULT -> jump $w$j3_sw24 ipv1_sw26 ww2_sw29;
+                          1# -> jump $w$j3_sw24 x2_X5 x2_X5
+                        }
+                        } } in
+                  case ww1_sw2h of {
+                    __DEFAULT ->
+                      case boundsBs_av0V of { BS bx4_X7 bx5_X8 bx6_X9 ->
+                      case quotInt# bx6_X9 ipv_sw2e of ds2_avK5 { __DEFAULT ->
+                      jump $w$j2_sw2c ds2_avK5 ds2_avK5
+                      }
+                      };
+                    -1# ->
+                      case boundsBs_av0V of { BS bx4_X7 bx5_X8 bx6_X9 ->
+                      case bx6_X9 of wild4_Xa {
+                        __DEFAULT ->
+                          case quotInt# wild4_Xa ipv_sw2e of ds2_avK5 { __DEFAULT ->
+                          jump $w$j2_sw2c ds2_avK5 ds2_avK5
+                          };
+                        -9223372036854775808# -> case overflowError of {}
+                      }
+                      };
+                    0# -> jump $w$j2_sw2c 0# 0#
+                  } } in
+            case <=# 0# y1_sw2m of {
+              __DEFAULT -> jump $w$j1_sw2k 0# 0#;
+              1# -> jump $w$j1_sw2k y1_sw2m ww_sw2p
+            } } in
+      case <=# x1_affC bx2_afwu of {
+        __DEFAULT -> jump $w$j_sw2s bx2_afwu bx2_afwu;
+        1# -> jump $w$j_sw2s x1_affC x1_affC
+      }
+      }
+      }
+
+writeLE16H = $fStorableWord7 `cast` <Co:13> :: ...
+
+readLE16H = $fStorableWord9 `cast` <Co:10> :: ...
+
+writeBE16H
+  = (\ p_av1d off_av1e v_av1f eta1_avKq ->
+       case p_av1d of { Ptr addr_avKs ->
+       case off_av1e of { I# d_avKv ->
+       case v_av1f of { W16# w#_avL0 ->
+       case writeWord16OffAddr#
+              (plusAddr# addr_avKs d_avKv)
+              0#
+              (wordToWord16# (byteSwap16# (word16ToWord# w#_avL0)))
+              eta1_avKq
+       of s2_avKA
+       { __DEFAULT ->
+       (# s2_avKA, () #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+readBE16H
+  = (\ p_av17 off_av18 s_avKF ->
+       case p_av17 of { Ptr addr_avKP ->
+       case off_av18 of { I# d_avKS ->
+       case readWord16OffAddr# (plusAddr# addr_avKP d_avKS) 0# s_avKF of
+       { (# ipv_avKV, ipv1_avKW #) ->
+       (# ipv_avKV,
+          W16# (wordToWord16# (byteSwap16# (word16ToWord# ipv1_avKW))) #)
+       }
+       }
+       })
+    `cast` <Co:10> :: ...
+
+writeLE32H = $fStorableWord12 `cast` <Co:13> :: ...
+
+readLE32H = $fStorableWord13 `cast` <Co:10> :: ...
+
+writeBE32H
+  = (\ p_av1g off_av1h v_av1i eta1_avLa ->
+       case p_av1g of { Ptr addr_avLc ->
+       case off_av1h of { I# d_avLf ->
+       case v_av1i of { W32# w#_avLB ->
+       case writeWord32OffAddr#
+              (plusAddr# addr_avLc d_avLf)
+              0#
+              (wordToWord32# (byteSwap32# (word32ToWord# w#_avLB)))
+              eta1_avLa
+       of s2_avLk
+       { __DEFAULT ->
+       (# s2_avLk, () #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+readBE32H
+  = (\ p_av19 off_av1a s_avKF ->
+       case p_av19 of { Ptr addr_avLq ->
+       case off_av1a of { I# d_avLt ->
+       case readWord32OffAddr# (plusAddr# addr_avLq d_avLt) 0# s_avKF of
+       { (# ipv_avLw, ipv1_avLx #) ->
+       (# ipv_avLw,
+          W32# (wordToWord32# (byteSwap32# (word32ToWord# ipv1_avLx))) #)
+       }
+       }
+       })
+    `cast` <Co:10> :: ...
+
+writeLE64H = $fStorableWord17 `cast` <Co:13> :: ...
+
+readLE64H = $fStorableWord18 `cast` <Co:10> :: ...
+
+writeBE64H
+  = (\ p_av1j off_av1k v_av1l eta1_avLL ->
+       case p_av1j of { Ptr addr_avLN ->
+       case off_av1k of { I# d_avLQ ->
+       case v_av1l of { W64# w#_avMc ->
+       case writeWord64OffAddr#
+              (plusAddr# addr_avLN d_avLQ) 0# (byteSwap64# w#_avMc) eta1_avLL
+       of s2_avLV
+       { __DEFAULT ->
+       (# s2_avLV, () #)
+       }
+       }
+       }
+       })
+    `cast` <Co:13> :: ...
+
+readBE64H
+  = (\ p_av1b off_av1c s_avKF ->
+       case p_av1b of { Ptr addr_avM1 ->
+       case off_av1c of { I# d_avM4 ->
+       case readWord64OffAddr# (plusAddr# addr_avM1 d_avM4) 0# s_avKF of
+       { (# ipv_avM7, ipv1_avM8 #) ->
+       (# ipv_avM7, W64# (byteSwap64# ipv1_avM8) #)
+       }
+       }
+       })
+    `cast` <Co:10> :: ...
+
+decodeVarintSWAR
+  = \ bs_auZ8 off_auZ9 ->
+      runRW#
+        (\ s_aeDp ->
+           case noDuplicate# s_aeDp of s'_aeDu { __DEFAULT ->
+           case bs_auZ8 of { BS bx_afHu bx1_afHx bx2_afHA ->
+           case keepAlive#
+                  bx1_afHx
+                  s'_aeDu
+                  (\ eta_avV0 ->
+                     $wallocaBytesAligned
+                       8#
+                       8#
+                       ((\ outPtr_auZv eta1_B0 ->
+                           case off_auZ9 of { I# i_afeU ->
+                           case outPtr_auZv of { Ptr ds1_dvCI ->
+                           case {__ffi_static_ccall_unsafe main:hs_proto_decode_varint_swar :: Addr#
+                                                               -> Int64#
+                                                               -> Addr#
+                                                               -> State# RealWorld
+                                                               -> (# State# RealWorld, Int32# #)}_dvCL
+                                  bx_afHu (intToInt64# i_afeU) ds1_dvCI realWorld#
+                           of
+                           { (# ds2_dvCK, ds3_dvCJ #) ->
+                           case int32ToInt# ds3_dvCJ of wild3_X2 {
+                             __DEFAULT ->
+                               case readWord64OffAddr# ds1_dvCI 0# eta1_B0 of
+                               { (# ipv_avMB, ipv1_avMC #) ->
+                               (# ipv_avMB, Just (W64# ipv1_avMC, I# wild3_X2) #)
+                               };
+                             0# -> (# eta1_B0, Nothing #)
+                           }
+                           }
+                           }
+                           })
+                        `cast` <Co:10> :: ...)
+                       eta_avV0)
+           of
+           { (# ipv_aeDH, ipv1_aeDJ #) ->
+           lazy ipv1_aeDJ
+           }
+           }
+           })
+
+

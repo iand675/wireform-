@@ -1,36 +1,24 @@
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {- |
-RFC 6638 §8.3 @Schedule-Tag@ — a response header carrying an opaque
-scheduling entity-tag for a calendar object resource, analogous to @ETag@
-but changing only when a scheduling operation (not an ordinary edit) alters
-the resource.
+RFC 6638 §8.2 @Schedule-Tag@ — the opaque scheduling tag of a calendar
+object resource. The syntax is the quoted-string production referenced by
+RFC 6638, and the wire body is retained so it can be sent back in
+@If-Schedule-Tag-Match@.
 
-== Grammar
+<https://www.rfc-editor.org/rfc/rfc6638#section-8.2 RFC 6638 §8.2>
 
-@
-Schedule-Tag = opaque-tag
-opaque-tag   = quoted-string
-@
-
-The opaque value is stored unquoted; rendering re-wraps it in DQUOTEs. As
-with @ETag@, the value itself never contains a DQUOTE, so no escaping is
-required.
-
-<https://www.rfc-editor.org/rfc/rfc6638#section-8.3 RFC 6638 §8.3>
-
-See also: "Network.HTTP.Headers.IfScheduleTagMatch", "Network.HTTP.Headers.ScheduleReply", "Network.HTTP.Headers.ETag", "Network.HTTP.Headers.IfMatch", "Network.HTTP.Headers.IfNoneMatch".
+See also: "Network.HTTP.Headers.IfScheduleTagMatch", "Network.HTTP.Headers.ScheduleReply".
 -}
 module Network.HTTP.Headers.ScheduleTag (
-  ScheduleTag (..),
+  ScheduleTag (ScheduleTag, ScheduleTagBytes, scheduleTag, scheduleTagBytes),
   scheduleTagParser,
   renderScheduleTag,
 ) where
 
-import Control.Monad.Combinators (between)
-import Data.CharSet (CharSet)
-import qualified Data.CharSet as CharSet
-import qualified Data.List.NonEmpty as NE
+import qualified Data.ByteString.Short as SBS
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hScheduleTag)
@@ -38,9 +26,27 @@ import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 
 
--- | An opaque @Schedule-Tag@ value (the content found between the DQUOTEs).
-newtype ScheduleTag = ScheduleTag {scheduleTag :: ST.ShortText}
+-- | The bytes between the quotes, including any quoted pairs.
+newtype ScheduleTag = ScheduleTagBytes {scheduleTagBytes :: SBS.ShortByteString}
   deriving stock (Eq, Show)
+
+
+{- | The original text interface, constructing a tag from a UTF-8 wire
+body. The accessor uses Latin-1 for bodies that are invalid UTF-8. Use
+'scheduleTagBytes' for byte equality or forwarding.
+-}
+pattern ScheduleTag :: ST.ShortText -> ScheduleTag
+pattern ScheduleTag {scheduleTag} <- ScheduleTagBytes (tagText -> scheduleTag)
+  where
+    ScheduleTag text = ScheduleTagBytes (ST.toShortByteString text)
+
+
+{-# COMPLETE ScheduleTag #-}
+
+
+tagText :: SBS.ShortByteString -> ST.ShortText
+tagText bytes =
+  maybe (ST.fromText (TE.decodeLatin1 (SBS.fromShort bytes))) id (ST.fromShortByteString bytes)
 
 
 instance KnownHeader ScheduleTag where
@@ -49,33 +55,14 @@ instance KnownHeader ScheduleTag where
   type Direction ScheduleTag = 'Response
 
 
-  parseFromHeaders _ headers = case runParser scheduleTagParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Schedule-Tag header: " <> show rest
-    Fail -> Left "Failed to parse Schedule-Tag header"
-    Err e -> Left e
-
-
+  parseFromHeaders _ = parseQuotedWireFieldLine "Schedule-Tag" (ScheduleTagBytes . SBS.toShort)
   renderToHeaders _ = M.toStrictByteString . renderScheduleTag
-
-
   headerName _ = hScheduleTag
 
 
--- | Bytes permitted inside an @opaque-tag@: VCHAR except DQUOTE, plus obs-text.
-opaqueTagCharSet :: CharSet
-opaqueTagCharSet = "\x21" <> CharSet.fromList ['\x23' .. '\x7E'] <> obsTextCharSet
-
-
 scheduleTagParser :: ParserT st String ScheduleTag
-scheduleTagParser =
-  ScheduleTag
-    <$> between
-      $(char '"')
-      $(char '"')
-      (shortASCIIFromParser_ (many (satisfyAscii (`CharSet.member` opaqueTagCharSet))))
+scheduleTagParser = ScheduleTagBytes . SBS.toShort <$> httpQuotedWireBytes
 
 
 renderScheduleTag :: ScheduleTag -> M.Builder
-renderScheduleTag (ScheduleTag t) =
-  M.char8 '"' <> M.shortByteString (ST.toShortByteString t) <> M.char8 '"'
+renderScheduleTag (ScheduleTagBytes bytes) = M.char7 '"' <> M.shortByteString bytes <> M.char7 '"'

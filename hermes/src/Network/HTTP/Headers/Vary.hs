@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 {- |
 The Vary HTTP response header describes the parts of the request message aside from the method
@@ -12,14 +13,20 @@ Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-12.5.5>
 
 See also: "Network.HTTP.Headers.Accept", "Network.HTTP.Headers.AcceptEncoding", "Network.HTTP.Headers.AcceptLanguage", "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.CacheControl".
 -}
-module Network.HTTP.Headers.Vary where
+module Network.HTTP.Headers.Vary (
+  Vary (..),
+  VaryDirective (..),
+  runVaryParser,
+  parseVary,
+  renderVary,
+) where
 
-import Control.Monad.Combinators.NonEmpty
+import Data.Bifunctor (first)
 import qualified Data.ByteString as B
-import Data.Foldable1
-import Data.Functor (($>))
+import qualified Data.ByteString.Char8 as BC
+import Data.Char (isAsciiUpper, toLower)
+import qualified Data.CharSet as CharSet
 import qualified Data.List.NonEmpty as NE
-import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName
 import qualified Network.HTTP.Headers.Mason as M
@@ -28,9 +35,17 @@ import Network.HTTP.Headers.Rendering.Util
 import Prelude
 
 
-newtype Vary = Vary {directives :: NE.NonEmpty VaryDirective}
+-- | An empty field has no selecting request header fields.
+data Vary
+  = Vary {directives :: NE.NonEmpty VaryDirective}
+  | VaryEmpty
   deriving stock (Eq, Show)
-  deriving newtype (Semigroup)
+
+
+instance Semigroup Vary where
+  VaryEmpty <> other = other
+  other <> VaryEmpty = other
+  Vary xs <> Vary ys = Vary (xs <> ys)
 
 
 data VaryDirective = VaryAll | VaryHeader !HeaderFieldName
@@ -43,9 +58,8 @@ instance KnownHeader Vary where
   type Direction Vary = 'Response
 
 
-  parseFromHeaders _ headers = do
-    res <- traverse runVaryParser headers
-    pure $ fold1 res
+  parseFromHeaders _ =
+    first Just . fmap fromDirectives . parseListFieldLines "Vary" (httpList varyDirectiveParser)
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderVary
@@ -55,22 +69,45 @@ instance KnownHeader Vary where
 
 
 runVaryParser :: B.ByteString -> Either (ParseFailure Vary) Vary
-runVaryParser bs = case runParser parseVary bs of
-  OK res "" -> Right res
-  OK _ rest -> Left $ Just ("Unconsumed input after parsing Vary header: " <> show rest)
-  Fail -> Left Nothing
-  Err e -> Left (Just e)
+runVaryParser = first Just . parseFieldLine "Vary" parseVary
 
 
 parseVary :: ParserT st String Vary
-parseVary = Vary <$> ((star <|> hdr) `sepBy1` (ows *> $(char ',') *> ows))
+parseVary = fromDirectives <$> httpList varyDirectiveParser
+
+
+fromDirectives :: [VaryDirective] -> Vary
+fromDirectives = maybe VaryEmpty Vary . NE.nonEmpty
+
+
+varyDirectiveParser :: ParserT st e VaryDirective
+varyDirectiveParser = commonDirective <|> (VaryHeader . unsafeUnknownHeaderFromBytestring . foldFieldName <$> rfc9110TokenBS)
   where
-    star = $(char '*') $> VaryAll
-    hdr = VaryHeader . headerFieldName . ST.toText <$> fieldName
+    -- Common lowercase names already have a canonical symbol.
+    commonDirective =
+      $( switch
+           [|
+             case _ of
+               "*" -> whole VaryAll
+               "accept" -> whole (VaryHeader hAccept)
+               "accept-encoding" -> whole (VaryHeader hAcceptEncoding)
+               "accept-language" -> whole (VaryHeader hAcceptLanguage)
+               "cookie" -> whole (VaryHeader hCookie)
+               "origin" -> whole (VaryHeader hOrigin)
+               "user-agent" -> whole (VaryHeader hUserAgent)
+             |]
+       )
+    whole value = value <$ notFollowedBy (skipSatisfyAscii (`CharSet.member` tokenCharSet))
+
+    -- The token scanner has already checked the field-name bytes.
+    foldFieldName field
+      | BC.any isAsciiUpper field = BC.map toLower field
+      | otherwise = field
 
 
 renderVary :: Vary -> M.Builder
-renderVary = sepByCommas1 . fmap renderVaryDirective . directives
+renderVary VaryEmpty = mempty
+renderVary (Vary names) = sepByCommas1 (fmap renderVaryDirective names)
   where
     renderVaryDirective VaryAll = "*"
     renderVaryDirective (VaryHeader hdr) = M.shortByteString $ headerNameToShortByteString hdr

@@ -24,7 +24,6 @@ module Network.HTTP.Headers.ContentLength (
   renderContentLength,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName
 import qualified Network.HTTP.Headers.Mason as M
@@ -41,13 +40,7 @@ instance KnownHeader ContentLength where
   type Direction ContentLength = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser contentLengthParser header of
-      OK cl "" -> Right cl
-      OK _ rest -> Left $ "Unconsumed input after parsing Content-Length header: " <> show rest
-      Fail -> Left "Failed to parse Content-Length header"
-      Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Content-Length" contentLengthParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentLength
@@ -57,7 +50,7 @@ instance KnownHeader ContentLength where
 
 
 contentLengthParser :: ParserT st String ContentLength
-contentLengthParser = ContentLength <$> anyAsciiDecimalWord
+contentLengthParser = ContentLength <$> boundedDecimalWord maxBound (err "Content-Length exceeds Word")
 
 
 renderContentLength :: ContentLength -> M.Builder

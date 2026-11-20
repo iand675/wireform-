@@ -1,0 +1,120 @@
+Warning: The package list for 'hackage.haskell.org' is 24 days old.
+Run 'cabal update' to get the latest list of available packages.
+Resolving dependencies...
+Build profile: -w ghc-9.14.1 -O2
+In order, the following will be built (use -v for more details):
+ - wireform-proto-0.3.0.0 (lib) (configuration changed)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-regression-test) (configuration changed)
+Configuring library for wireform-proto-0.3.0.0...
+Preprocessing library for wireform-proto-0.3.0.0...
+Building library for wireform-proto-0.3.0.0...
+Configuring test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+Preprocessing test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+[3 of 5] Compiling Generated.Integermaps ( test-regression/Generated/Integermaps.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc914/build/aarch64-osx/ghc-9.14.1/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Generated/Integermaps.o )
+test-regression/Generated/Integermaps.hs:106:111: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Word64 -> Word64
+      can probably be omitted
+    |
+106 |     <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 4 (encodeFieldString 1 k) ((encodeFieldVarint 2 . fromIntegral) v)) mempty msg.integerMapsUint64Values
+    |                                                                                                               ^^^^^^^^^^^^
+
+test-regression/Generated/Integermaps.hs:122:92: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Word64 -> Word64
+      can probably be omitted
+    |
+122 |     + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldVarintSize 2 (fromIntegral v) in acc + tagSize 4 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsUint64Values)
+    |                                                                                            ^^^^^^^^^^^^
+
+[4 of 5] Compiling THFixtures       ( test-regression/THFixtures.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc914/build/aarch64-osx/ghc-9.14.1/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/THFixtures.o ) [Source file changed]
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:11:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘ov’
+   |
+11 | $(loadProto "test-regression/proto/json_numbers.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:11:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+11 | $(loadProto "test-regression/proto/json_numbers.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:14:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+14 | $(loadProto "test-regression/proto/integerMaps.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:14:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+14 | $(loadProto "test-regression/proto/integerMaps.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:14:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+14 | $(loadProto "test-regression/proto/integerMaps.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:14:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+14 | $(loadProto "test-regression/proto/integerMaps.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[5 of 5] Compiling Main             ( test-regression/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc914/build/aarch64-osx/ghc-9.14.1/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Main.o ) [Source file changed]
+[6 of 6] Linking /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc914/build/aarch64-osx/ghc-9.14.1/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test [Objects changed]
+Running 1 test suites...
+Test suite wireform-proto-regression-test: RUNNING...
+WARNING: Only one CPU core detected, make sure to compile your test suite with these ghc options:
+         -threaded -rtsopts -with-rtsopts=-N
+         (This is important for correctness as well as speed, as a parallel test suite can find thread safety problems.)
+Tests:
+
+Standalone integer maps
+  ✓ sint32 and sint64 map values use canonical ZigZag and exact sizes              0.22 ms
+  ✓ integer value functions compile and agree with TH for limits and zero          0.38 ms
+ProtoJSON quoted numbers
+  ✓ optional and oneof floating fields use the same number grammar                 0.36 ms
+  ✓ generated Float and Double accept e/E and signed exponents                     0.39 ms
+  ✓ retains canonical NaN/Infinity strings                                         0.00 ms
+  ✓ runtime float/double and int64 helpers accept quoted exponents                 0.08 ms
+  ✓ rejects whitespace, trailing junk, noncanonical sentinels and overflow         0.02 ms
+Editions field presence
+  ✓ standalone codegen preserves every explicitly present scalar default           0.11 ms
+  ✓ loadProto preserves every explicitly present scalar default                    0.05 ms
+  ✓ repeated, map, oneof and nested fields retain their wire shapes                0.10 ms
+  ✓ file and field overrides, aggregate options and nested messages agree          0.12 ms
+  ✓ committed standalone fixtures exactly match the generator                      6.32 ms
+  ✓ absent and explicitly zero fields remain distinct in both generators           0.05 ms
+  ✓ merge preserves an explicitly present zero over a nonzero value                0.01 ms
+  ✓ does not silently accept unsupported LEGACY_REQUIRED presence                  0.08 ms
+
+  Passed:                       15
+  Failed:                       0
+  Sum of test runtimes:         0.01 seconds
+  Test suite took:              0.01 seconds
+
+Test suite wireform-proto-regression-test: PASS
+Test suite logged to:
+/private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc914/build/aarch64-osx/ghc-9.14.1/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/test/wireform-proto-0.3.0.0-wireform-proto-regression-test.log
+1 of 1 test suites (1 of 1 test cases) passed.

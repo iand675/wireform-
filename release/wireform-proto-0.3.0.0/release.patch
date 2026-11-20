@@ -1,0 +1,2031 @@
+diff --git a/wireform-proto/CHANGELOG.md b/wireform-proto/CHANGELOG.md
+index b45306e2..ce852dd8 100644
+--- a/wireform-proto/CHANGELOG.md
++++ b/wireform-proto/CHANGELOG.md
+@@ -1,6 +1,28 @@
+ # Changelog for wireform-proto
+ 
+ 
++## 0.3.0.0 -- 2026-11-06
++
++* Breaking generated-code change: Editions singular scalar and enum fields
++  use `Maybe` for explicit presence, including the default in Edition 2023
++  and later. Both standalone codegen and `loadProto` preserve explicitly
++  encoded default values. File/field `EXPLICIT` and `IMPLICIT` overrides,
++  including aggregate option syntax, are resolved consistently. Unsupported
++  `LEGACY_REQUIRED` presence now produces a generation error.
++* Accept quoted ProtoJSON numbers with `e`/`E` and signed exponents in
++  generated scalar/optional/oneof float and double decoders and the runtime
++  numeric helpers. Share the numeric grammar with the integer helpers;
++  retain full input consumption, canonical special-value spellings and
++  target-type overflow checks.
++* Fix standalone integer-map encoders by applying composed value encoders
++  as complete functions. Encode and size `sint32`/`sint64` map values with
++  ZigZag, matching their decoders and the TH path.
++* Stream large string fields across bounded ring chunks without a
++  contiguous reservation larger than the ring; retain the direct-copy
++  fast path and avoid intermediate pinned bytestrings.
++* Add runtime regressions using real standalone-generated and TH-generated
++  messages, with a reproducible fixture generator and drift check.
++
+ ## 0.2.0.0 -- 2026-07-16
+ 
+ Breaking release from 0.1.0.0.
+diff --git a/wireform-proto/README.md b/wireform-proto/README.md
+index 8f55dfc7..0ab9679a 100644
+--- a/wireform-proto/README.md
++++ b/wireform-proto/README.md
+@@ -405,6 +405,17 @@ materialising a `ByteString`.
+ 
+ ## Also included
+ 
++### Editions field presence
++
++Standalone generation and `loadProto` retain explicit presence for Editions
++singular scalar and enum fields using `Maybe`. An explicitly encoded zero
++round-trips as `Just 0`; an absent field remains `Nothing`. File and field
++`features.field_presence` settings support `EXPLICIT` and `IMPLICIT`, using
++both dotted and aggregate syntax. `LEGACY_REQUIRED` is rejected during
++code generation because required-field validation is not implemented.
++This is a source-level change from 0.2 for generated Editions records;
++proto2 and proto3 carriers keep their existing shapes.
++
+ ### Proto3 canonical JSON
+ 
+ Generated types get `ToJSON` / `FromJSON` instances that follow the
+diff --git a/wireform-proto/src/Proto/CodeGen.hs b/wireform-proto/src/Proto/CodeGen.hs
+index 6e7eddbf..ac478ecf 100644
+--- a/wireform-proto/src/Proto/CodeGen.hs
++++ b/wireform-proto/src/Proto/CodeGen.hs
+@@ -98,6 +98,7 @@ import Proto.IDL.Options
+ import Proto.IDL.Options.Custom (emptyCustomOptionRegistry, extractExtensionOptions, registerCustomOption)
+ import Proto.IDL.Parser.Resolver (ResolvedProto (..))
+ import Proto.Internal.CodeGen.Combinators (braceBlock, instanceHead, tshow, txt)
++import Proto.Internal.FieldPresence (resolveFieldPresence)
+ 
+ 
+ -- | Emit a Haddock doc comment block from a proto doc comment.
+@@ -480,8 +481,9 @@ ctxFieldName ctx = scopedFieldNameWith (genFieldNaming (gcOpts ctx))
+ 
+ -- | Generate a complete Haskell module as a 'Doc' from a proto file.
+ generateModule :: GenerateOpts -> TypeRegistry -> FilePath -> ProtoFile -> Doc ann
+-generateModule opts reg filePath pf =
+-  let thisMod = moduleNameForProto opts filePath pf
++generateModule opts reg filePath sourceFile =
++  let pf = either (error . T.unpack) id (resolveFieldPresence sourceFile)
++      thisMod = moduleNameForProto opts filePath pf
+       localTypes = collectLocalTypes (fromMaybe "" (protoPackage pf)) [] (protoTopLevels pf)
+       ctx =
+         GenCtx
+@@ -513,7 +515,7 @@ generateModule opts reg filePath pf =
+        , mempty
+        , genImports importedModules
+        , mempty
+-       , genFileDescriptorBinding filePath pf
++       , genFileDescriptorBinding filePath sourceFile
+        , mempty
+        , vsep body
+        ]
+@@ -1117,13 +1119,15 @@ genMapValEncode ctx = \case
+       SString -> txt "encodeFieldString " <> pretty (T.pack (show fn))
+       SBytes -> txt "encodeFieldBytes " <> pretty (T.pack (show fn))
+       SBool -> txt "encodeFieldBool " <> pretty (T.pack (show fn))
++      SSInt32 -> txt "encodeFieldSVarint32 " <> pretty (T.pack (show fn))
++      SSInt64 -> txt "encodeFieldSVarint64 " <> pretty (T.pack (show fn))
+       SDouble -> txt "encodeFieldDouble " <> pretty (T.pack (show fn))
+       SFloat -> txt "encodeFieldFloat " <> pretty (T.pack (show fn))
+       SFixed32 -> txt "encodeFieldFixed32 " <> pretty (T.pack (show fn))
+       SFixed64 -> txt "encodeFieldFixed64 " <> pretty (T.pack (show fn))
+-      SSFixed32 -> txt "encodeFieldFixed32 " <> pretty (T.pack (show fn)) <> txt " . fromIntegral"
+-      SSFixed64 -> txt "encodeFieldFixed64 " <> pretty (T.pack (show fn)) <> txt " . fromIntegral"
+-      _ -> txt "encodeFieldVarint " <> pretty (T.pack (show fn)) <> txt " . fromIntegral"
++      SSFixed32 -> txt "(encodeFieldFixed32 " <> pretty (T.pack (show fn)) <> txt " . fromIntegral)"
++      SSFixed64 -> txt "(encodeFieldFixed64 " <> pretty (T.pack (show fn)) <> txt " . fromIntegral)"
++      _ -> txt "(encodeFieldVarint " <> pretty (T.pack (show fn)) <> txt " . fromIntegral)"
+ 
+ 
+ genBuildExprOneof :: GenCtx -> [Text] -> Text -> Text -> OneofDef -> Doc ann
+@@ -1355,6 +1359,8 @@ mapKeySizeExpr = \case
+ 
+ mapValSizeExpr :: GenCtx -> FieldType -> Doc ann
+ mapValSizeExpr ctx = \case
++  FTScalar SSInt32 -> txt "fieldSVarint32Size 2 v"
++  FTScalar SSInt64 -> txt "fieldSVarint64Size 2 v"
+   FTScalar SString -> txt "fieldTextSize 2 v"
+   FTScalar SBytes -> txt "fieldBytesSize 2 v"
+   FTScalar SBool -> txt "fieldBoolSize 2"
+diff --git a/wireform-proto/src/Proto/Internal/FieldPresence.hs b/wireform-proto/src/Proto/Internal/FieldPresence.hs
+new file mode 100644
+index 00000000..2ed68be9
+--- /dev/null
++++ b/wireform-proto/src/Proto/Internal/FieldPresence.hs
+@@ -0,0 +1,65 @@
++{- | Resolve Editions field presence before either generator chooses field
++carriers. The public parser retains the original source-level labels.
++-}
++module Proto.Internal.FieldPresence (resolveFieldPresence) where
++
++import Data.List (find)
++import Data.Text (Text)
++import Proto.IDL.AST
++import Proto.IDL.Annotations (lookupSimpleOption)
++
++
++resolveFieldPresence :: ProtoFile -> Either Text ProtoFile
++resolveFieldPresence pf = case protoSyntax pf of
++  Editions edition -> do
++    filePresence <- presenceOption (featureFieldPresence (featuresForEdition edition)) (protoOptions pf)
++    topLevels <- traverse (topLevel filePresence) (protoTopLevels pf)
++    pure pf {protoTopLevels = topLevels}
++  _ -> Right pf
++  where
++    topLevel presence = \case
++      TLMessage msg -> TLMessage <$> message presence msg
++      TLExtend name fields -> TLExtend name <$> traverse (field presence) fields
++      other -> Right other
++    message presence msg = do
++      elements <- traverse (element presence) (msgElements msg)
++      pure msg {msgElements = elements}
++    element presence = \case
++      MEField fd -> MEField <$> field presence fd
++      MEMessage msg -> MEMessage <$> message presence msg
++      MEExtend name fields -> MEExtend name <$> traverse (field presence) fields
++      other -> Right other
++    field presence fd = case fieldLabel fd of
++      Just Repeated -> Right fd
++      _ -> do
++        resolved <- presenceOption presence (fieldOptions fd)
++        pure
++          fd
++            { fieldLabel = case resolved of
++                ExplicitPresence -> Just Optional
++                ImplicitPresence -> Nothing
++                LegacyRequired -> Just Required
++            }
++
++
++-- Field presence is scoped to files and fields, not enclosing messages.
++-- Accept both dotted and aggregate feature-option spellings.
++presenceOption :: FieldPresenceFeature -> [OptionDef] -> Either Text FieldPresenceFeature
++presenceOption fallback opts = case setting of
++  Nothing -> Right fallback
++  Just (CIdent "EXPLICIT") -> Right ExplicitPresence
++  Just (CIdent "IMPLICIT") -> Right ImplicitPresence
++  Just (CIdent "LEGACY_REQUIRED") ->
++    Left "features.field_presence = LEGACY_REQUIRED is not supported by the code generators"
++  Just _ -> Left "features.field_presence must be EXPLICIT or IMPLICIT"
++  where
++    setting = case find isPresence opts of
++      Just option -> Just (optValue option)
++      Nothing -> case lookupSimpleOption "features" opts of
++        Just (CAggregate values) -> lookup "field_presence" values
++        _ -> Nothing
++
++    isPresence option = case optNameParts (optName option) of
++      [SimpleOption "features", SimpleOption "field_presence"] -> True
++      [SimpleOption "features.field_presence"] -> True
++      _ -> False
+diff --git a/wireform-proto/src/Proto/Internal/JSON.hs b/wireform-proto/src/Proto/Internal/JSON.hs
+index 82d40733..6afb7738 100644
+--- a/wireform-proto/src/Proto/Internal/JSON.hs
++++ b/wireform-proto/src/Proto/Internal/JSON.hs
+@@ -89,12 +89,13 @@ import Data.Hashable (Hashable)
+ import Data.Int (Int64)
+ import Data.Map.Strict (Map)
+ import Data.Map.Strict qualified as Map
+-import Data.Scientific (Scientific, fromFloatDigits, toBoundedInteger, toRealFloat)
++import Data.Scientific (Scientific, fromFloatDigits, toBoundedInteger)
+ import Data.Text (Text)
+ import Data.Text qualified as T
+ import Data.Text.Encoding qualified as TE
+ import Data.Text.Lazy qualified as TL
+ import Data.Word (Word64)
++import Proto.Internal.JSON.Number qualified as Number
+ 
+ 
+ -- | Build a JSON object from key-value pairs (for generated code).
+@@ -178,24 +179,9 @@ protoWord64FromJSON (Aeson.Number n) = boundedFromSci "uint64" n
+ protoWord64FromJSON _ = fail "Expected uint64 string or number"
+ 
+ 
+-{- | Parse a 'Scientific' from a textual JSON value. Used for
+-the 64-bit-int code path (proto3 spec encodes them as strings
+-on output, accepts both shapes on input).
+-
+-@reads@ is unfortunate but @Data.Text.Read@ doesn't export a
+-'Scientific' parser, and pulling in @attoparsec@ here just
+-for one helper isn't worth it.
+--}
++-- | Parse a quoted ProtoJSON number, including exponent notation.
+ sciFromText :: Text -> Aeson.Parser Scientific
+-sciFromText t
+-  | hasLeadingSpace t = fail ("Invalid numeric string (leading whitespace): " <> show t)
+-  | otherwise = case reads (T.unpack t) :: [(Scientific, String)] of
+-      [(s, "")] -> pure s
+-      _ -> fail ("Invalid numeric string: " <> show t)
+-  where
+-    hasLeadingSpace s = case T.uncons s of
+-      Just (c, _) -> c == ' ' || c == '\t' || c == '\n' || c == '\r'
+-      Nothing -> True
++sciFromText = Number.numericString
+ 
+ 
+ {- | Coerce a 'Scientific' to a bounded integral type, failing
+@@ -231,16 +217,12 @@ protoFloatToJSON = protoDoubleToJSON . realToFrac
+ 
+ -- | Parse a 'Double' from JSON, accepting NaN\/Infinity string sentinels.
+ protoDoubleFromJSON :: Aeson.Value -> Aeson.Parser Double
+-protoDoubleFromJSON (Aeson.Number n) = pure (toRealFloat n)
+-protoDoubleFromJSON (Aeson.String "NaN") = pure (0 / 0)
+-protoDoubleFromJSON (Aeson.String "Infinity") = pure (1 / 0)
+-protoDoubleFromJSON (Aeson.String "-Infinity") = pure (negate (1 / 0))
+-protoDoubleFromJSON _ = fail "Expected number or special float string"
++protoDoubleFromJSON = Number.floating
+ 
+ 
+--- | Parse a 'Float' from JSON, accepting NaN\/Infinity string sentinels.
++-- | Parse a 'Float' with ProtoJSON sentinel, exponent and overflow handling.
+ protoFloatFromJSON :: Aeson.Value -> Aeson.Parser Float
+-protoFloatFromJSON v = realToFrac <$> protoDoubleFromJSON v
++protoFloatFromJSON = Number.floating
+ 
+ 
+ -- Proto3 canonical JSON: bytes as base64.
+diff --git a/wireform-proto/src/Proto/Internal/JSON/Number.hs b/wireform-proto/src/Proto/Internal/JSON/Number.hs
+new file mode 100644
+index 00000000..cba9900a
+--- /dev/null
++++ b/wireform-proto/src/Proto/Internal/JSON/Number.hs
+@@ -0,0 +1,37 @@
++-- | Shared ProtoJSON numeric parsing for runtime helpers and generated codecs.
++module Proto.Internal.JSON.Number (numericString, floating) where
++
++import Data.Aeson qualified as Aeson
++import Data.Aeson.Types qualified as Aeson
++import Data.Char (isSpace)
++import Data.Scientific (Scientific, toRealFloat)
++import Data.Text (Text)
++import Data.Text qualified as T
++import Data.Text.Encoding qualified as TE
++
++
++{- | Use JSON's full numeric grammar, including signed e/E exponents, with
++complete consumption. Whitespace inside a quoted number is not permitted.
++-}
++numericString :: Text -> Aeson.Parser Scientific
++numericString t
++  | T.null t || T.any isSpace t = fail "Invalid numeric string (empty or whitespace)"
++  | otherwise = case Aeson.eitherDecodeStrict' (TE.encodeUtf8 t) of
++      Right (Aeson.Number n) -> pure n
++      _ -> fail "Invalid numeric string"
++
++
++floating :: forall a. RealFloat a => Aeson.Value -> Aeson.Parser a
++floating = \case
++  Aeson.Number n -> finite n
++  Aeson.String "NaN" -> pure (0 / 0)
++  Aeson.String "Infinity" -> pure (1 / 0)
++  Aeson.String "-Infinity" -> pure (negate (1 / 0))
++  Aeson.String t -> numericString t >>= finite
++  _ -> fail "Expected JSON number or numeric string"
++  where
++    finite n =
++      let value = toRealFloat n :: a
++      in if isInfinite value
++           then fail "float/double overflow"
++           else pure value
+diff --git a/wireform-proto/src/Proto/Internal/Wire/Encode.hs b/wireform-proto/src/Proto/Internal/Wire/Encode.hs
+index 7b010555..73a75ed9 100644
+--- a/wireform-proto/src/Proto/Internal/Wire/Encode.hs
++++ b/wireform-proto/src/Proto/Internal/Wire/Encode.hs
+@@ -64,7 +64,7 @@ import Data.Text.Array qualified as TA
+ import Data.Text.Foreign qualified as TF
+ import Data.Text.Internal qualified as TI
+ import Data.Word (Word32, Word64)
+-import GHC.Exts (ByteArray#, Int (..), Int#, copyByteArrayToAddr#, plusAddr#)
++import GHC.Exts (ByteArray#, Int (..), Int#, copyByteArrayToAddr#, isTrue#, minusAddr#, plusAddr#, (+#), (-#), (<=#))
+ import Proto.Internal.Wire (WireType, fieldTag)
+ import Wireform.Builder (Builder)
+ import Wireform.Builder qualified as B
+@@ -203,19 +203,28 @@ fast-builder's current buffer chunk.
+ 
+ This avoids the intermediate pinned 'BS.ByteString' allocation that
+ @'B.byteStringCopy' . 'TE.encodeUtf8'@ would force. We use
+-fast-builder's 'ensureBytes' to guarantee buffer space, then
+-construct a raw 'Builder' that 'copyByteArrayToAddr#' 's the slice
+-from the text's unpinned backing store into the builder's pinned
+-buffer. Net cost is one buffer write, no heap allocation.
++a raw 'Builder' to copy each available chunk from the text's
++unpinned backing store. The fitting fast path performs one copy with
++no heap allocation; the overflow path advances the sink one chunk
++at a time, including rings smaller than the complete text payload.
+ -}
+ byteArraySliceBuilder :: ByteArray# -> Int# -> Int# -> Builder
+ byteArraySliceBuilder arr# off# len# =
+-  FBI.ensureBytes (I# len#)
+-    <> FBI.Builder
+-      ( \_ (# cur#, end#, s# #) ->
+-          case copyByteArrayToAddr# arr# off# cur# len# s# of
+-            s'# -> (# plusAddr# cur# len#, end#, s'# #)
+-      )
++  FBI.Builder $ \sink (# cur#, end#, s# #) ->
++    let available# = minusAddr# end# cur#
++    in if isTrue# (len# <=# available#)
++         then case copyByteArrayToAddr# arr# off# cur# len# s# of
++           s'# -> (# plusAddr# cur# len#, end#, s'# #)
++         else
++           -- A ring cannot grant a contiguous reservation larger than itself.
++           -- Fill the current chunk, request one byte to advance/flush the
++           -- sink, and continue without an intermediate pinned ByteString.
++           case copyByteArrayToAddr# arr# off# cur# available# s# of
++             s'# ->
++               FBI.unBuilder
++                 (FBI.ensureBytes 1 <> byteArraySliceBuilder arr# (off# +# available#) (len# -# available#))
++                 sink
++                 (# end#, end#, s'# #)
+ {-# INLINE byteArraySliceBuilder #-}
+ 
+ 
+diff --git a/wireform-proto/src/Proto/TH.hs b/wireform-proto/src/Proto/TH.hs
+index d11ff0ef..46da297b 100644
+--- a/wireform-proto/src/Proto/TH.hs
++++ b/wireform-proto/src/Proto/TH.hs
+@@ -126,8 +126,6 @@ import Data.Word (Word32, Word64)
+ import GHC.Generics (Generic)
+ import Language.Haskell.TH
+ import Language.Haskell.TH.Syntax (addDependentFile, addModFinalizer)
+-import System.Directory (doesFileExist)
+-import System.FilePath ((</>))
+ import Proto.CodeGen (
+   FieldNaming (..),
+   escapeReserved,
+@@ -156,10 +154,13 @@ import Proto.IDL.Annotations (lookupSimpleOption, optionAsBool, optionAsString)
+ import Proto.IDL.Options.Custom (emptyCustomOptionRegistry, extractExtensionOptions, registerCustomOption)
+ import Proto.IDL.Parser (parseProtoFile, renderParseError)
+ import Proto.Internal.Derive qualified as PDI
++import Proto.Internal.FieldPresence (resolveFieldPresence)
+ import Proto.Internal.JSON.Extension qualified as PJExt
+ import Proto.Repr
+ import Proto.Schema qualified as PS
+ import Proto.TH.Metadata qualified as PTM
++import System.Directory (doesFileExist)
++import System.FilePath ((</>))
+ import Wireform.Derive.Modifier (MapKeyScalar (..))
+ 
+ 
+@@ -360,7 +361,8 @@ classification via 'isEnumName', and the scoped Haskell type name via
+ on name clashes.
+ -}
+ protoFileToDeclsScoped :: FieldNaming -> RepConfig -> THHooks -> [TopLevel] -> ProtoFile -> Q [Dec]
+-protoFileToDeclsScoped naming cfg hooks importedTopLevels pf = do
++protoFileToDeclsScoped naming cfg hooks importedTopLevels sourceFile = do
++  pf <- either (fail . T.unpack) pure (resolveFieldPresence sourceFile)
+   let scope =
+         ScopeCtx
+           { scSyntax = protoSyntax pf
+diff --git a/wireform-proto/src/Proto/TH/Metadata.hs b/wireform-proto/src/Proto/TH/Metadata.hs
+index 3e7e406b..7c03ef10 100644
+--- a/wireform-proto/src/Proto/TH/Metadata.hs
++++ b/wireform-proto/src/Proto/TH/Metadata.hs
+@@ -102,6 +102,7 @@ import Proto.Google.Protobuf.Wrappers qualified
+ import Proto.Internal.JSON qualified as PJ
+ import Proto.Internal.JSON qualified as PJI
+ import Proto.Internal.JSON.Extension qualified as PJExt
++import Proto.Internal.JSON.Number qualified as Number
+ import Proto.Internal.JSON.WellKnown qualified as WK
+ import Proto.Schema qualified as PS
+ 
+@@ -415,11 +416,12 @@ mkProtoMessageInstance tyName fqName pkg defName fields = do
+     ]
+ 
+ 
+--- | Read a record field expression: record-dot @msg.field@ when the
+--- record uses the unprefixed layout ('NoFieldSelectors' + shared field
+--- names), else the bare selector application @field msg@. The label for
+--- the record-dot form is the selector's base name — the field name in
+--- either layout.
++{- | Read a record field expression: record-dot @msg.field@ when the
++record uses the unprefixed layout ('NoFieldSelectors' + shared field
++names), else the bare selector application @field msg@. The label for
++the record-dot form is the selector's base name — the field name in
++either layout.
++-}
+ dotRead :: Bool -> Name -> Name -> Exp
+ dotRead recDot sel msgVar
+   | recDot = GetFieldE (VarE msgVar) (nameBase sel)
+@@ -1368,20 +1370,7 @@ assert on. (NaN\/Infinity sentinels still flow through.)
+ -}
+ protoFloatFromJSONLenient
+   :: forall a. (RealFloat a) => Aeson.Value -> AesonT.Parser a
+-protoFloatFromJSONLenient v = case v of
+-  Aeson.Number n -> finite n
+-  Aeson.String "NaN" -> pure (0 / 0)
+-  Aeson.String "Infinity" -> pure (1 / 0)
+-  Aeson.String "-Infinity" -> pure (negate (1 / 0))
+-  Aeson.String s -> sciFromText32 s >>= finite
+-  _ -> fail "Expected JSON Number or numeric String"
+-  where
+-    finite :: Sci.Scientific -> AesonT.Parser a
+-    finite n =
+-      let d = Sci.toRealFloat n :: a
+-      in if isInfinite d
+-           then fail ("float/double overflow: " <> show n)
+-           else pure d
++protoFloatFromJSONLenient = Number.floating
+ 
+ 
+ {- | Parse @Maybe (Map Text v)@ where @v@ is a generated
+@@ -1636,20 +1625,9 @@ protoWord32FromJSON v = case v of
+   _ -> fail "Expected JSON Number or String for UInt32"
+ 
+ 
+-{- | Parse 'Scientific' from a JSON-quoted numeric string. We
+-can't reuse 'PJ.sciFromText' without adding a Proto.Internal.JSON
+-dependency edge, so duplicate the trivial implementation.
+--}
++-- | Shared full-consumption ProtoJSON number parser.
+ sciFromText32 :: Text -> AesonT.Parser Sci.Scientific
+-sciFromText32 t
+-  | hasLeadingWs t = fail ("Invalid numeric string (leading whitespace): " <> show t)
+-  | otherwise = case reads (T.unpack t) :: [(Sci.Scientific, String)] of
+-      [(s, "")] -> pure s
+-      _ -> fail ("Invalid numeric string: " <> show t)
+-  where
+-    hasLeadingWs s = case T.uncons s of
+-      Just (c, _) -> c == ' ' || c == '\t' || c == '\n' || c == '\r'
+-      Nothing -> True
++sciFromText32 = Number.numericString
+ 
+ 
+ {- | Bounded-integer narrowing for 32-bit fields. Mirrors
+diff --git a/wireform-proto/test-regression/Generate.hs b/wireform-proto/test-regression/Generate.hs
+new file mode 100644
+index 00000000..cdd7db03
+--- /dev/null
++++ b/wireform-proto/test-regression/Generate.hs
+@@ -0,0 +1,28 @@
++{-# LANGUAGE ImportQualifiedPost #-}
++{-# LANGUAGE OverloadedStrings #-}
++
++-- Run from wireform-proto: cabal exec -- runghc test-regression/Generate.hs
++module Main where
++
++import Data.Map.Strict qualified as Map
++import Data.Text qualified as T
++import Data.Text.IO qualified as TIO
++import Proto.CodeGen
++import Proto.IDL.Parser
++import Proto.IDL.Parser.Resolver (ResolvedProto (..))
++import System.Directory (createDirectoryIfMissing)
++import System.FilePath (takeDirectory, (</>))
++
++
++main :: IO ()
++main = mapM_ generate ["edition2023", "edition2024", "integerMaps"]
++  where
++    generate name = do
++      let file = name <> ".proto"
++      source <- TIO.readFile ("test-regression/proto" </> file)
++      pf <- either (fail . show) pure (parseProtoFile file source)
++      let opts = defaultGenerateOpts {genModulePrefix = "Generated"}
++          registry = buildTypeRegistry opts [(file, ResolvedProto pf file Map.empty)]
++          output = "test-regression" </> T.unpack (T.replace "." "/" (moduleNameForProto opts file pf)) <> ".hs"
++      createDirectoryIfMissing True (takeDirectory output)
++      TIO.writeFile output (generateModuleText opts registry file pf)
+diff --git a/wireform-proto/test-regression/Generated/Edition2023.hs b/wireform-proto/test-regression/Generated/Edition2023.hs
+new file mode 100644
+index 00000000..34df926f
+--- /dev/null
++++ b/wireform-proto/test-regression/Generated/Edition2023.hs
+@@ -0,0 +1,522 @@
++{-# LANGUAGE StrictData #-}
++{-# LANGUAGE DeriveGeneric #-}
++{-# LANGUAGE DeriveAnyClass #-}
++{-# LANGUAGE DerivingStrategies #-}
++{-# LANGUAGE OverloadedStrings #-}
++{-# LANGUAGE OverloadedRecordDot #-}
++{-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-top-binds #-}
++-- | Auto-generated protobuf types.
++--
++-- __THIS FILE IS AUTO-GENERATED BY wireform. DO NOT EDIT.__
++--
++-- Any manual changes will be overwritten the next time code
++-- generation is run.  To modify the types or instances, edit the
++-- @.proto@ source file and re-run the code generator.
++module Generated.Edition2023 where
++
++import Data.ByteString (ByteString)
++import qualified Data.ByteString as BS
++import qualified Wireform.Builder as B
++import Data.Int (Int32, Int64)
++import Data.Text (Text)
++import qualified Data.Text as T
++import Data.Word (Word32, Word64)
++import qualified Data.Map.Strict as Map
++import qualified Data.Vector as V
++import qualified Data.Vector.Unboxed as VU
++import GHC.Generics (Generic)
++import Control.DeepSeq (NFData(..))
++import Data.Hashable (Hashable(..))
++import Proto.Encode
++import Proto.Decode
++import qualified Data.Aeson as Aeson
++import qualified Data.Aeson.Types as Aeson
++import qualified Data.Aeson.Key as AesonKey
++import qualified Data.Aeson.KeyMap as AesonKM
++import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
++import Data.Proxy (Proxy(..))
++import Data.Reflection (Given(..), given)
++import Proto.Internal.JSON.Extension qualified as PJExt
++import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
++import Proto.Registry (IsMessage)
++import Proto.Registry qualified
++import qualified Proto.Extension
++import Proto.Internal.Wire (Tag(..), WireType(..))
++import Proto.Internal.Wire.Encode (putTag, putVarint, putFixed32, putFixed64,
++  putFloat, putDouble, putText, putByteString, putLengthDelimited,
++  putSVarint32, putSVarint64, putVarintSigned,
++  varintSize, tagSize, fieldMessageSize,
++  fieldVarintSize, fieldFixed32Size, fieldFixed64Size,
++  fieldBoolSize, fieldFloatSize, fieldDoubleSize,
++  fieldTextSize, fieldBytesSize,
++  fieldSVarint32Size, fieldSVarint64Size,
++  varintSize32, zigZag32, zigZag64)
++import Proto.Internal.Encode.Archetype (archVarint, archSVarint32, archSVarint64,
++  archFixed32, archFixed64, archFloat, archDouble, archBool,
++  archString, archBytes, archSubmessage,
++  archVarintSize, archStringSize, archBytesSize, archBoolSize,
++  archFixed32Size, archFixed64Size, archSubmessageSize)
++
++-- | Serialized FileDescriptorProto for this .proto file.
++-- Decode with @Proto.Google.Protobuf.Descriptor.decodeMessage@.
++fileDescriptorProtoBytes :: ByteString
++fileDescriptorProtoBytes = "\x0a\x11\x65\x64\x69\x74\x69\x6f\x6e\x32\x30\x32\x33\x2e\x70\x72\x6f\x74\x6f\x22\xbe\x02\x0a\x08\x46\x69\x65\x6c\x64\x73\x32\x33\x12\x0d\x0a\x05\x63\x6f\x75\x6e\x74\x18\x01\x20\x01\x28\x05\x12\x0c\x0a\x04\x6e\x61\x6d\x65\x18\x02\x20\x01\x28\x09\x12\x0f\x0a\x07\x70\x61\x79\x6c\x6f\x61\x64\x18\x03\x20\x01\x28\x0c\x12\x0f\x0a\x07\x65\x6e\x61\x62\x6c\x65\x64\x18\x04\x20\x01\x28\x08\x12\x18\x0a\x06\x73\x74\x61\x74\x75\x73\x18\x05\x20\x01\x28\x0b\x32\x08\x53\x74\x61\x74\x75\x73\x32\x33\x12\x11\x0a\x09\x6d\x61\x67\x6e\x69\x74\x75\x64\x65\x18\x06\x20\x01\x28\x01\x12\x10\x0a\x08\x66\x72\x61\x63\x74\x69\x6f\x6e\x18\x07\x20\x01\x28\x02\x12\x16\x0a\x0e\x69\x6d\x70\x6c\x69\x63\x69\x74\x5f\x63\x6f\x75\x6e\x74\x18\x08\x20\x01\x28\x05\x12\x0e\x0a\x06\x76\x61\x6c\x75\x65\x73\x18\x09\x20\x03\x28\x05\x12\x14\x0a\x05\x69\x6e\x6e\x65\x72\x18\x0a\x20\x01\x28\x0b\x32\x05\x49\x6e\x6e\x65\x72\x12\x19\x0a\x05\x61\x74\x74\x72\x73\x18\x0b\x20\x03\x28\x0b\x32\x0a\x61\x74\x74\x72\x73\x45\x6e\x74\x72\x79\x12\x0e\x0a\x06\x70\x69\x63\x6b\x65\x64\x18\x0c\x20\x01\x28\x05\x12\x0d\x0a\x05\x6c\x61\x62\x65\x6c\x18\x0d\x20\x01\x28\x09\x12\x1a\x0a\x12\x61\x67\x67\x72\x65\x67\x61\x74\x65\x5f\x69\x6d\x70\x6c\x69\x63\x69\x74\x18\x0e\x20\x01\x28\x05\x1a\x16\x0a\x05\x49\x6e\x6e\x65\x72\x12\x0d\x0a\x05\x63\x6f\x75\x6e\x74\x18\x01\x20\x01\x28\x05\x42\x08\x0a\x06\x63\x68\x6f\x69\x63\x65\x2a\x36\x0a\x08\x53\x74\x61\x74\x75\x73\x32\x33\x12\x16\x0a\x14\x53\x54\x41\x54\x55\x53\x32\x33\x5f\x55\x4e\x53\x50\x45\x43\x49\x46\x49\x45\x44\x12\x12\x0a\x0e\x53\x54\x41\x54\x55\x53\x32\x33\x5f\x52\x45\x41\x44\x59\x10\x01\x62\x08\x65\x64\x69\x74\x69\x6f\x6e\x73\x72\x04\x32\x30\x32\x33"
++
++
++data Status23
++  = Status23'Status23Unspecified
++  | Status23'Status23Ready
++  deriving stock (Show, Eq, Ord, Enum, Bounded, Generic)
++  deriving anyclass NFData
++
++toProtoEnumStatus23 :: Status23 -> Int
++toProtoEnumStatus23 Status23'Status23Unspecified = 0
++toProtoEnumStatus23 Status23'Status23Ready = 1
++
++fromProtoEnumStatus23 :: Int -> Maybe Status23
++fromProtoEnumStatus23 0 = Just Status23'Status23Unspecified
++fromProtoEnumStatus23 1 = Just Status23'Status23Ready
++fromProtoEnumStatus23 _ = Nothing
++
++instance MessageEncode Status23 where
++  buildMessage _ = mempty
++instance MessageSize Status23 where
++  messageSize _ = 0
++instance MessageDecode Status23 where
++  messageDecoder = pure (toEnum 0)
++
++instance Aeson.ToJSON Status23 where
++  toJSON Status23'Status23Unspecified = Aeson.String "STATUS23_UNSPECIFIED"
++  toJSON Status23'Status23Ready = Aeson.String "STATUS23_READY"
++
++instance Aeson.FromJSON Status23 where
++  parseJSON = \case
++    Aeson.String "STATUS23_UNSPECIFIED" -> pure Status23'Status23Unspecified
++    Aeson.String "STATUS23_READY" -> pure Status23'Status23Ready
++    Aeson.Number n -> pure (toEnum (round n))
++    _ -> fail "Invalid enum value for Status23"
++
++instance Hashable Status23 where
++  hashWithSalt salt x = hashWithSalt salt (toProtoEnumStatus23 x)
++
++data Fields23 = Fields23
++  { fields23Count :: !(Maybe Int32)
++  , fields23Name :: !(Maybe Text)
++  , fields23Payload :: !(Maybe ByteString)
++  , fields23Enabled :: !(Maybe Bool)
++  , fields23Status :: !(Maybe Status23)
++  , fields23Magnitude :: !(Maybe Double)
++  , fields23Fraction :: !(Maybe Float)
++  , fields23ImplicitCount :: {-# UNPACK #-} !Int32
++  , fields23Values :: !(VU.Vector Int32)
++  , fields23Inner :: !(Maybe Fields23'Inner)
++  , fields23Attrs :: !(Map.Map Text Text)
++  , fields23Choice :: !(Maybe Fields23'Choice)
++  , fields23AggregateImplicit :: {-# UNPACK #-} !Int32
++  , fields23UnknownFields :: ![UnknownField]
++  }
++  deriving stock (Show, Eq, Generic)
++  deriving anyclass NFData
++
++data Fields23'Inner = Fields23'Inner
++  { fields23InnerCount :: !(Maybe Int32)
++  , fields23InnerUnknownFields :: ![UnknownField]
++  }
++  deriving stock (Show, Eq, Generic)
++  deriving anyclass NFData
++
++defaultFields23'Inner :: Fields23'Inner
++defaultFields23'Inner = Fields23'Inner
++  { fields23InnerCount = Nothing
++  , fields23InnerUnknownFields = []
++  }
++
++instance MessageEncode Fields23'Inner where
++  buildMessage msg =
++    (maybe mempty (\v -> archVarint 8 (fromIntegral v)) msg.fields23InnerCount)
++    <> encodeUnknownFields msg.fields23InnerUnknownFields
++
++instance MessageSize Fields23'Inner where
++  messageSize msg =
++    (maybe 0 (\v -> archVarintSize (fromIntegral v)) msg.fields23InnerCount)
++    + unknownFieldsSize msg.fields23InnerUnknownFields
++
++instance MessageDecode Fields23'Inner where
++  {-# INLINE messageDecoder #-}
++  messageDecoder = loop Nothing []
++    where
++      loop acc_0 acc_unknown_ = withTagM
++        (pure (Fields23'Inner {fields23InnerCount = acc_0, fields23InnerUnknownFields = reverse acc_unknown_}))
++        (\fn wt -> case fn of
++          1 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop (Just v) acc_unknown_
++          _ -> do
++            uf <- captureUnknownField fn (toEnum wt)
++            loop acc_0 (uf : acc_unknown_))
++
++instance ProtoMessage Fields23'Inner where
++  protoMessageName _ = "Fields23.Inner"
++  protoPackageName _ = ""
++  protoDefaultValue = defaultFields23'Inner
++  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
++  protoFieldDescriptors _ = Map.fromList
++    [ (1, SomeField FieldDescriptor
++        { fdName = "count"
++        , fdNumber = 1
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelOptional
++        , fdGet = fields23InnerCount
++        , fdSet = \v m -> m { fields23InnerCount = v }
++        })
++    ]
++
++instance IsMessage Fields23'Inner
++
++instance Aeson.ToJSON Fields23'Inner where
++  toJSON msg = jsonObject
++      [ "count" .=: msg.fields23InnerCount
++
++      ]
++
++instance Aeson.FromJSON Fields23'Inner where
++  parseJSON = Aeson.withObject "Fields23'Inner" $ \obj -> do
++    fld_fields23InnerCount <- parseFieldMaybe obj "count"
++    pure defaultFields23'Inner
++      { fields23InnerCount = maybe (fields23InnerCount defaultFields23'Inner) id fld_fields23InnerCount
++      , fields23InnerUnknownFields = []
++      }
++
++instance Hashable Fields23'Inner where
++  hashWithSalt salt msg = hashWithSalt (salt) msg.fields23InnerCount
++
++instance Proto.Extension.HasExtensions Fields23'Inner where
++  messageUnknownFields = fields23InnerUnknownFields
++  setMessageUnknownFields !ufs msg = msg { fields23InnerUnknownFields = ufs }
++
++instance Semigroup Fields23'Inner where
++  a <> b = Fields23'Inner
++    { fields23InnerCount = case b.fields23InnerCount of { Nothing -> a.fields23InnerCount; x -> x }
++    , fields23InnerUnknownFields = a.fields23InnerUnknownFields <> b.fields23InnerUnknownFields
++    }
++
++instance Monoid Fields23'Inner where
++  mempty = defaultFields23'Inner
++data Fields23'Choice
++  = Fields23'Choice'Picked {-# UNPACK #-} !Int32
++  | Fields23'Choice'Label !Text
++  deriving stock (Show, Eq, Generic)
++  deriving anyclass NFData
++instance Aeson.ToJSON Fields23'Choice where
++  toJSON _ = Aeson.Null
++instance Aeson.FromJSON Fields23'Choice where
++  parseJSON _ = fail "Cannot parse oneof from JSON"
++instance Hashable Fields23'Choice where
++  hashWithSalt salt (Fields23'Choice'Picked v) = salt `hashWithSalt` (0 :: Int) `hashWithSalt` v
++  hashWithSalt salt (Fields23'Choice'Label v) = salt `hashWithSalt` (1 :: Int) `hashWithSalt` v
++
++defaultFields23 :: Fields23
++defaultFields23 = Fields23
++  { fields23Count = Nothing
++  , fields23Name = Nothing
++  , fields23Payload = Nothing
++  , fields23Enabled = Nothing
++  , fields23Status = Nothing
++  , fields23Magnitude = Nothing
++  , fields23Fraction = Nothing
++  , fields23ImplicitCount = 0
++  , fields23Values = VU.empty
++  , fields23Inner = Nothing
++  , fields23Attrs = Map.empty
++  , fields23Choice = Nothing
++  , fields23AggregateImplicit = 0
++  , fields23UnknownFields = []
++  }
++
++instance MessageEncode Fields23 where
++  buildMessage msg =
++    (maybe mempty (\v -> archVarint 8 (fromIntegral v)) msg.fields23Count)
++    <> (maybe mempty (\v -> archString 18 v) msg.fields23Name)
++    <> (maybe mempty (\v -> archBytes 26 v) msg.fields23Payload)
++    <> (maybe mempty (\v -> archBool 32 v) msg.fields23Enabled)
++    <> (maybe mempty (\v -> archVarint 40 (fromIntegral (fromEnum v))) msg.fields23Status)
++    <> (maybe mempty (\v -> archDouble 49 v) msg.fields23Magnitude)
++    <> (maybe mempty (\v -> archFloat 61 v) msg.fields23Fraction)
++    <> (if msg.fields23ImplicitCount == 0 then mempty else archVarint 64 (fromIntegral msg.fields23ImplicitCount))
++    <> encodePackedInt32 9 msg.fields23Values
++    <> (maybe mempty (\v -> let sz = messageSize v in archSubmessage 82 sz (buildMessage v)) msg.fields23Inner)
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 11 (encodeFieldString 1 k) (encodeFieldString 2 v)) mempty msg.fields23Attrs
++    <> (case msg.fields23Choice of
++      Nothing -> mempty
++      Just (Fields23'Choice'Picked v) -> archVarint 96 (fromIntegral v)
++      Just (Fields23'Choice'Label v) -> archString 106 v)
++    <> (if msg.fields23AggregateImplicit == 0 then mempty else archVarint 112 (fromIntegral msg.fields23AggregateImplicit))
++    <> encodeUnknownFields msg.fields23UnknownFields
++
++instance MessageSize Fields23 where
++  messageSize msg =
++    (maybe 0 (\v -> archVarintSize (fromIntegral v)) msg.fields23Count)
++    + (maybe 0 (\v -> archStringSize v) msg.fields23Name)
++    + (maybe 0 (\v -> archBytesSize v) msg.fields23Payload)
++    + (maybe 0 (\v -> archBoolSize) msg.fields23Enabled)
++    + (maybe 0 (\v -> archVarintSize (fromIntegral (fromEnum v))) msg.fields23Status)
++    + (maybe 0 (\v -> archFixed64Size) msg.fields23Magnitude)
++    + (maybe 0 (\v -> archFixed32Size) msg.fields23Fraction)
++    + (if msg.fields23ImplicitCount == 0 then 0 else archVarintSize (fromIntegral msg.fields23ImplicitCount))
++    + (let pl = VU.foldl' (\a v -> a + varintSize (fromIntegral v)) 0 msg.fields23Values in if pl == 0 then 0 else tagSize 9 + varintSize (fromIntegral pl) + pl)
++    + (maybe 0 (\v -> archSubmessageSize (messageSize v)) msg.fields23Inner)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldTextSize 2 v in acc + tagSize 11 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.fields23Attrs)
++    + (case msg.fields23Choice of { Nothing -> 0; Just (Fields23'Choice'Picked v) -> archVarintSize (fromIntegral v)
++    ; Just (Fields23'Choice'Label v) -> archStringSize v })
++    + (if msg.fields23AggregateImplicit == 0 then 0 else archVarintSize (fromIntegral msg.fields23AggregateImplicit))
++    + unknownFieldsSize msg.fields23UnknownFields
++
++instance MessageDecode Fields23 where
++  {-# INLINE messageDecoder #-}
++  messageDecoder = loop Nothing Nothing Nothing Nothing Nothing Nothing Nothing 0 VU.empty Nothing Map.empty Nothing 0 []
++    where
++      loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_ = withTagM
++        (pure (Fields23 {fields23Count = acc_0, fields23Name = acc_1, fields23Payload = acc_2, fields23Enabled = acc_3, fields23Status = acc_4, fields23Magnitude = acc_5, fields23Fraction = acc_6, fields23ImplicitCount = acc_7, fields23Values = acc_8, fields23Inner = acc_9, fields23Attrs = acc_10, fields23Choice = acc_11, fields23AggregateImplicit = acc_12, fields23UnknownFields = reverse acc_unknown_}))
++        (\fn wt -> case fn of
++          1 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop (Just v) acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          2 -> do
++            v <- decodeFieldString
++            loop acc_0 (Just v) acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          3 -> do
++            v <- decodeFieldBytes
++            loop acc_0 acc_1 (Just v) acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          4 -> do
++            v <- decodeFieldBool
++            loop acc_0 acc_1 acc_2 (Just v) acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          5 -> do
++            v <- decodeFieldEnum
++            loop acc_0 acc_1 acc_2 acc_3 (Just v) acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          6 -> do
++            v <- decodeFieldDouble
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 (Just v) acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          7 -> do
++            v <- decodeFieldFloat
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 (Just v) acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          8 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 v acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          9 -> case wt of
++            2 -> do
++              vs <- (VU.map fromIntegral <$> decodePackedVarint)
++              loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 (acc_8 <> vs) acc_9 acc_10 acc_11 acc_12 acc_unknown_
++            _ -> do
++              v <- (fromIntegral <$> decodeFieldVarint)
++              loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 (acc_8 <> VU.singleton v) acc_9 acc_10 acc_11 acc_12 acc_unknown_
++          10 -> do
++            v <- decodeFieldMessage
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 (Just v) acc_10 acc_11 acc_12 acc_unknown_
++          11 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString decodeFieldString "" "") bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 (Map.union acc_10 (Map.singleton mk' mv')) acc_11 acc_12 acc_unknown_
++          12 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 (Just (Fields23'Choice'Picked v)) acc_12 acc_unknown_
++          13 -> do
++            v <- decodeFieldString
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 (Just (Fields23'Choice'Label v)) acc_12 acc_unknown_
++          14 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 v acc_unknown_
++          _ -> do
++            uf <- captureUnknownField fn (toEnum wt)
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_12 (uf : acc_unknown_))
++
++instance ProtoMessage Fields23 where
++  protoMessageName _ = "Fields23"
++  protoPackageName _ = ""
++  protoDefaultValue = defaultFields23
++  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
++  protoFieldDescriptors _ = Map.fromList
++    [ (1, SomeField FieldDescriptor
++        { fdName = "count"
++        , fdNumber = 1
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelOptional
++        , fdGet = fields23Count
++        , fdSet = \v m -> m { fields23Count = v }
++        }), (2, SomeField FieldDescriptor
++        { fdName = "name"
++        , fdNumber = 2
++        , fdTypeDesc = ScalarType StringField
++        , fdLabel = LabelOptional
++        , fdGet = fields23Name
++        , fdSet = \v m -> m { fields23Name = v }
++        })
++    , (3, SomeField FieldDescriptor
++        { fdName = "payload"
++        , fdNumber = 3
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelOptional
++        , fdGet = fields23Payload
++        , fdSet = \v m -> m { fields23Payload = v }
++        })
++    , (4, SomeField FieldDescriptor
++        { fdName = "enabled"
++        , fdNumber = 4
++        , fdTypeDesc = ScalarType BoolField
++        , fdLabel = LabelOptional
++        , fdGet = fields23Enabled
++        , fdSet = \v m -> m { fields23Enabled = v }
++        })
++    , (5, SomeField FieldDescriptor
++        { fdName = "status"
++        , fdNumber = 5
++        , fdTypeDesc = MessageType "Status23"
++        , fdLabel = LabelOptional
++        , fdGet = fields23Status
++        , fdSet = \v m -> m { fields23Status = v }
++        })
++    , (6, SomeField FieldDescriptor
++        { fdName = "magnitude"
++        , fdNumber = 6
++        , fdTypeDesc = ScalarType DoubleField
++        , fdLabel = LabelOptional
++        , fdGet = fields23Magnitude
++        , fdSet = \v m -> m { fields23Magnitude = v }
++        })
++    , (7, SomeField FieldDescriptor
++        { fdName = "fraction"
++        , fdNumber = 7
++        , fdTypeDesc = ScalarType FloatField
++        , fdLabel = LabelOptional
++        , fdGet = fields23Fraction
++        , fdSet = \v m -> m { fields23Fraction = v }
++        })
++    , (8, SomeField FieldDescriptor
++        { fdName = "implicit_count"
++        , fdNumber = 8
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelOptional
++        , fdGet = fields23ImplicitCount
++        , fdSet = \v m -> m { fields23ImplicitCount = v }
++        })
++    , (9, SomeField FieldDescriptor
++        { fdName = "values"
++        , fdNumber = 9
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelRepeated
++        , fdGet = fields23Values
++        , fdSet = \v m -> m { fields23Values = v }
++        })
++    , (10, SomeField FieldDescriptor
++        { fdName = "inner"
++        , fdNumber = 10
++        , fdTypeDesc = MessageType "Inner"
++        , fdLabel = LabelOptional
++        , fdGet = fields23Inner
++        , fdSet = \v m -> m { fields23Inner = v }
++        })
++    , (11, SomeField FieldDescriptor
++        { fdName = "attrs"
++        , fdNumber = 11
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = fields23Attrs
++        , fdSet = \v m -> m { fields23Attrs = v }
++        })
++    , (12, SomeField FieldDescriptor
++        { fdName = "choice"
++        , fdNumber = 12
++        , fdTypeDesc = MessageType "choice"
++        , fdLabel = LabelOptional
++        , fdGet = fields23Choice
++        , fdSet = \v m -> m { fields23Choice = v }
++        })
++    , (14, SomeField FieldDescriptor
++        { fdName = "aggregate_implicit"
++        , fdNumber = 14
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelOptional
++        , fdGet = fields23AggregateImplicit
++        , fdSet = \v m -> m { fields23AggregateImplicit = v }
++        })
++    ]
++
++instance IsMessage Fields23
++
++instance Aeson.ToJSON Fields23 where
++  toJSON msg = jsonObject
++      [ "count" .=: msg.fields23Count
++      , "name" .=: msg.fields23Name
++      , "payload" .=: (fmap protoBytesToJSON msg.fields23Payload)
++      , "enabled" .=: msg.fields23Enabled
++      , "status" .=: msg.fields23Status
++      , "magnitude" .=: msg.fields23Magnitude
++      , "fraction" .=: msg.fields23Fraction
++      , "implicitCount" .=: msg.fields23ImplicitCount
++      , "values" .=: msg.fields23Values
++      , "inner" .=: msg.fields23Inner
++      , "attrs" .=: msg.fields23Attrs
++      , "choice" .=: msg.fields23Choice
++      , "aggregateImplicit" .=: msg.fields23AggregateImplicit
++      ]
++
++instance Aeson.FromJSON Fields23 where
++  parseJSON = Aeson.withObject "Fields23" $ \obj -> do
++    fld_fields23Count <- parseFieldMaybe obj "count"
++    fld_fields23Name <- parseFieldMaybe obj "name"
++    fld_fields23Payload <- parseBytesFieldMaybe obj "payload"
++    fld_fields23Enabled <- parseFieldMaybe obj "enabled"
++    fld_fields23Status <- parseFieldMaybe obj "status"
++    fld_fields23Magnitude <- parseFieldMaybe obj "magnitude"
++    fld_fields23Fraction <- parseFieldMaybe obj "fraction"
++    fld_fields23ImplicitCount <- parseFieldMaybe obj "implicitCount"
++    fld_fields23Values <- parseFieldMaybe obj "values"
++    fld_fields23Inner <- parseFieldMaybe obj "inner"
++    fld_fields23Attrs <- parseFieldMaybe obj "attrs"
++    fld_fields23Choice <- parseFieldMaybe obj "choice"
++    fld_fields23AggregateImplicit <- parseFieldMaybe obj "aggregateImplicit"
++    pure defaultFields23
++      { fields23Count = maybe (fields23Count defaultFields23) id fld_fields23Count
++      , fields23Name = maybe (fields23Name defaultFields23) id fld_fields23Name
++      , fields23Payload = fld_fields23Payload
++      , fields23Enabled = maybe (fields23Enabled defaultFields23) id fld_fields23Enabled
++      , fields23Status = maybe (fields23Status defaultFields23) id fld_fields23Status
++      , fields23Magnitude = maybe (fields23Magnitude defaultFields23) id fld_fields23Magnitude
++      , fields23Fraction = maybe (fields23Fraction defaultFields23) id fld_fields23Fraction
++      , fields23ImplicitCount = maybe (fields23ImplicitCount defaultFields23) id fld_fields23ImplicitCount
++      , fields23Values = maybe (fields23Values defaultFields23) id fld_fields23Values
++      , fields23Inner = maybe (fields23Inner defaultFields23) id fld_fields23Inner
++      , fields23Attrs = maybe (fields23Attrs defaultFields23) id fld_fields23Attrs
++      , fields23Choice = maybe (fields23Choice defaultFields23) id fld_fields23Choice
++      , fields23AggregateImplicit = maybe (fields23AggregateImplicit defaultFields23) id fld_fields23AggregateImplicit
++      , fields23UnknownFields = []
++      }
++
++instance Hashable Fields23 where
++  hashWithSalt salt msg = hashWithSalt (hashWithSalt (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (hashWithSalt (VU.foldl' hashWithSalt (hashWithSalt (hashWithSalt (hashWithSalt (hashWithSalt (hashWithSalt (hashWithSalt (hashWithSalt (hashWithSalt (salt) msg.fields23Count) msg.fields23Name) msg.fields23Payload) msg.fields23Enabled) msg.fields23Status) msg.fields23Magnitude) msg.fields23Fraction) msg.fields23ImplicitCount) msg.fields23Values) msg.fields23Inner) msg.fields23Attrs) msg.fields23Choice) msg.fields23AggregateImplicit
++
++instance Proto.Extension.HasExtensions Fields23 where
++  messageUnknownFields = fields23UnknownFields
++  setMessageUnknownFields !ufs msg = msg { fields23UnknownFields = ufs }
++
++instance Semigroup Fields23 where
++  a <> b = Fields23
++    { fields23Count = case b.fields23Count of { Nothing -> a.fields23Count; x -> x }
++    , fields23Name = case b.fields23Name of { Nothing -> a.fields23Name; x -> x }
++    , fields23Payload = case b.fields23Payload of { Nothing -> a.fields23Payload; x -> x }
++    , fields23Enabled = case b.fields23Enabled of { Nothing -> a.fields23Enabled; x -> x }
++    , fields23Status = case b.fields23Status of { Nothing -> a.fields23Status; x -> x }
++    , fields23Magnitude = case b.fields23Magnitude of { Nothing -> a.fields23Magnitude; x -> x }
++    , fields23Fraction = case b.fields23Fraction of { Nothing -> a.fields23Fraction; x -> x }
++    , fields23ImplicitCount = if b.fields23ImplicitCount == 0 then a.fields23ImplicitCount else b.fields23ImplicitCount
++    , fields23Values = a.fields23Values <> b.fields23Values
++    , fields23Inner = case b.fields23Inner of { Nothing -> a.fields23Inner; x -> x }
++    , fields23Attrs = a.fields23Attrs <> b.fields23Attrs
++    , fields23Choice = case b.fields23Choice of { Nothing -> a.fields23Choice; x -> x }
++    , fields23AggregateImplicit = if b.fields23AggregateImplicit == 0 then a.fields23AggregateImplicit else b.fields23AggregateImplicit
++    , fields23UnknownFields = a.fields23UnknownFields <> b.fields23UnknownFields
++    }
++
++instance Monoid Fields23 where
++  mempty = defaultFields23
+\ No newline at end of file
+diff --git a/wireform-proto/test-regression/Generated/Edition2024.hs b/wireform-proto/test-regression/Generated/Edition2024.hs
+new file mode 100644
+index 00000000..f99e929e
+--- /dev/null
++++ b/wireform-proto/test-regression/Generated/Edition2024.hs
+@@ -0,0 +1,287 @@
++{-# LANGUAGE StrictData #-}
++{-# LANGUAGE DeriveGeneric #-}
++{-# LANGUAGE DeriveAnyClass #-}
++{-# LANGUAGE DerivingStrategies #-}
++{-# LANGUAGE OverloadedStrings #-}
++{-# LANGUAGE OverloadedRecordDot #-}
++{-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-top-binds #-}
++-- | Auto-generated protobuf types.
++--
++-- __THIS FILE IS AUTO-GENERATED BY wireform. DO NOT EDIT.__
++--
++-- Any manual changes will be overwritten the next time code
++-- generation is run.  To modify the types or instances, edit the
++-- @.proto@ source file and re-run the code generator.
++module Generated.Edition2024 where
++
++import Data.ByteString (ByteString)
++import qualified Data.ByteString as BS
++import qualified Wireform.Builder as B
++import Data.Int (Int32, Int64)
++import Data.Text (Text)
++import qualified Data.Text as T
++import Data.Word (Word32, Word64)
++import qualified Data.Map.Strict as Map
++import qualified Data.Vector as V
++import qualified Data.Vector.Unboxed as VU
++import GHC.Generics (Generic)
++import Control.DeepSeq (NFData(..))
++import Data.Hashable (Hashable(..))
++import Proto.Encode
++import Proto.Decode
++import qualified Data.Aeson as Aeson
++import qualified Data.Aeson.Types as Aeson
++import qualified Data.Aeson.Key as AesonKey
++import qualified Data.Aeson.KeyMap as AesonKM
++import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
++import Data.Proxy (Proxy(..))
++import Data.Reflection (Given(..), given)
++import Proto.Internal.JSON.Extension qualified as PJExt
++import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
++import Proto.Registry (IsMessage)
++import Proto.Registry qualified
++import qualified Proto.Extension
++import Proto.Internal.Wire (Tag(..), WireType(..))
++import Proto.Internal.Wire.Encode (putTag, putVarint, putFixed32, putFixed64,
++  putFloat, putDouble, putText, putByteString, putLengthDelimited,
++  putSVarint32, putSVarint64, putVarintSigned,
++  varintSize, tagSize, fieldMessageSize,
++  fieldVarintSize, fieldFixed32Size, fieldFixed64Size,
++  fieldBoolSize, fieldFloatSize, fieldDoubleSize,
++  fieldTextSize, fieldBytesSize,
++  fieldSVarint32Size, fieldSVarint64Size,
++  varintSize32, zigZag32, zigZag64)
++import Proto.Internal.Encode.Archetype (archVarint, archSVarint32, archSVarint64,
++  archFixed32, archFixed64, archFloat, archDouble, archBool,
++  archString, archBytes, archSubmessage,
++  archVarintSize, archStringSize, archBytesSize, archBoolSize,
++  archFixed32Size, archFixed64Size, archSubmessageSize)
++
++-- | Serialized FileDescriptorProto for this .proto file.
++-- Decode with @Proto.Google.Protobuf.Descriptor.decodeMessage@.
++fileDescriptorProtoBytes :: ByteString
++fileDescriptorProtoBytes = "\x0a\x11\x65\x64\x69\x74\x69\x6f\x6e\x32\x30\x32\x34\x2e\x70\x72\x6f\x74\x6f\x22\x7b\x0a\x08\x46\x69\x65\x6c\x64\x73\x32\x34\x12\x0d\x0a\x05\x63\x6f\x75\x6e\x74\x18\x01\x20\x01\x28\x05\x12\x16\x0a\x0e\x65\x78\x70\x6c\x69\x63\x69\x74\x5f\x63\x6f\x75\x6e\x74\x18\x02\x20\x01\x28\x05\x12\x14\x0a\x05\x69\x6e\x6e\x65\x72\x18\x03\x20\x01\x28\x0b\x32\x05\x49\x6e\x6e\x65\x72\x1a\x32\x0a\x05\x49\x6e\x6e\x65\x72\x12\x11\x0a\x09\x69\x6e\x68\x65\x72\x69\x74\x65\x64\x18\x01\x20\x01\x28\x05\x12\x16\x0a\x0e\x65\x78\x70\x6c\x69\x63\x69\x74\x5f\x76\x61\x6c\x75\x65\x18\x02\x20\x01\x28\x05\x62\x08\x65\x64\x69\x74\x69\x6f\x6e\x73\x72\x04\x32\x30\x32\x34"
++
++
++data Fields24 = Fields24
++  { fields24Count :: {-# UNPACK #-} !Int32
++  , fields24ExplicitCount :: !(Maybe Int32)
++  , fields24Inner :: !(Maybe Fields24'Inner)
++  , fields24UnknownFields :: ![UnknownField]
++  }
++  deriving stock (Show, Eq, Generic)
++  deriving anyclass NFData
++
++data Fields24'Inner = Fields24'Inner
++  { fields24InnerInherited :: {-# UNPACK #-} !Int32
++  , fields24InnerExplicitValue :: !(Maybe Int32)
++  , fields24InnerUnknownFields :: ![UnknownField]
++  }
++  deriving stock (Show, Eq, Generic)
++  deriving anyclass NFData
++
++defaultFields24'Inner :: Fields24'Inner
++defaultFields24'Inner = Fields24'Inner
++  { fields24InnerInherited = 0
++  , fields24InnerExplicitValue = Nothing
++  , fields24InnerUnknownFields = []
++  }
++
++instance MessageEncode Fields24'Inner where
++  buildMessage msg =
++    (if msg.fields24InnerInherited == 0 then mempty else archVarint 8 (fromIntegral msg.fields24InnerInherited))
++    <> (maybe mempty (\v -> archVarint 16 (fromIntegral v)) msg.fields24InnerExplicitValue)
++    <> encodeUnknownFields msg.fields24InnerUnknownFields
++
++instance MessageSize Fields24'Inner where
++  messageSize msg =
++    (if msg.fields24InnerInherited == 0 then 0 else archVarintSize (fromIntegral msg.fields24InnerInherited))
++    + (maybe 0 (\v -> archVarintSize (fromIntegral v)) msg.fields24InnerExplicitValue)
++    + unknownFieldsSize msg.fields24InnerUnknownFields
++
++instance MessageDecode Fields24'Inner where
++  {-# INLINE messageDecoder #-}
++  messageDecoder = loop 0 Nothing []
++    where
++      loop acc_0 acc_1 acc_unknown_ = withTagM
++        (pure (Fields24'Inner {fields24InnerInherited = acc_0, fields24InnerExplicitValue = acc_1, fields24InnerUnknownFields = reverse acc_unknown_}))
++        (\fn wt -> case fn of
++          1 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop v acc_1 acc_unknown_
++          2 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop acc_0 (Just v) acc_unknown_
++          _ -> do
++            uf <- captureUnknownField fn (toEnum wt)
++            loop acc_0 acc_1 (uf : acc_unknown_))
++
++instance ProtoMessage Fields24'Inner where
++  protoMessageName _ = "Fields24.Inner"
++  protoPackageName _ = ""
++  protoDefaultValue = defaultFields24'Inner
++  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
++  protoFieldDescriptors _ = Map.fromList
++    [ (1, SomeField FieldDescriptor
++        { fdName = "inherited"
++        , fdNumber = 1
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelOptional
++        , fdGet = fields24InnerInherited
++        , fdSet = \v m -> m { fields24InnerInherited = v }
++        }), (2, SomeField FieldDescriptor
++        { fdName = "explicit_value"
++        , fdNumber = 2
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelOptional
++        , fdGet = fields24InnerExplicitValue
++        , fdSet = \v m -> m { fields24InnerExplicitValue = v }
++        })
++    ]
++
++instance IsMessage Fields24'Inner
++
++instance Aeson.ToJSON Fields24'Inner where
++  toJSON msg = jsonObject
++      [ "inherited" .=: msg.fields24InnerInherited
++      , "explicitValue" .=: msg.fields24InnerExplicitValue
++      ]
++
++instance Aeson.FromJSON Fields24'Inner where
++  parseJSON = Aeson.withObject "Fields24'Inner" $ \obj -> do
++    fld_fields24InnerInherited <- parseFieldMaybe obj "inherited"
++    fld_fields24InnerExplicitValue <- parseFieldMaybe obj "explicitValue"
++    pure defaultFields24'Inner
++      { fields24InnerInherited = maybe (fields24InnerInherited defaultFields24'Inner) id fld_fields24InnerInherited
++      , fields24InnerExplicitValue = maybe (fields24InnerExplicitValue defaultFields24'Inner) id fld_fields24InnerExplicitValue
++      , fields24InnerUnknownFields = []
++      }
++
++instance Hashable Fields24'Inner where
++  hashWithSalt salt msg = hashWithSalt (hashWithSalt (salt) msg.fields24InnerInherited) msg.fields24InnerExplicitValue
++
++instance Proto.Extension.HasExtensions Fields24'Inner where
++  messageUnknownFields = fields24InnerUnknownFields
++  setMessageUnknownFields !ufs msg = msg { fields24InnerUnknownFields = ufs }
++
++instance Semigroup Fields24'Inner where
++  a <> b = Fields24'Inner
++    { fields24InnerInherited = if b.fields24InnerInherited == 0 then a.fields24InnerInherited else b.fields24InnerInherited
++    , fields24InnerExplicitValue = case b.fields24InnerExplicitValue of { Nothing -> a.fields24InnerExplicitValue; x -> x }
++    , fields24InnerUnknownFields = a.fields24InnerUnknownFields <> b.fields24InnerUnknownFields
++    }
++
++instance Monoid Fields24'Inner where
++  mempty = defaultFields24'Inner
++
++defaultFields24 :: Fields24
++defaultFields24 = Fields24
++  { fields24Count = 0
++  , fields24ExplicitCount = Nothing
++  , fields24Inner = Nothing
++  , fields24UnknownFields = []
++  }
++
++instance MessageEncode Fields24 where
++  buildMessage msg =
++    (if msg.fields24Count == 0 then mempty else archVarint 8 (fromIntegral msg.fields24Count))
++    <> (maybe mempty (\v -> archVarint 16 (fromIntegral v)) msg.fields24ExplicitCount)
++    <> (maybe mempty (\v -> let sz = messageSize v in archSubmessage 26 sz (buildMessage v)) msg.fields24Inner)
++    <> encodeUnknownFields msg.fields24UnknownFields
++
++instance MessageSize Fields24 where
++  messageSize msg =
++    (if msg.fields24Count == 0 then 0 else archVarintSize (fromIntegral msg.fields24Count))
++    + (maybe 0 (\v -> archVarintSize (fromIntegral v)) msg.fields24ExplicitCount)
++    + (maybe 0 (\v -> archSubmessageSize (messageSize v)) msg.fields24Inner)
++    + unknownFieldsSize msg.fields24UnknownFields
++
++instance MessageDecode Fields24 where
++  {-# INLINE messageDecoder #-}
++  messageDecoder = loop 0 Nothing Nothing []
++    where
++      loop acc_0 acc_1 acc_2 acc_unknown_ = withTagM
++        (pure (Fields24 {fields24Count = acc_0, fields24ExplicitCount = acc_1, fields24Inner = acc_2, fields24UnknownFields = reverse acc_unknown_}))
++        (\fn wt -> case fn of
++          1 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop v acc_1 acc_2 acc_unknown_
++          2 -> do
++            v <- (fromIntegral <$> decodeFieldVarint)
++            loop acc_0 (Just v) acc_2 acc_unknown_
++          3 -> do
++            v <- decodeFieldMessage
++            loop acc_0 acc_1 (Just v) acc_unknown_
++          _ -> do
++            uf <- captureUnknownField fn (toEnum wt)
++            loop acc_0 acc_1 acc_2 (uf : acc_unknown_))
++
++instance ProtoMessage Fields24 where
++  protoMessageName _ = "Fields24"
++  protoPackageName _ = ""
++  protoDefaultValue = defaultFields24
++  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
++  protoFieldDescriptors _ = Map.fromList
++    [ (1, SomeField FieldDescriptor
++        { fdName = "count"
++        , fdNumber = 1
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelOptional
++        , fdGet = fields24Count
++        , fdSet = \v m -> m { fields24Count = v }
++        }), (2, SomeField FieldDescriptor
++        { fdName = "explicit_count"
++        , fdNumber = 2
++        , fdTypeDesc = ScalarType Int32Field
++        , fdLabel = LabelOptional
++        , fdGet = fields24ExplicitCount
++        , fdSet = \v m -> m { fields24ExplicitCount = v }
++        })
++    , (3, SomeField FieldDescriptor
++        { fdName = "inner"
++        , fdNumber = 3
++        , fdTypeDesc = MessageType "Inner"
++        , fdLabel = LabelOptional
++        , fdGet = fields24Inner
++        , fdSet = \v m -> m { fields24Inner = v }
++        })
++    ]
++
++instance IsMessage Fields24
++
++instance Aeson.ToJSON Fields24 where
++  toJSON msg = jsonObject
++      [ "count" .=: msg.fields24Count
++      , "explicitCount" .=: msg.fields24ExplicitCount
++      , "inner" .=: msg.fields24Inner
++      ]
++
++instance Aeson.FromJSON Fields24 where
++  parseJSON = Aeson.withObject "Fields24" $ \obj -> do
++    fld_fields24Count <- parseFieldMaybe obj "count"
++    fld_fields24ExplicitCount <- parseFieldMaybe obj "explicitCount"
++    fld_fields24Inner <- parseFieldMaybe obj "inner"
++    pure defaultFields24
++      { fields24Count = maybe (fields24Count defaultFields24) id fld_fields24Count
++      , fields24ExplicitCount = maybe (fields24ExplicitCount defaultFields24) id fld_fields24ExplicitCount
++      , fields24Inner = maybe (fields24Inner defaultFields24) id fld_fields24Inner
++      , fields24UnknownFields = []
++      }
++
++instance Hashable Fields24 where
++  hashWithSalt salt msg = hashWithSalt (hashWithSalt (hashWithSalt (salt) msg.fields24Count) msg.fields24ExplicitCount) msg.fields24Inner
++
++instance Proto.Extension.HasExtensions Fields24 where
++  messageUnknownFields = fields24UnknownFields
++  setMessageUnknownFields !ufs msg = msg { fields24UnknownFields = ufs }
++
++instance Semigroup Fields24 where
++  a <> b = Fields24
++    { fields24Count = if b.fields24Count == 0 then a.fields24Count else b.fields24Count
++    , fields24ExplicitCount = case b.fields24ExplicitCount of { Nothing -> a.fields24ExplicitCount; x -> x }
++    , fields24Inner = case b.fields24Inner of { Nothing -> a.fields24Inner; x -> x }
++    , fields24UnknownFields = a.fields24UnknownFields <> b.fields24UnknownFields
++    }
++
++instance Monoid Fields24 where
++  mempty = defaultFields24
+\ No newline at end of file
+diff --git a/wireform-proto/test-regression/Generated/Integermaps.hs b/wireform-proto/test-regression/Generated/Integermaps.hs
+new file mode 100644
+index 00000000..efd8157c
+--- /dev/null
++++ b/wireform-proto/test-regression/Generated/Integermaps.hs
+@@ -0,0 +1,392 @@
++{-# LANGUAGE StrictData #-}
++{-# LANGUAGE DeriveGeneric #-}
++{-# LANGUAGE DeriveAnyClass #-}
++{-# LANGUAGE DerivingStrategies #-}
++{-# LANGUAGE OverloadedStrings #-}
++{-# LANGUAGE OverloadedRecordDot #-}
++{-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-top-binds #-}
++-- | Auto-generated protobuf types.
++--
++-- __THIS FILE IS AUTO-GENERATED BY wireform. DO NOT EDIT.__
++--
++-- Any manual changes will be overwritten the next time code
++-- generation is run.  To modify the types or instances, edit the
++-- @.proto@ source file and re-run the code generator.
++module Generated.Integermaps where
++
++import Data.ByteString (ByteString)
++import qualified Data.ByteString as BS
++import qualified Wireform.Builder as B
++import Data.Int (Int32, Int64)
++import Data.Text (Text)
++import qualified Data.Text as T
++import Data.Word (Word32, Word64)
++import qualified Data.Map.Strict as Map
++import qualified Data.Vector as V
++import qualified Data.Vector.Unboxed as VU
++import GHC.Generics (Generic)
++import Control.DeepSeq (NFData(..))
++import Data.Hashable (Hashable(..))
++import Proto.Encode
++import Proto.Decode
++import qualified Data.Aeson as Aeson
++import qualified Data.Aeson.Types as Aeson
++import qualified Data.Aeson.Key as AesonKey
++import qualified Data.Aeson.KeyMap as AesonKM
++import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
++import Data.Proxy (Proxy(..))
++import Data.Reflection (Given(..), given)
++import Proto.Internal.JSON.Extension qualified as PJExt
++import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
++import Proto.Registry (IsMessage)
++import Proto.Registry qualified
++import qualified Proto.Extension
++import Proto.Internal.Wire (Tag(..), WireType(..))
++import Proto.Internal.Wire.Encode (putTag, putVarint, putFixed32, putFixed64,
++  putFloat, putDouble, putText, putByteString, putLengthDelimited,
++  putSVarint32, putSVarint64, putVarintSigned,
++  varintSize, tagSize, fieldMessageSize,
++  fieldVarintSize, fieldFixed32Size, fieldFixed64Size,
++  fieldBoolSize, fieldFloatSize, fieldDoubleSize,
++  fieldTextSize, fieldBytesSize,
++  fieldSVarint32Size, fieldSVarint64Size,
++  varintSize32, zigZag32, zigZag64)
++import Proto.Internal.Encode.Archetype (archVarint, archSVarint32, archSVarint64,
++  archFixed32, archFixed64, archFloat, archDouble, archBool,
++  archString, archBytes, archSubmessage,
++  archVarintSize, archStringSize, archBytesSize, archBoolSize,
++  archFixed32Size, archFixed64Size, archSubmessageSize)
++
++-- | Serialized FileDescriptorProto for this .proto file.
++-- Decode with @Proto.Google.Protobuf.Descriptor.decodeMessage@.
++fileDescriptorProtoBytes :: ByteString
++fileDescriptorProtoBytes = "\x0a\x11\x69\x6e\x74\x65\x67\x65\x72\x4d\x61\x70\x73\x2e\x70\x72\x6f\x74\x6f\x22\x93\x04\x0a\x0b\x49\x6e\x74\x65\x67\x65\x72\x4d\x61\x70\x73\x12\x27\x0a\x0c\x69\x6e\x74\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x18\x01\x20\x03\x28\x0b\x32\x11\x69\x6e\x74\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x27\x0a\x0c\x69\x6e\x74\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x18\x02\x20\x03\x28\x0b\x32\x11\x69\x6e\x74\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x29\x0a\x0d\x75\x69\x6e\x74\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x18\x03\x20\x03\x28\x0b\x32\x12\x75\x69\x6e\x74\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x29\x0a\x0d\x75\x69\x6e\x74\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x18\x04\x20\x03\x28\x0b\x32\x12\x75\x69\x6e\x74\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x29\x0a\x0d\x73\x69\x6e\x74\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x18\x05\x20\x03\x28\x0b\x32\x12\x73\x69\x6e\x74\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x29\x0a\x0d\x73\x69\x6e\x74\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x18\x06\x20\x03\x28\x0b\x32\x12\x73\x69\x6e\x74\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x2d\x0a\x0f\x73\x66\x69\x78\x65\x64\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x18\x07\x20\x03\x28\x0b\x32\x14\x73\x66\x69\x78\x65\x64\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x2d\x0a\x0f\x73\x66\x69\x78\x65\x64\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x18\x08\x20\x03\x28\x0b\x32\x14\x73\x66\x69\x78\x65\x64\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x27\x0a\x0c\x69\x6e\x74\x65\x67\x65\x72\x5f\x6b\x65\x79\x73\x18\x09\x20\x03\x28\x0b\x32\x11\x69\x6e\x74\x65\x67\x65\x72\x5f\x6b\x65\x79\x73\x45\x6e\x74\x72\x79\x12\x2b\x0a\x0e\x66\x69\x78\x65\x64\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x18\x0a\x20\x03\x28\x0b\x32\x13\x66\x69\x78\x65\x64\x33\x32\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x2b\x0a\x0e\x66\x69\x78\x65\x64\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x18\x0b\x20\x03\x28\x0b\x32\x13\x66\x69\x78\x65\x64\x36\x34\x5f\x76\x61\x6c\x75\x65\x73\x45\x6e\x74\x72\x79\x12\x25\x0a\x0b\x7a\x69\x67\x7a\x61\x67\x5f\x6b\x65\x79\x73\x18\x0c\x20\x03\x28\x0b\x32\x10\x7a\x69\x67\x7a\x61\x67\x5f\x6b\x65\x79\x73\x45\x6e\x74\x72\x79\x62\x06\x70\x72\x6f\x74\x6f\x33"
++
++
++data IntegerMaps = IntegerMaps
++  { integerMapsInt32Values :: !(Map.Map Text Int32)
++  , integerMapsInt64Values :: !(Map.Map Text Int64)
++  , integerMapsUint32Values :: !(Map.Map Text Word32)
++  , integerMapsUint64Values :: !(Map.Map Text Word64)
++  , integerMapsSint32Values :: !(Map.Map Text Int32)
++  , integerMapsSint64Values :: !(Map.Map Text Int64)
++  , integerMapsSfixed32Values :: !(Map.Map Text Int32)
++  , integerMapsSfixed64Values :: !(Map.Map Text Int64)
++  , integerMapsIntegerKeys :: !(Map.Map Int32 Int32)
++  , integerMapsFixed32Values :: !(Map.Map Text Word32)
++  , integerMapsFixed64Values :: !(Map.Map Text Word64)
++  , integerMapsZigzagKeys :: !(Map.Map Int32 Text)
++  , integerMapsUnknownFields :: ![UnknownField]
++  }
++  deriving stock (Show, Eq, Generic)
++  deriving anyclass NFData
++
++defaultIntegerMaps :: IntegerMaps
++defaultIntegerMaps = IntegerMaps
++  { integerMapsInt32Values = Map.empty
++  , integerMapsInt64Values = Map.empty
++  , integerMapsUint32Values = Map.empty
++  , integerMapsUint64Values = Map.empty
++  , integerMapsSint32Values = Map.empty
++  , integerMapsSint64Values = Map.empty
++  , integerMapsSfixed32Values = Map.empty
++  , integerMapsSfixed64Values = Map.empty
++  , integerMapsIntegerKeys = Map.empty
++  , integerMapsFixed32Values = Map.empty
++  , integerMapsFixed64Values = Map.empty
++  , integerMapsZigzagKeys = Map.empty
++  , integerMapsUnknownFields = []
++  }
++
++instance MessageEncode IntegerMaps where
++  buildMessage msg =
++    Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 1 (encodeFieldString 1 k) ((encodeFieldVarint 2 . fromIntegral) v)) mempty msg.integerMapsInt32Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 2 (encodeFieldString 1 k) ((encodeFieldVarint 2 . fromIntegral) v)) mempty msg.integerMapsInt64Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 3 (encodeFieldString 1 k) ((encodeFieldVarint 2 . fromIntegral) v)) mempty msg.integerMapsUint32Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 4 (encodeFieldString 1 k) ((encodeFieldVarint 2 . fromIntegral) v)) mempty msg.integerMapsUint64Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 5 (encodeFieldString 1 k) (encodeFieldSVarint32 2 v)) mempty msg.integerMapsSint32Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 6 (encodeFieldString 1 k) (encodeFieldSVarint64 2 v)) mempty msg.integerMapsSint64Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 7 (encodeFieldString 1 k) ((encodeFieldFixed32 2 . fromIntegral) v)) mempty msg.integerMapsSfixed32Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 8 (encodeFieldString 1 k) ((encodeFieldFixed64 2 . fromIntegral) v)) mempty msg.integerMapsSfixed64Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 9 ((\x -> encodeFieldVarint 1 (fromIntegral x)) k) ((encodeFieldVarint 2 . fromIntegral) v)) mempty msg.integerMapsIntegerKeys
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 10 (encodeFieldString 1 k) (encodeFieldFixed32 2 v)) mempty msg.integerMapsFixed32Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 11 (encodeFieldString 1 k) (encodeFieldFixed64 2 v)) mempty msg.integerMapsFixed64Values
++    <> Map.foldlWithKey' (\acc k v -> acc <> encodeMapField 12 (encodeFieldSVarint32 1 k) (encodeFieldString 2 v)) mempty msg.integerMapsZigzagKeys
++    <> encodeUnknownFields msg.integerMapsUnknownFields
++
++instance MessageSize IntegerMaps where
++  messageSize msg =
++    (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldVarintSize 2 (fromIntegral v) in acc + tagSize 1 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsInt32Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldVarintSize 2 (fromIntegral v) in acc + tagSize 2 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsInt64Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldVarintSize 2 (fromIntegral v) in acc + tagSize 3 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsUint32Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldVarintSize 2 (fromIntegral v) in acc + tagSize 4 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsUint64Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldSVarint32Size 2 v in acc + tagSize 5 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsSint32Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldSVarint64Size 2 v in acc + tagSize 6 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsSint64Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldFixed32Size 2 in acc + tagSize 7 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsSfixed32Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldFixed64Size 2 in acc + tagSize 8 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsSfixed64Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldVarintSize 1 (fromIntegral k) + fieldVarintSize 2 (fromIntegral v) in acc + tagSize 9 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsIntegerKeys)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldFixed32Size 2 in acc + tagSize 10 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsFixed32Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldTextSize 1 k + fieldFixed64Size 2 in acc + tagSize 11 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsFixed64Values)
++    + (Map.foldlWithKey' (\acc k v -> let entrySz = fieldSVarint32Size 1 k + fieldTextSize 2 v in acc + tagSize 12 + varintSize (fromIntegral entrySz) + entrySz) 0 msg.integerMapsZigzagKeys)
++    + unknownFieldsSize msg.integerMapsUnknownFields
++
++instance MessageDecode IntegerMaps where
++  {-# INLINE messageDecoder #-}
++  messageDecoder = loop Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty []
++    where
++      loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_ = withTagM
++        (pure (IntegerMaps {integerMapsInt32Values = acc_0, integerMapsInt64Values = acc_1, integerMapsUint32Values = acc_2, integerMapsUint64Values = acc_3, integerMapsSint32Values = acc_4, integerMapsSint64Values = acc_5, integerMapsSfixed32Values = acc_6, integerMapsSfixed64Values = acc_7, integerMapsIntegerKeys = acc_8, integerMapsFixed32Values = acc_9, integerMapsFixed64Values = acc_10, integerMapsZigzagKeys = acc_11, integerMapsUnknownFields = reverse acc_unknown_}))
++        (\fn wt -> case fn of
++          1 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString (fromIntegral <$> decodeFieldVarint) "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop (Map.union acc_0 (Map.singleton mk' mv')) acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++          2 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString (fromIntegral <$> decodeFieldVarint) "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 (Map.union acc_1 (Map.singleton mk' mv')) acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++          3 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString (fromIntegral <$> decodeFieldVarint) "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 (Map.union acc_2 (Map.singleton mk' mv')) acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++          4 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString decodeFieldVarint "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 (Map.union acc_3 (Map.singleton mk' mv')) acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++          5 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString decodeFieldSVarint32 "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 (Map.union acc_4 (Map.singleton mk' mv')) acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++          6 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString decodeFieldSVarint64 "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 acc_4 (Map.union acc_5 (Map.singleton mk' mv')) acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++          7 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString (fromIntegral <$> decodeFieldFixed32) "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 (Map.union acc_6 (Map.singleton mk' mv')) acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++          8 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString (fromIntegral <$> decodeFieldFixed64) "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 (Map.union acc_7 (Map.singleton mk' mv')) acc_8 acc_9 acc_10 acc_11 acc_unknown_
++          9 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry (fromIntegral <$> decodeFieldVarint) (fromIntegral <$> decodeFieldVarint) 0 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 (Map.union acc_8 (Map.singleton mk' mv')) acc_9 acc_10 acc_11 acc_unknown_
++          10 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString decodeFieldFixed32 "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 (Map.union acc_9 (Map.singleton mk' mv')) acc_10 acc_11 acc_unknown_
++          11 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldString decodeFieldFixed64 "" 0) bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 (Map.union acc_10 (Map.singleton mk' mv')) acc_11 acc_unknown_
++          12 -> do
++            bs' <- getLengthDelimited
++            let decodeEntry = runDecoder (decodeMapEntry decodeFieldSVarint32 decodeFieldString 0 "") bs'
++            case decodeEntry of
++              Left _ -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 acc_unknown_
++              Right (mk', mv') -> loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 (Map.union acc_11 (Map.singleton mk' mv')) acc_unknown_
++          _ -> do
++            uf <- captureUnknownField fn (toEnum wt)
++            loop acc_0 acc_1 acc_2 acc_3 acc_4 acc_5 acc_6 acc_7 acc_8 acc_9 acc_10 acc_11 (uf : acc_unknown_))
++
++instance ProtoMessage IntegerMaps where
++  protoMessageName _ = "IntegerMaps"
++  protoPackageName _ = ""
++  protoDefaultValue = defaultIntegerMaps
++  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
++  protoFieldDescriptors _ = Map.fromList
++    [ (1, SomeField FieldDescriptor
++        { fdName = "int32_values"
++        , fdNumber = 1
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsInt32Values
++        , fdSet = \v m -> m { integerMapsInt32Values = v }
++        }), (2, SomeField FieldDescriptor
++        { fdName = "int64_values"
++        , fdNumber = 2
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsInt64Values
++        , fdSet = \v m -> m { integerMapsInt64Values = v }
++        })
++    , (3, SomeField FieldDescriptor
++        { fdName = "uint32_values"
++        , fdNumber = 3
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsUint32Values
++        , fdSet = \v m -> m { integerMapsUint32Values = v }
++        })
++    , (4, SomeField FieldDescriptor
++        { fdName = "uint64_values"
++        , fdNumber = 4
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsUint64Values
++        , fdSet = \v m -> m { integerMapsUint64Values = v }
++        })
++    , (5, SomeField FieldDescriptor
++        { fdName = "sint32_values"
++        , fdNumber = 5
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsSint32Values
++        , fdSet = \v m -> m { integerMapsSint32Values = v }
++        })
++    , (6, SomeField FieldDescriptor
++        { fdName = "sint64_values"
++        , fdNumber = 6
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsSint64Values
++        , fdSet = \v m -> m { integerMapsSint64Values = v }
++        })
++    , (7, SomeField FieldDescriptor
++        { fdName = "sfixed32_values"
++        , fdNumber = 7
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsSfixed32Values
++        , fdSet = \v m -> m { integerMapsSfixed32Values = v }
++        })
++    , (8, SomeField FieldDescriptor
++        { fdName = "sfixed64_values"
++        , fdNumber = 8
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsSfixed64Values
++        , fdSet = \v m -> m { integerMapsSfixed64Values = v }
++        })
++    , (9, SomeField FieldDescriptor
++        { fdName = "integer_keys"
++        , fdNumber = 9
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsIntegerKeys
++        , fdSet = \v m -> m { integerMapsIntegerKeys = v }
++        })
++    , (10, SomeField FieldDescriptor
++        { fdName = "fixed32_values"
++        , fdNumber = 10
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsFixed32Values
++        , fdSet = \v m -> m { integerMapsFixed32Values = v }
++        })
++    , (11, SomeField FieldDescriptor
++        { fdName = "fixed64_values"
++        , fdNumber = 11
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsFixed64Values
++        , fdSet = \v m -> m { integerMapsFixed64Values = v }
++        })
++    , (12, SomeField FieldDescriptor
++        { fdName = "zigzag_keys"
++        , fdNumber = 12
++        , fdTypeDesc = ScalarType BytesField
++        , fdLabel = LabelRepeated
++        , fdGet = integerMapsZigzagKeys
++        , fdSet = \v m -> m { integerMapsZigzagKeys = v }
++        })
++    ]
++
++instance IsMessage IntegerMaps
++
++instance Aeson.ToJSON IntegerMaps where
++  toJSON msg = jsonObject
++      [ "int32Values" .=: msg.integerMapsInt32Values
++      , "int64Values" .=: msg.integerMapsInt64Values
++      , "uint32Values" .=: msg.integerMapsUint32Values
++      , "uint64Values" .=: msg.integerMapsUint64Values
++      , "sint32Values" .=: msg.integerMapsSint32Values
++      , "sint64Values" .=: msg.integerMapsSint64Values
++      , "sfixed32Values" .=: msg.integerMapsSfixed32Values
++      , "sfixed64Values" .=: msg.integerMapsSfixed64Values
++      , "integerKeys" .=: msg.integerMapsIntegerKeys
++      , "fixed32Values" .=: msg.integerMapsFixed32Values
++      , "fixed64Values" .=: msg.integerMapsFixed64Values
++      , "zigzagKeys" .=: msg.integerMapsZigzagKeys
++      ]
++
++instance Aeson.FromJSON IntegerMaps where
++  parseJSON = Aeson.withObject "IntegerMaps" $ \obj -> do
++    fld_integerMapsInt32Values <- parseFieldMaybe obj "int32Values"
++    fld_integerMapsInt64Values <- parseFieldMaybe obj "int64Values"
++    fld_integerMapsUint32Values <- parseFieldMaybe obj "uint32Values"
++    fld_integerMapsUint64Values <- parseFieldMaybe obj "uint64Values"
++    fld_integerMapsSint32Values <- parseFieldMaybe obj "sint32Values"
++    fld_integerMapsSint64Values <- parseFieldMaybe obj "sint64Values"
++    fld_integerMapsSfixed32Values <- parseFieldMaybe obj "sfixed32Values"
++    fld_integerMapsSfixed64Values <- parseFieldMaybe obj "sfixed64Values"
++    fld_integerMapsIntegerKeys <- parseFieldMaybe obj "integerKeys"
++    fld_integerMapsFixed32Values <- parseFieldMaybe obj "fixed32Values"
++    fld_integerMapsFixed64Values <- parseFieldMaybe obj "fixed64Values"
++    fld_integerMapsZigzagKeys <- parseFieldMaybe obj "zigzagKeys"
++    pure defaultIntegerMaps
++      { integerMapsInt32Values = maybe (integerMapsInt32Values defaultIntegerMaps) id fld_integerMapsInt32Values
++      , integerMapsInt64Values = maybe (integerMapsInt64Values defaultIntegerMaps) id fld_integerMapsInt64Values
++      , integerMapsUint32Values = maybe (integerMapsUint32Values defaultIntegerMaps) id fld_integerMapsUint32Values
++      , integerMapsUint64Values = maybe (integerMapsUint64Values defaultIntegerMaps) id fld_integerMapsUint64Values
++      , integerMapsSint32Values = maybe (integerMapsSint32Values defaultIntegerMaps) id fld_integerMapsSint32Values
++      , integerMapsSint64Values = maybe (integerMapsSint64Values defaultIntegerMaps) id fld_integerMapsSint64Values
++      , integerMapsSfixed32Values = maybe (integerMapsSfixed32Values defaultIntegerMaps) id fld_integerMapsSfixed32Values
++      , integerMapsSfixed64Values = maybe (integerMapsSfixed64Values defaultIntegerMaps) id fld_integerMapsSfixed64Values
++      , integerMapsIntegerKeys = maybe (integerMapsIntegerKeys defaultIntegerMaps) id fld_integerMapsIntegerKeys
++      , integerMapsFixed32Values = maybe (integerMapsFixed32Values defaultIntegerMaps) id fld_integerMapsFixed32Values
++      , integerMapsFixed64Values = maybe (integerMapsFixed64Values defaultIntegerMaps) id fld_integerMapsFixed64Values
++      , integerMapsZigzagKeys = maybe (integerMapsZigzagKeys defaultIntegerMaps) id fld_integerMapsZigzagKeys
++      , integerMapsUnknownFields = []
++      }
++
++instance Hashable IntegerMaps where
++  hashWithSalt salt msg = Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (salt) msg.integerMapsInt32Values) msg.integerMapsInt64Values) msg.integerMapsUint32Values) msg.integerMapsUint64Values) msg.integerMapsSint32Values) msg.integerMapsSint64Values) msg.integerMapsSfixed32Values) msg.integerMapsSfixed64Values) msg.integerMapsIntegerKeys) msg.integerMapsFixed32Values) msg.integerMapsFixed64Values) msg.integerMapsZigzagKeys
++
++instance Proto.Extension.HasExtensions IntegerMaps where
++  messageUnknownFields = integerMapsUnknownFields
++  setMessageUnknownFields !ufs msg = msg { integerMapsUnknownFields = ufs }
++
++instance Semigroup IntegerMaps where
++  a <> b = IntegerMaps
++    { integerMapsInt32Values = a.integerMapsInt32Values <> b.integerMapsInt32Values
++    , integerMapsInt64Values = a.integerMapsInt64Values <> b.integerMapsInt64Values
++    , integerMapsUint32Values = a.integerMapsUint32Values <> b.integerMapsUint32Values
++    , integerMapsUint64Values = a.integerMapsUint64Values <> b.integerMapsUint64Values
++    , integerMapsSint32Values = a.integerMapsSint32Values <> b.integerMapsSint32Values
++    , integerMapsSint64Values = a.integerMapsSint64Values <> b.integerMapsSint64Values
++    , integerMapsSfixed32Values = a.integerMapsSfixed32Values <> b.integerMapsSfixed32Values
++    , integerMapsSfixed64Values = a.integerMapsSfixed64Values <> b.integerMapsSfixed64Values
++    , integerMapsIntegerKeys = a.integerMapsIntegerKeys <> b.integerMapsIntegerKeys
++    , integerMapsFixed32Values = a.integerMapsFixed32Values <> b.integerMapsFixed32Values
++    , integerMapsFixed64Values = a.integerMapsFixed64Values <> b.integerMapsFixed64Values
++    , integerMapsZigzagKeys = a.integerMapsZigzagKeys <> b.integerMapsZigzagKeys
++    , integerMapsUnknownFields = a.integerMapsUnknownFields <> b.integerMapsUnknownFields
++    }
++
++instance Monoid IntegerMaps where
++  mempty = defaultIntegerMaps
+\ No newline at end of file
+diff --git a/wireform-proto/test-regression/Main.hs b/wireform-proto/test-regression/Main.hs
+new file mode 100644
+index 00000000..4a56fe58
+--- /dev/null
++++ b/wireform-proto/test-regression/Main.hs
+@@ -0,0 +1,151 @@
++{-# LANGUAGE AllowAmbiguousTypes #-}
++{-# LANGUAGE ScopedTypeVariables #-}
++{-# LANGUAGE TypeApplications #-}
++
++module Main (main) where
++
++import Control.Exception (ErrorCall, evaluate)
++import Control.Monad (forM_)
++import Data.Aeson qualified as Aeson
++import Data.Aeson.Types qualified as Aeson
++import Data.ByteString qualified as BS
++import Data.Either (isLeft)
++import Data.Map.Strict qualified as Map
++import Data.Text qualified as T
++import Data.Text.IO qualified as TIO
++import Generated.Edition2023 qualified as G23
++import Generated.Edition2024 qualified as G24
++import Generated.Integermaps qualified as GM
++import Proto.CodeGen
++import Proto.Decode
++import Proto.Encode
++import Proto.IDL.Parser
++import Proto.IDL.Parser.Resolver (ResolvedProto (..))
++import Proto.Internal.JSON qualified as JSON
++import THFixtures qualified as TH
++import Test.Syd
++
++
++main :: IO ()
++main = sydTest $ do
++  describe "Editions field presence" $ do
++    it "standalone codegen preserves every explicitly present scalar default" $
++      forM_ scalarDefaults $
++        roundtrip @G23.Fields23
++    it "loadProto preserves every explicitly present scalar default" $
++      forM_ scalarDefaults $
++        roundtrip @TH.Fields23
++    it "absent and explicitly zero fields remain distinct in both generators" $ do
++      fmap G23.fields23Count (decodeMessage BS.empty) `shouldBe` Right Nothing
++      fmap G23.fields23Count (decodeMessage (BS.pack [8, 0])) `shouldBe` Right (Just 0)
++      fmap TH.fields23Count (decodeMessage BS.empty) `shouldBe` Right Nothing
++      fmap TH.fields23Count (decodeMessage (BS.pack [8, 0])) `shouldBe` Right (Just 0)
++    it "file and field overrides, aggregate options and nested messages agree" $ do
++      forM_ [BS.pack [16, 0], BS.pack [26, 2, 16, 0]] $ roundtrip @G24.Fields24
++      forM_ [BS.pack [16, 0], BS.pack [26, 2, 16, 0]] $ roundtrip @TH.Fields24
++      fmap G24.fields24Count (decodeMessage (BS.pack [8, 0])) `shouldBe` Right 0
++      fmap TH.fields24Count (decodeMessage (BS.pack [8, 0])) `shouldBe` Right 0
++      fmap encodeMessage (decodeMessage (BS.pack [8, 0]) :: Either DecodeError G24.Fields24) `shouldBe` Right BS.empty
++      fmap encodeMessage (decodeMessage (BS.pack [8, 0]) :: Either DecodeError TH.Fields24) `shouldBe` Right BS.empty
++      fmap encodeMessage (decodeMessage (BS.pack [64, 0, 112, 0]) :: Either DecodeError G23.Fields23) `shouldBe` Right BS.empty
++      fmap encodeMessage (decodeMessage (BS.pack [64, 0, 112, 0]) :: Either DecodeError TH.Fields23) `shouldBe` Right BS.empty
++    it "repeated, map, oneof and nested fields retain their wire shapes" $ do
++      forM_ collectionValues $ roundtrip @G23.Fields23
++      forM_ collectionValues $ roundtrip @TH.Fields23
++    it "merge preserves an explicitly present zero over a nonzero value" $ do
++      case (decodeMessage (BS.pack [8, 7]), decodeMessage (BS.pack [8, 0])) of
++        (Right a, Right b) -> encodeMessage (a <> b :: G23.Fields23) `shouldBe` BS.pack [8, 0]
++        _ -> expectationFailure "standalone fixture decode failed"
++      case (decodeMessage (BS.pack [8, 7]), decodeMessage (BS.pack [8, 0])) of
++        (Right a, Right b) -> encodeMessage (a <> b :: TH.Fields23) `shouldBe` BS.pack [8, 0]
++        _ -> expectationFailure "TH fixture decode failed"
++    it "does not silently accept unsupported LEGACY_REQUIRED presence" $ do
++      pf <-
++        either (fail . show) pure $
++          parseProtoFile
++            "unsupported.proto"
++            "edition = \"2023\"; message M { int32 x = 1 [features.field_presence = LEGACY_REQUIRED]; }"
++      evaluate (T.length (generateModuleText defaultGenerateOpts Map.empty "unsupported.proto" pf))
++        `shouldThrow` (\(_ :: ErrorCall) -> True)
++    it "committed standalone fixtures exactly match the generator" $
++      forM_ ["edition2023", "edition2024", "integerMaps"] $ \name -> do
++        let file = name <> ".proto"
++        source <- TIO.readFile ("test-regression/proto/" <> file)
++        pf <- either (fail . show) pure (parseProtoFile file source)
++        let opts = defaultGenerateOpts {genModulePrefix = "Generated"}
++            registry = buildTypeRegistry opts [(file, ResolvedProto pf file Map.empty)]
++        actual <- TIO.readFile ("test-regression/" <> T.unpack (T.replace "." "/" (moduleNameForProto opts file pf)) <> ".hs")
++        actual `shouldBe` generateModuleText opts registry file pf
++  describe "Standalone integer maps" $ do
++    it "integer value functions compile and agree with TH for limits and zero" $
++      forM_ integerMapValues $ \message -> do
++        let wire = encodeMessage message
++        decodeMessage wire `shouldBe` Right message
++        messageSize message `shouldBe` BS.length wire
++        encodeMessageSized message `shouldBe` wire
++        fmap encodeMessage (decodeMessage wire :: Either DecodeError TH.IntegerMaps) `shouldBe` Right wire
++    it "sint32 and sint64 map values use canonical ZigZag and exact sizes" $ do
++      let small = GM.defaultIntegerMaps {GM.integerMapsSint32Values = Map.singleton "a" (-1)}
++          large = GM.defaultIntegerMaps {GM.integerMapsSint64Values = Map.singleton "a" (-1)}
++      encodeMessage small `shouldBe` BS.pack [42, 5, 10, 1, 97, 16, 1]
++      encodeMessage large `shouldBe` BS.pack [50, 5, 10, 1, 97, 16, 1]
++      messageSize small `shouldBe` 7
++      messageSize large `shouldBe` 7
++  describe "ProtoJSON quoted numbers" $ do
++    it "generated Float and Double accept e/E and signed exponents" $
++      forM_ (["1e2", "1E+2", "10000e-2", "1.0e2"] :: [T.Text]) $ \number -> do
++        let json = Aeson.object ["value" Aeson..= number, "small" Aeson..= number]
++        fmap TH.jsonNumbersValue (Aeson.parseEither Aeson.parseJSON json) `shouldBe` Right 100
++        fmap TH.jsonNumbersSmall (Aeson.parseEither Aeson.parseJSON json) `shouldBe` Right 100
++    it "optional and oneof floating fields use the same number grammar" $ do
++      let json = "{\"optionalValue\":\"1e2\",\"selected\":\"1E2\"}"
++      case Aeson.eitherDecode json of
++        Left err -> expectationFailure err
++        Right result -> do
++          TH.jsonNumbersOptionalValue result `shouldBe` Just 100
++          case TH.jsonNumbersChoice result of
++            Just (TH.JsonNumbers'Choice'Selected value) -> value `shouldBe` 100
++            _ -> expectationFailure "quoted oneof number was dropped"
++    it "runtime float/double and int64 helpers accept quoted exponents" $ do
++      Aeson.parseEither JSON.protoDoubleFromJSON (Aeson.String "1e2") `shouldBe` Right 100
++      Aeson.parseEither JSON.protoFloatFromJSON (Aeson.String "1E2") `shouldBe` Right 100
++      Aeson.parseEither JSON.protoInt64FromJSON (Aeson.String "1e2") `shouldBe` Right 100
++      Aeson.parseEither JSON.protoWord64FromJSON (Aeson.String "1E2") `shouldBe` Right 100
++    it "rejects whitespace, trailing junk, noncanonical sentinels and overflow" $
++      forM_ ["", " 1", "1 ", "1e", "1e2x", "nan", "NAN", "+nan", "-nan", " NaN", "NaN ", "inf", "INF", "+Infinity", " Infinity", "Infinity ", "-inf", "-INF", " -Infinity", "-Infinity ", "1e1000"] $ \number -> do
++        isLeft (Aeson.parseEither JSON.protoDoubleFromJSON (Aeson.String number)) `shouldBe` True
++        isLeft (Aeson.parseEither JSON.protoFloatFromJSON (Aeson.String number)) `shouldBe` True
++        isLeft (Aeson.parseEither Aeson.parseJSON (Aeson.object ["value" Aeson..= number]) :: Either String TH.JsonNumbers) `shouldBe` True
++    it "retains canonical NaN/Infinity strings" $ do
++      fmap isNaN (Aeson.parseEither JSON.protoDoubleFromJSON (Aeson.String "NaN")) `shouldBe` Right True
++      fmap isInfinite (Aeson.parseEither JSON.protoDoubleFromJSON (Aeson.String "Infinity")) `shouldBe` Right True
++      Aeson.parseEither JSON.protoDoubleFromJSON (Aeson.String "-Infinity") `shouldBe` Right (negate (1 / 0))
++
++
++scalarDefaults :: [BS.ByteString]
++scalarDefaults = fmap BS.pack [[8, 0], [18, 0], [26, 0], [32, 0], [40, 0], [49, 0, 0, 0, 0, 0, 0, 0, 0], [61, 0, 0, 0, 0]]
++
++
++collectionValues :: [BS.ByteString]
++collectionValues = fmap BS.pack [[74, 2, 1, 2], [82, 2, 8, 0], [90, 6, 10, 1, 97, 18, 1, 98], [96, 0], [106, 0]]
++
++
++roundtrip :: forall a. (MessageDecode a, MessageEncode a) => BS.ByteString -> IO ()
++roundtrip wire = fmap (encodeMessage @a) (decodeMessage wire) `shouldBe` Right wire
++
++
++integerMapValues :: [GM.IntegerMaps]
++integerMapValues =
++  [ GM.defaultIntegerMaps {GM.integerMapsInt32Values = Map.fromList [("a", minBound), ("b", 0), ("c", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsInt64Values = Map.fromList [("a", minBound), ("b", 0), ("c", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsUint32Values = Map.fromList [("a", 0), ("b", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsUint64Values = Map.fromList [("a", 0), ("b", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsSint32Values = Map.fromList [("a", minBound), ("b", 0), ("c", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsSint64Values = Map.fromList [("a", minBound), ("b", 0), ("c", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsSfixed32Values = Map.fromList [("a", minBound), ("b", 0), ("c", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsSfixed64Values = Map.fromList [("a", minBound), ("b", 0), ("c", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsFixed32Values = Map.fromList [("a", 0), ("b", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsFixed64Values = Map.fromList [("a", 0), ("b", maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsIntegerKeys = Map.fromList [(minBound, minBound), (0, 0), (maxBound, maxBound)]}
++  , GM.defaultIntegerMaps {GM.integerMapsZigzagKeys = Map.fromList [(minBound, "min"), (0, "zero"), (maxBound, "max")]}
++  ]
+diff --git a/wireform-proto/test-regression/THFixtures.hs b/wireform-proto/test-regression/THFixtures.hs
+new file mode 100644
+index 00000000..4efbf680
+--- /dev/null
++++ b/wireform-proto/test-regression/THFixtures.hs
+@@ -0,0 +1,14 @@
++{-# LANGUAGE DataKinds #-}
++{-# LANGUAGE TemplateHaskell #-}
++
++module THFixtures where
++
++import Proto.TH (loadProto)
++
++
++$(loadProto "test-regression/proto/edition2023.proto")
++$(loadProto "test-regression/proto/edition2024.proto")
++$(loadProto "test-regression/proto/json_numbers.proto")
++
++
++$(loadProto "test-regression/proto/integerMaps.proto")
+diff --git a/wireform-proto/test-regression/proto/edition2023.proto b/wireform-proto/test-regression/proto/edition2023.proto
+new file mode 100644
+index 00000000..0fd6fa99
+--- /dev/null
++++ b/wireform-proto/test-regression/proto/edition2023.proto
+@@ -0,0 +1,18 @@
++edition = "2023";
++enum Status23 { STATUS23_UNSPECIFIED = 0; STATUS23_READY = 1; }
++message Fields23 {
++  int32 count = 1;
++  string name = 2;
++  bytes payload = 3;
++  bool enabled = 4;
++  Status23 status = 5;
++  double magnitude = 6;
++  float fraction = 7;
++  int32 implicit_count = 8 [features.field_presence = IMPLICIT];
++  repeated int32 values = 9;
++  message Inner { int32 count = 1; }
++  Inner inner = 10;
++  map<string, string> attrs = 11;
++  oneof choice { int32 picked = 12; string label = 13; }
++  int32 aggregate_implicit = 14 [features = {field_presence: IMPLICIT}];
++}
+diff --git a/wireform-proto/test-regression/proto/edition2024.proto b/wireform-proto/test-regression/proto/edition2024.proto
+new file mode 100644
+index 00000000..5c49cd72
+--- /dev/null
++++ b/wireform-proto/test-regression/proto/edition2024.proto
+@@ -0,0 +1,11 @@
++edition = "2024";
++option features.field_presence = IMPLICIT;
++message Fields24 {
++  int32 count = 1;
++  int32 explicit_count = 2 [features.field_presence = EXPLICIT];
++  message Inner {
++    int32 inherited = 1;
++    int32 explicit_value = 2 [features = {field_presence: EXPLICIT}];
++  }
++  Inner inner = 3;
++}
+diff --git a/wireform-proto/test-regression/proto/integerMaps.proto b/wireform-proto/test-regression/proto/integerMaps.proto
+new file mode 100644
+index 00000000..90b65036
+--- /dev/null
++++ b/wireform-proto/test-regression/proto/integerMaps.proto
+@@ -0,0 +1,15 @@
++syntax = "proto3";
++message IntegerMaps {
++  map<string, int32> int32_values = 1;
++  map<string, int64> int64_values = 2;
++  map<string, uint32> uint32_values = 3;
++  map<string, uint64> uint64_values = 4;
++  map<string, sint32> sint32_values = 5;
++  map<string, sint64> sint64_values = 6;
++  map<string, sfixed32> sfixed32_values = 7;
++  map<string, sfixed64> sfixed64_values = 8;
++  map<int32, int32> integer_keys = 9;
++  map<string, fixed32> fixed32_values = 10;
++  map<string, fixed64> fixed64_values = 11;
++  map<sint32, string> zigzag_keys = 12;
++}
+diff --git a/wireform-proto/test-regression/proto/json_numbers.proto b/wireform-proto/test-regression/proto/json_numbers.proto
+new file mode 100644
+index 00000000..70b727b3
+--- /dev/null
++++ b/wireform-proto/test-regression/proto/json_numbers.proto
+@@ -0,0 +1,7 @@
++syntax = "proto3";
++message JsonNumbers {
++ double value = 1;
++ float small = 2;
++ optional double optional_value = 3;
++ oneof choice { double selected = 4; string label = 5; }
++}
+diff --git a/wireform-proto/wireform-proto.cabal b/wireform-proto/wireform-proto.cabal
+index 1fcc11cd..38c605cf 100644
+--- a/wireform-proto/wireform-proto.cabal
++++ b/wireform-proto/wireform-proto.cabal
+@@ -1,6 +1,6 @@
+ cabal-version: 3.0
+ name: wireform-proto
+-version: 0.2.0.0
++version: 0.3.0.0
+ synopsis: Protocol Buffers (proto2/proto3) with IDL parser, code generation, JSON mapping
+ description:
+   A high-performance Protocol Buffers implementation for Haskell.
+@@ -41,6 +41,12 @@ tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
+ extra-doc-files:
+   CHANGELOG.md
+   README.md
++extra-source-files:
++  test/data/*.proto
++  test-conformance/protos/*.proto
++  test-conformance/failure_list_proto3.txt
++  test-regression/proto/*.proto
++  test-regression/Generate.hs
+ data-dir: data
+ data-files: proto/google/protobuf/*.proto
+ 
+@@ -159,6 +165,8 @@ library
+     Proto.Google.Protobuf.Wrappers.Util
+ 
+   other-modules:
++    Proto.Internal.FieldPresence
++    Proto.Internal.JSON.Number
+     -- Internal codegen sub-modules (used only by Proto.CodeGen)
+     Proto.CodeGen.Decode
+     Proto.CodeGen.Encode
+@@ -423,3 +431,28 @@ benchmark compare-bench
+     , proto-lens-runtime >= 0.7  && < 0.8
+     , lens-family        >= 2.1  && < 2.2
+   hs-source-dirs: bench/compare, bench/compare/gen
++
++-- Real generated-record regressions for Editions presence and ProtoJSON numbers.
++test-suite wireform-proto-regression-test
++  import: defaults
++  type: exitcode-stdio-1.0
++  hs-source-dirs: test-regression
++  main-is: Main.hs
++  other-modules:
++    THFixtures
++    Generated.Edition2023
++    Generated.Edition2024
++    Generated.Integermaps
++  build-depends:
++    base,
++    wireform-proto,
++    wireform-core,
++    aeson,
++    bytestring,
++    containers,
++    deepseq,
++    hashable,
++    reflection,
++    text,
++    vector,
++    sydtest

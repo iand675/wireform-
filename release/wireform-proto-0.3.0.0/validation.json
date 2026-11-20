@@ -1,0 +1,60 @@
+{
+  "package": "wireform-proto",
+  "version": "0.3.0.0",
+  "releaseStatus": "Published source and documentation on Hackage; public archive SHA256 and documentation page verified",
+  "base": "b3ae367c4cbc5fb24e2c309a20fc1a2259511814",
+  "archiveSha256": "56679448b2165684f2fc121e0e626238cd6f354df4152ab696373df7848f6e3e",
+  "archive": "/tmp/wireform-proto-release-2026-11-06/sdist/wireform-proto-0.3.0.0.tar.gz",
+  "publishedDependencies": {
+    "wireform-core": "0.2.0.1",
+    "wireform-derive": "0.2.0.0"
+  },
+  "changes": [
+    "Editions explicit presence defaults and file/field overrides resolved before both generators",
+    "Shared full-consumption quoted numeric/exponent grammar and finite overflow checking",
+    "Proto text copies split across bounded sink chunks; original integration tests reproduced old failure and pass with fix",
+    "Standalone integer-map encoder compositions applied as complete functions; sint32/sint64 map encoding and sizes use ZigZag; compiled/generated boundary fixtures compare with TH"
+  ],
+  "GHC9.10.3": {
+    "integration": 528,
+    "derive": 81,
+    "regressions": 15,
+    "passed": 624,
+    "failures": 0
+  },
+  "generatedFixtures": "source-generated and compared byte for byte in tests",
+  "cabalCheck": "passes with existing optimization-option warnings",
+  "coreInspection": "Specialized byte-array copy worker uses Int#/Addr#/State# and unboxed result; fitting branch is a direct copy, no pinned ByteString or heap allocation. Overflow recurs after requesting one byte to flush/advance sink.",
+  "limitations": [
+    "Current upstream protobuf conformance runner not available; no full upstream-suite claim",
+    "Existing Criterion compare-bench uses legacy hand-written Wireform record instances; measurements do not establish generated-record performance"
+  ],
+  "localCheckout": "Requested source changes applied; pre-existing core dependency-bound widening and README benchmark edit preserved. Published archive retains Core ==0.2.*.",
+  "GHC9.12.4": {
+    "integration": 528,
+    "derive": 81,
+    "regressions": 15,
+    "passed": 624,
+    "failures": 0
+  },
+  "GHC9.14.1": {
+    "integration": 528,
+    "derive": 81,
+    "regressions": 15,
+    "passed": 624,
+    "failures": 0
+  },
+  "archiveValidation": "Final extracted source archive: 528 integration, 81 derive and 15 regression tests passed. External upstream protobuf runner unavailable; its suite skipped.",
+  "sourceCommit": "6d3991c5fda9f473dbd11152532908ea8511eeeb",
+  "benchmark": {
+    "status": "22 legacy Criterion reports collected sequentially with allocation regressions",
+    "raw": "repo/dist-stats/bench-raw/proto.json",
+    "scope": "Buffer-copy runtime path unchanged by subsequent map generator-only changes; legacy harness does not establish generated-record throughput"
+  },
+  "archiveMatchesCommittedSource": true,
+  "documentation": "Final Haddock-for-Hackage archive generated successfully; existing unresolved-link warnings only.",
+  "publishedAtVerified": "2026-11-06T09:40:32.472919+00:00",
+  "publishedURL": "https://hackage.haskell.org/package/wireform-proto-0.3.0.0",
+  "documentationURL": "https://hackage.haskell.org/package/wireform-proto-0.3.0.0/docs/Proto.html",
+  "publicArchiveMatches": true
+}

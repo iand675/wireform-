@@ -14,41 +14,41 @@ self-contained parser, decodes the expected @cel.expr.Value@ results and
 variable bindings, evaluates each expression with this library, and reports
 pass / skip / fail counts per file.
 
-Tests that exercise features this library does not implement (protocol
-buffer message values, CEL extension libraries, the optional type checker,
-unknown tracking) are counted as /skipped/ rather than failed: skips happen
-either because the expected value cannot be represented (e.g. an
-@object_value@) or because evaluation reports an "unsupported" error.
+The runner lists files for unsupported extension libraries, checker tests,
+and unknown tracking separately. Within included files, cases that require
+unsupported features are counted as /skipped/. A checkout supplies protobuf
+schemas for constructing and decoding its message fixtures.
 -}
 module Main (main) where
 
 import CEL
+import CEL.Value (celFieldPresent, equalUnknownFields, selectCelField)
 import Control.Monad (forM, when)
+import Data.Bifunctor (first)
 import Data.ByteString qualified as BS
 import Data.Char (chr, digitToInt, isAlphaNum, isHexDigit)
-import Data.List (foldl', isSuffixOf, sortOn)
-import Data.Maybe (mapMaybe)
+import Data.List (intercalate, isSuffixOf, sortOn)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Data.Word (Word8)
+import FixtureProto
+import GHC.Float (double2Float, float2Double)
+import Proto.Encode (encodeMessage)
+import Proto.Google.Protobuf.Any qualified as Any
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure, exitSuccess)
-import System.FilePath ((</>))
+import System.FilePath (dropTrailingPathSeparator, takeDirectory, (</>))
+import Text.Read (readMaybe)
 
 
 ----------------------------------------------------------------------
 -- Textproto AST + parser
 ----------------------------------------------------------------------
-
-data PtVal = PStr [Word8] | PAtom String | PMsg Fields
-  deriving stock (Show)
-
-
-type Fields = [(String, PtVal)]
-
 
 data Tok
   = TLBrace
@@ -83,7 +83,7 @@ tokenize (c : cs)
 
 
 isAtomChar :: Char -> Bool
-isAtomChar c = isAlphaNum c || c `elem` ("_+-." :: String)
+isAtomChar c = isAlphaNum c || c `elem` ("_+-./" :: String)
 
 
 scanStr :: Char -> String -> ([Word8], String)
@@ -145,6 +145,7 @@ parseFields = go []
       (TRBrace : rest) -> (reverse acc, rest)
       (TRAngle : rest) -> (reverse acc, rest)
       (TAtom name : rest) -> field name rest acc
+      (TLBrack : TAtom name : TRBrack : rest) -> field name rest acc
       _ -> go acc (drop 1 toks) -- skip stray tokens defensively
     field name toks acc = case toks of
       (TColon : TLBrace : rest) -> sub name rest acc
@@ -187,8 +188,10 @@ parseFields = go []
     mergeStrs bs rest = (bs, rest)
 
 
-parseFile :: String -> Fields
-parseFile = fst . parseFields . tokenize
+parseFile :: String -> Either String Fields
+parseFile input = case parseFields (tokenize input) of
+  (fields, []) -> Right fields
+  _ -> Left "unexpected closing delimiter in textproto fixture"
 
 
 ----------------------------------------------------------------------
@@ -221,8 +224,8 @@ asMsg _ = Nothing
 ----------------------------------------------------------------------
 
 -- Decode a cel.expr.Value message. 'Left' is a skip reason.
-decodeValue :: Fields -> Either String Value
-decodeValue fs = case mapMaybe tryField fs of
+decodeValue :: Registry -> Fields -> Either String Value
+decodeValue registry fs = case mapMaybe tryField fs of
   (v : _) -> v
   [] -> Left "empty Value message"
   where
@@ -238,7 +241,7 @@ decodeValue fs = case mapMaybe tryField fs of
       "enum_value" -> Just (decEnum v)
       "list_value" -> Just (decList v)
       "map_value" -> Just (decMap v)
-      "object_value" -> Just (Left "object_value (protobuf message) unsupported")
+      "object_value" -> Just (decObject v)
       _ -> Nothing
 
     decAtom (PAtom a) f = Right (f a)
@@ -264,6 +267,68 @@ decodeValue fs = case mapMaybe tryField fs of
     decBytes (PStr bs) = Right (VBytes (BS.pack bs))
     decBytes _ = Left "expected bytes"
 
+    decObject (PMsg [(url, value)])
+      | Just name <- T.stripPrefix "type.googleapis.com/" (T.pack url) = objectValue name value
+    decObject _ = Left "object_value (protobuf message) unsupported"
+
+    objectValue "google.protobuf.Duration" (PMsg fields) =
+      VDuration <$> (Duration <$> number "seconds" fields <*> number "nanos" fields)
+    objectValue "google.protobuf.Timestamp" (PMsg fields) =
+      VTimestamp <$> (Timestamp <$> number "seconds" fields <*> number "nanos" fields)
+    objectValue "google.protobuf.Value" value = decJsonValue value
+    objectValue "google.protobuf.ListValue" value = decJsonList value
+    objectValue "google.protobuf.Struct" value = decJsonStruct value
+    objectValue "google.protobuf.Empty" (PMsg []) =
+      Right (VMessage (CelMessage "google.protobuf.Empty" mempty))
+    objectValue "google.protobuf.Any" value@(PMsg fields)
+      | Just (PStr url) <- field1 "type_url" fields
+      , Just (PStr payload) <- field1 "value" fields = do
+          typeUrl <- first show (TE.decodeUtf8' (BS.pack url))
+          first (T.unpack . errMsg) (resolveAny registry typeUrl (BS.pack payload))
+      | otherwise = decObject value
+    objectValue name (PMsg fields)
+      | Just (kind, def) <- wrapperValueKind name = case fields of
+          [] -> Right def
+          [("value", value)] -> do
+            decoded <- decodeValue registry [(kind, value)]
+            Right $ case decoded of
+              VDouble n | name == "google.protobuf.FloatValue" -> VDouble (float2Double (double2Float n))
+              _ -> decoded
+          _ -> Left "invalid wrapper field"
+      | otherwise = decodeMessageFields registry objectValue name fields
+    objectValue _ _ = Left "invalid protobuf object"
+
+    decJsonValue (PMsg []) = Right VNull
+    decJsonValue (PMsg [(kind, value)]) = case kind of
+      "null_value" -> Right VNull
+      "number_value" -> decDouble value
+      "string_value" -> decStr value VString
+      "bool_value" -> decAtom value (\a -> VBool (a == "true"))
+      "list_value" -> decJsonList value
+      "struct_value" -> decJsonStruct value
+      _ -> Left "unsupported google.protobuf.Value kind"
+    decJsonValue _ = Left "invalid google.protobuf.Value"
+
+    decJsonList (PMsg fields) = VList . V.fromList <$> traverse decJsonValue (fieldAll "values" fields)
+    decJsonList _ = Left "invalid google.protobuf.ListValue"
+
+    decJsonStruct (PMsg fields) = do
+      entries <- traverse decJsonEntry (fieldAll "fields" fields)
+      buildMap entries
+    decJsonStruct _ = Left "invalid google.protobuf.Struct"
+
+    decJsonEntry (PMsg fields) = do
+      key <- maybe (Right (VString "")) (\v -> decStr v VString) (field1 "key" fields)
+      value <- maybe (Right VNull) decJsonValue (field1 "value" fields)
+      Right (key, value)
+    decJsonEntry _ = Left "invalid google.protobuf.Struct map entry"
+
+    number :: (Num a, Read a) => String -> Fields -> Either String a
+    number name fields = case field1 name fields of
+      Nothing -> Right 0
+      Just (PAtom atom) | Just n <- readMaybe atom -> Right n
+      _ -> Left ("invalid object field " <> name)
+
     decType v = case asText v of
       Just t -> Right (VType (typeFromName t))
       Nothing -> Left "expected type name"
@@ -276,27 +341,39 @@ decodeValue fs = case mapMaybe tryField fs of
 
     decList (PMsg sub) =
       let items = fieldAll "values" sub
-      in case mapM (\pv -> asMsg pv >>= Just . decodeValue) items of
+      in case mapM (\pv -> asMsg pv >>= Just . decodeValue registry) items of
            Just rs -> VList . V.fromList <$> sequence rs
            Nothing -> Left "bad list element"
     decList _ = Left "expected list message"
 
     decMap (PMsg sub) =
       let entries = fieldAll "entries" sub
-      in do
-           kvs <- mapM decEntry entries
-           case celMap kvs of
-             Left e -> Left (T.unpack e)
-             Right m -> Right (VMap m)
+      in traverse decEntry entries >>= buildMap
     decMap _ = Left "expected map message"
+
+    buildMap = either (Left . T.unpack) (Right . VMap) . celMap
 
     decEntry (PMsg e) = do
       kF <- maybe (Left "entry without key") Right (field1 "key" e >>= asMsg)
       vF <- maybe (Left "entry without value") Right (field1 "value" e >>= asMsg)
-      k <- decodeValue kF
-      val <- decodeValue vF
+      k <- decodeValue registry kF
+      val <- decodeValue registry vF
       Right (k, val)
     decEntry _ = Left "bad map entry"
+
+
+wrapperValueKind :: Text -> Maybe (String, Value)
+wrapperValueKind = \case
+  "google.protobuf.BoolValue" -> Just ("bool_value", VBool False)
+  "google.protobuf.BytesValue" -> Just ("bytes_value", VBytes BS.empty)
+  "google.protobuf.StringValue" -> Just ("string_value", VString "")
+  "google.protobuf.Int32Value" -> Just ("int64_value", VInt 0)
+  "google.protobuf.Int64Value" -> Just ("int64_value", VInt 0)
+  "google.protobuf.UInt32Value" -> Just ("uint64_value", VUInt 0)
+  "google.protobuf.UInt64Value" -> Just ("uint64_value", VUInt 0)
+  "google.protobuf.FloatValue" -> Just ("double_value", VDouble 0)
+  "google.protobuf.DoubleValue" -> Just ("double_value", VDouble 0)
+  _ -> Nothing
 
 
 typeFromName :: Text -> CelType
@@ -317,14 +394,14 @@ typeFromName t = case t of
 
 
 -- A binding's value is an ExprValue { value | error | unknown }.
-decodeBinding :: Fields -> Either String (Text, Value)
-decodeBinding fs = do
+decodeBinding :: Registry -> Fields -> Either String (Text, Value)
+decodeBinding registry fs = do
   keyV <- maybe (Left "binding without key") Right (field1 "key" fs)
   key <- maybe (Left "binding key not text") Right (asText keyV)
   exprValue <- maybe (Left "binding without value") Right (field1 "value" fs >>= asMsg)
   case field1 "value" exprValue >>= asMsg of
     Just valueMsg -> do
-      v <- decodeValue valueMsg
+      v <- decodeValue registry valueMsg
       Right (key, v)
     Nothing -> Left "binding is not a plain value (error/unknown)"
 
@@ -336,38 +413,56 @@ decodeBinding fs = do
 data Outcome = Pass | Skip String | Fail String
 
 
-runTest :: Fields -> Outcome
-runTest t =
-  case field1 "expr" t >>= asText of
+runTest :: Registry -> Env -> Fields -> Outcome
+runTest registry baseEnv t
+  | Just (PAtom "true") <- field1 "check_only" t = Skip "checker-only test"
+  | any (isJust . flip field1 t) ["typed_result", "any_eval_errors", "unknown", "any_unknowns"] =
+      Skip "unsupported result matcher"
+  | otherwise = case field1 "expr" t >>= asText of
     Nothing -> Skip "no expr"
     Just expr ->
       let container = maybe "" id (field1 "container" t >>= asText)
-          bindingResults = map decodeBinding (mapMaybe asMsg (fieldAll "bindings" t))
+          bindingResults = map (decodeBinding registry) (mapMaybe asMsg (fieldAll "bindings" t))
       in case sequence bindingResults of
            Left reason -> Skip reason
            Right binds ->
-             let env = withContainer container (bindAll binds emptyEnv)
+             let env = withContainer container (bindAll binds baseEnv)
                  result = run env expr
                  hasError = not (null (fieldAll "eval_error" t))
              in case (field1 "value" t, hasError) of
                   (Just valMsg, _) -> case asMsg valMsg of
                     Nothing -> Skip "value not a message"
-                    Just vm -> case decodeValue vm of
+                    Just vm -> case decodeValue registry vm of
                       Left reason -> Skip ("expected value: " <> reason)
-                      Right expected -> case result of
-                        Right got
-                          | structEq got expected -> Pass
-                          | otherwise -> Fail ("want " <> show expected <> ", got " <> show got <> "  [" <> T.unpack expr <> "]")
-                        Left e
-                          | errKind e == ErrUnsupported -> Skip ("unsupported: " <> T.unpack (errMsg e))
-                          | otherwise -> Fail ("want " <> show expected <> ", got error " <> show e <> "  [" <> T.unpack expr <> "]")
-                  (Nothing, True) -> case result of
-                    Left _ -> Pass
-                    Right got -> Fail ("want error, got " <> show got <> "  [" <> T.unpack expr <> "]")
-                  (Nothing, False) -> Skip "no expected value or error"
+                      Right expected -> expectedValueOutcome expr expected result
+                  (Nothing, True) -> expectedErrorOutcome expr result
+                  (Nothing, False) -> expectedValueOutcome expr (VBool True) result
+
+
+expectedValueOutcome :: Text -> Value -> Either CelError Value -> Outcome
+expectedValueOutcome expr expected = \case
+  Right got
+    | structEq got expected -> Pass
+    | otherwise -> Fail (description <> show got <> expression)
+  Left e
+    | errKind e == ErrUnsupported -> Skip ("unsupported: " <> T.unpack (errMsg e))
+    | otherwise -> Fail (description <> "error " <> show e <> expression)
+  where
+    description = "want " <> show expected <> ", got "
+    expression = "  [" <> T.unpack expr <> "]"
+
+
+expectedErrorOutcome :: Text -> Either CelError Value -> Outcome
+expectedErrorOutcome expr = \case
+  Left e
+    | errKind e == ErrUnsupported -> Skip ("unsupported: " <> T.unpack (errMsg e))
+    | otherwise -> Pass
+  Right got -> Fail ("want error, got " <> show got <> "  [" <> T.unpack expr <> "]")
 
 
 structEq :: Value -> Value -> Bool
+structEq a@VAny {} b = either (const False) (\value -> structEq value b) (unpackValue a)
+structEq a b@VAny {} = either (const False) (structEq a) (unpackValue b)
 structEq a b = case (a, b) of
   (VNull, VNull) -> True
   (VBool x, VBool y) -> x == y
@@ -386,6 +481,14 @@ structEq a b = case (a, b) of
         ey = celMapEntries y
     in length ex == length ey
          && all (\(k, v) -> maybe False (structEq v) (celMapLookup k y)) ex
+  (VMessage left@(CelMessage name x), VMessage right@(CelMessage other y)) ->
+    let present field = if celFieldPresent field then Just (selectCelField field) else Nothing
+        sameSelection (Right expected) (Right actual) = structEq expected actual
+        sameSelection _ _ = False
+        px = Map.mapMaybe present x
+        py = Map.mapMaybe present y
+    in name == other && equalUnknownFields (celMessageUnknownFields left) (celMessageUnknownFields right)
+         && Map.size px == Map.size py && Map.isSubmapOfBy sameSelection px py
   _ -> False
 
 
@@ -409,13 +512,14 @@ excludedFiles =
   , "block_ext.textproto"
   , "encoders_ext.textproto"
   , "math_ext.textproto"
+  , "lists_ext.textproto"
   , "network_ext.textproto"
+  , "sets_ext.textproto"
   , "string_ext.textproto"
   , "proto2_ext.textproto"
   , "optionals.textproto"
   , "type_deduction.textproto"
   , "unknowns.textproto"
-  , "enums.textproto" -- requires protobuf enum declarations
   ]
 
 
@@ -425,6 +529,8 @@ excludedFiles =
 
 main :: IO ()
 main = do
+  verifyUnsupportedErrorIsSkipped
+  verifyImplicitMatcher
   mDir <- lookupEnv "CEL_SPEC_DIR"
   case mDir of
     Nothing -> do
@@ -433,19 +539,30 @@ main = do
       exitSuccess
     Just dir -> do
       testdata <- resolveTestdata dir
+      let root = takeDirectory (takeDirectory (takeDirectory (dropTrailingPathSeparator testdata)))
+      loaded <- loadRegistry root
+      registry <- case loaded of
+        Just value -> do
+          verifyAnyWireValues value
+          verifyClosedEnumWireValues value
+          verifyRequiredWireValues value
+          pure value
+        Nothing -> do
+          putStrLn "Protobuf fixture schemas unavailable. Set CEL_SPEC_DIR to a full cel-spec checkout."
+          pure emptyRegistry
+      let baseEnv = fixtureEnv registry
       entries <- listDirectory testdata
-      let files =
-            sortOn
-              id
-              [ f
-              | f <- entries
-              , ".textproto" `isSuffixOf` f
-              , f `notElem` excludedFiles
-              ]
+      let fixtures = sortOn id (filter (".textproto" `isSuffixOf`) entries)
+          isExcluded f = f `elem` excludedFiles || (f == "enums.textproto" && not (isJust loaded))
+          excluded = filter isExcluded fixtures
+          files = filter (not . isExcluded) fixtures
+      when (not (null excluded)) $
+        putStrLn ("Excluded fixture files: " <> intercalate ", " excluded)
       perFile <- forM files $ \f -> do
         contents <- readFile (testdata </> f)
-        let tests = collectTests (parseFile contents)
-            outcomes = map runTest tests
+        fields <- either (fail . ((f <> ": ") <>)) pure (parseFile contents)
+        let tests = collectTests fields
+            outcomes = map (runTest registry baseEnv) tests
             p = length [() | Pass <- outcomes]
             skips = [r | Skip r <- outcomes]
             fs = [r | Fail r <- outcomes]
@@ -473,6 +590,103 @@ main = do
       putStrLn $
         "TOTAL  pass=" <> show totP <> "  skip=" <> show (length allSkips) <> "  fail=" <> show totF
       if totF == 0 then exitSuccess else exitFailure
+
+
+-- An unsupported message constructor cannot verify the expected range error.
+verifyUnsupportedErrorIsSkipped :: IO ()
+verifyUnsupportedErrorIsSkipped =
+  case expectedErrorOutcome "duration fixture" (Left (CelError ErrUnsupported "constructor unavailable")) of
+    Skip _ -> pure ()
+    _ -> fail "unsupported expected-error case must be reported as skipped"
+
+
+verifyImplicitMatcher :: IO ()
+verifyImplicitMatcher = do
+  positive <- fixture "expr: 'true'"
+  negative <- fixture "expr: 'false'"
+  checker <- fixture "expr: 'false' check_only: true"
+  unknown <- fixture "expr: 'true' unknown {}"
+  case (positive, negative, checker, unknown) of
+    (Pass, Fail _, Skip _, Skip _) -> pure ()
+    _ -> fail "only an absent result matcher must imply boolean true"
+  where
+    fixture = either fail (pure . runTest emptyRegistry emptyEnv) . parseFile
+
+
+verifyAnyWireValues :: Registry -> IO ()
+verifyAnyWireValues registry = do
+  let url = "type.googleapis.com/cel.expr.conformance.proto3.TestAllTypes"
+      wire = "\xb8\x3e\x81\x00"
+      pack name payload =
+        let bytes = encodeMessage (Any.defaultAny {Any.anyTypeUrl = "type.googleapis.com/" <> name, Any.anyValue = payload})
+        in BS.pack [0xa2, 0x06, fromIntegral (BS.length bytes)] <> bytes
+      comparePayloads name x y expected = do
+        left <- either (fail . show) pure (resolveAny registry url (pack name x))
+        right <- either (fail . show) pure (resolveAny registry url (pack name y))
+        let env = bindAll [("left", left), ("right", right)] (fixtureEnv registry)
+        check env ("left " <> expected <> " right && left.single_any == right.single_any")
+      check env source = case run env source of
+        Right (VBool True) -> pure ()
+        result -> fail (T.unpack source <> " returned " <> show result)
+  case resolveAny registry url wire of
+    Right (VMessage value) | celMessageUnknownFields value == wire -> pure ()
+    _ -> fail "unpacking an Any must preserve unknown wire bytes"
+  comparePayloads "google.protobuf.Int32Value" "\x08\x01" ("\x08\x01" <> wire) "!="
+  comparePayloads "google.protobuf.Int32Value" "" "\x08\x00" "=="
+  comparePayloads "google.protobuf.ListValue" "\x0a\x00" "\x0a\x02\x08\x00" "!="
+  let env = withContainer "cel.expr.conformance.proto3" (fixtureEnv registry)
+  packedList <- either (fail . show) pure $
+    resolveAny registry url (pack "google.protobuf.ListValue" "\x0a\x09\x11\x00\x00\x00\x00\x00\x00\xf0\x3f")
+  check (bind "packedList" packedList env) "packedList == TestAllTypes{single_any: [1]}"
+  check env "type(TestAllTypes{single_any: [1]}.single_any[0]) == double"
+  check env "TestAllTypes{single_any: {'data': b'foo', 'at': timestamp(1)}}.single_any == {'data': 'Zm9v', 'at': '1970-01-01T00:00:01Z'}"
+
+
+verifyClosedEnumWireValues :: Registry -> IO ()
+verifyClosedEnumWireValues registry = do
+  let check syntax input unknown expression = do
+        let url = "type.googleapis.com/cel.expr.conformance." <> syntax <> ".TestAllTypes"
+        result <- either (fail . show) pure (resolveAny registry url input)
+        case result of
+          VMessage message | celMessageUnknownFields message == unknown -> pure ()
+          _ -> fail ("unexpected unknown fields for " <> show result)
+        case run (bind "m" result emptyEnv) expression of
+          Right (VBool True) -> pure ()
+          actual -> fail (T.unpack expression <> " returned " <> show actual)
+      -- Field 24 is a closed enum in proto2 and an open enum in proto3.
+      singular = "\xc0\x01\x63"
+      oneof = "\xb0\x01\x63"
+      packed = "\xa2\x03\x04\x00\x63\x01\x62"
+      expanded = "\xa0\x03\x02"
+      repeatedUnknown = "\xa0\x03\x63\xa0\x03\x62"
+      validEntry = "\xc2\x04\x04\x08\x01\x10\x01"
+      invalidEntry = "\xc2\x04\x04\x08\x01\x10\x63"
+      knownLast = "\xc2\x04\x06\x08\x01\x10\x63\x10\x02"
+      unknownLast = "\xc2\x04\x06\x08\x01\x10\x01\x10\x63"
+  check "proto2" singular singular "!has(m.standalone_enum) && m.standalone_enum == 0"
+  check "proto3" singular "" "has(m.standalone_enum) && m.standalone_enum == 99"
+  check "proto2" ("\xaa\x01\x00" <> oneof) oneof
+    "has(m.single_nested_message) && !has(m.single_nested_enum) && m.single_nested_enum == 1"
+  check "proto2" (packed <> expanded) repeatedUnknown "m.repeated_nested_enum == [0, 1, 2]"
+  check "proto2" (validEntry <> invalidEntry <> knownLast <> unknownLast) (invalidEntry <> unknownLast)
+    "m.map_bool_enum == {true: 2}"
+  -- NullValue is declared in proto3, even in the proto2 fixture.
+  check "proto2" "\x98\x07\x63" "" "has(m.null_value) && m.null_value == null"
+
+
+verifyRequiredWireValues :: Registry -> IO ()
+verifyRequiredWireValues registry = do
+  let url = "type.googleapis.com/cel.expr.conformance.proto2.TestRequired"
+      env = withContainer "cel.expr.conformance.proto2" (fixtureEnv registry)
+      rejected bytes = case resolveAny registry url bytes of
+        Left err | errKind err == ErrConversion -> pure ()
+        result -> fail ("expected missing required protobuf field, got " <> show result)
+  rejected ""
+  rejected "\x0a\x00"
+  present <- either (fail . show) pure (resolveAny registry url "\x08\x00")
+  case run (bind "m" present env) "has(m.required_int32) && m.required_int32 == 0 && !has(TestRequired{}.required_int32)" of
+    Right (VBool True) -> pure ()
+    result -> fail ("unexpected required field presence: " <> show result)
 
 
 -- Group a skip reason into a coarse category (everything up to the first ':').

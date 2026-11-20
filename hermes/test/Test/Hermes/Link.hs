@@ -13,10 +13,13 @@ module Test.Hermes.Link (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
 import qualified Network.HTTP.Headers.Link as L
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -117,6 +120,78 @@ unit_quote_escape = it "renderer escapes DQUOTE in a quoted value and round-trip
     other -> error (show other)
 
 
+unit_wire_references :: Spec
+unit_wire_references = it "validates URI references and combines field lines with empty list elements" $ do
+  let fields =
+        headerMapFromList
+          [ ("Link", " , <../chapter,2?lang=de#examples>; rel=next,")
+          , ("Link", "\t, ,")
+          , ("Link", "<https://[2001:db8::1]/caf%C3%A9>; rel=alternate, <>; rel=self")
+          ]
+  case lookupHeader @L.Link fields of
+    Right (Just value@(L.Link links)) -> do
+      map L.linkTarget links `shouldBe` ["../chapter,2?lang=de#examples", "https://[2001:db8::1]/caf%C3%A9", ""]
+      headerMapToList (setHeader value (headerMapFromList []))
+        `shouldBe` [("link", "<../chapter,2?lang=de#examples>; rel=next, <https://[2001:db8::1]/caf%C3%A9>; rel=alternate, <>; rel=self")]
+    other -> expectationFailure (show other)
+  mapM_
+    (\bad -> lookupHeader @L.Link (headerMapFromList [("Link", "</ok>; rel=next"), ("Link", bad)]) `shouldSatisfy` isLeft)
+    ["</bad escape>", "</bad%2>", "<http://[2001:db8::gg]/>", "<http://example.test:wrong/>", "</x#part#other>", "</x>; rel="]
+
+
+unit_opaque_quotes :: Spec
+unit_opaque_quotes = it "round-trips the permitted quoted-pair octets through the typed renderer" $ do
+  let field = "</next>; title=\""
+      allowed byte = byte == 9 || (byte >= 32 && byte <= 126) || byte >= 128
+      testByte byte =
+        let octet = BS.singleton byte
+            wire = field <> "\\" <> octet <> "\""
+        in if allowed byte
+             then case parseOk wire of
+               Right value -> do
+                 let escape = if byte == 34 || byte == 92 then "\\" else ""
+                 render value `shouldBe` (field <> escape <> octet <> "\"")
+               other -> expectationFailure (show other)
+             else parseOk wire `shouldSatisfy` isLeft
+  mapM_ testByte [minBound .. maxBound]
+
+
+unit_authored_quotes :: Spec
+unit_authored_quotes = it "writes Latin-1, authored Unicode, and escapes into a composed builder" $ do
+  let prefix = BS.replicate 2048 97
+      body = ST.pack (replicate 2048 'a' <> "\xe9\x100\x1f642\t\NUL\DEL\"\\")
+      entry = L.LinkValue "/x" [L.LinkParam "title" (Just (L.LinkParamQuoted body)), L.LinkParam "flag" Nothing]
+      field = "</x>; title=\"" <> prefix <> BS.pack [0xe9, 0xc4, 0x80, 0xf0, 0x9f, 0x99, 0x82, 9, 63, 63, 92, 34, 92, 92] <> "\"; flag"
+  M.toStrictByteString ("before " <> L.renderLinkValue entry <> " after") `shouldBe` ("before " <> field <> " after")
+  headerMapToList (setHeader (L.Link [entry]) (headerMapFromList [])) `shouldBe` [("link", field)]
+  render (L.Link []) `shouldBe` ""
+
+
+unit_parameter_semantics :: Spec
+unit_parameter_semantics = it "projects the first relation and anchor and decodes an extended title" $ do
+  let wire = "</next>; REL=\"next  https://relations.example/Feature#part\"; rel=prev; Anchor=\"../catalog#start\"; anchor=\"/ignored\"; title=fallback; TITLE*=UTF-8'en'%E2%82%AC"
+  case parseOk wire of
+    Right (L.Link [value]) -> do
+      L.linkRelations value `shouldBe` Right (L.RegisteredRelation "next" :| [L.ExtensionRelation "https://relations.example/Feature#part"])
+      L.linkAnchor value `shouldBe` Right (Just "../catalog#start")
+      L.linkTitle value `shouldBe` Just "€"
+      L.lookupLinkParam "rEL" value `shouldBe` Just (L.LinkParam "REL" (Just (L.LinkParamQuoted "next  https://relations.example/Feature#part")))
+    other -> expectationFailure (show other)
+  L.ExtensionRelation "https://relations.example/Feature" `shouldBe` L.ExtensionRelation "HTTPS://RELATIONS.EXAMPLE/feature"
+
+
+unit_invalid_parameters :: Spec
+unit_invalid_parameters = it "reports invalid relation and anchor values and falls back to the plain title" $ do
+  let wire = "</x>; rel=\"next\tprev\"; rel=next; anchor=\"/bad%ZZ\"; title*=UTF-8''%FF; title=fallback"
+  case parseOk wire of
+    Right (L.Link [value]) -> do
+      L.linkRelations value `shouldSatisfy` isLeft
+      L.linkAnchor value `shouldSatisfy` isLeft
+      L.linkTitle value `shouldBe` Just "fallback"
+    other -> expectationFailure (show other)
+  L.linkRelations (L.LinkValue "/x" []) `shouldSatisfy` isLeft
+
+
 -- ---------------------------------------------------------------------------
 -- Generators
 -- ---------------------------------------------------------------------------
@@ -129,23 +204,21 @@ tokenText :: Gen ST.ShortText
 tokenText = ST.pack <$> Gen.list (Range.linear 1 10) tokenChar
 
 
--- URI-Reference chars that round-trip: URL-safe, never @<@\/@>@ or whitespace.
-targetChar :: Gen Char
-targetChar =
-  Gen.frequency
-    [ (40, Gen.alphaNum)
-    , (10, Gen.element ("/.-_~:?=&%#@" :: String))
+targetText :: Gen ST.ShortText
+targetText = do
+  segment <- tokenText
+  Gen.element
+    [ ""
+    , segment
+    , "/" <> segment <> "%20item"
+    , "../" <> segment <> "?a=2#top"
+    , "//example.test/" <> segment
+    , "https://[2001:db8::1]/" <> segment
     ]
 
 
-targetText :: Gen ST.ShortText
-targetText = ST.pack <$> Gen.list (Range.linear 1 20) targetChar
-
-
--- Printable ASCII minus DQUOTE\/backslash, so the renderer's escape
--- logic isn't part of the round-trip equality (covered by a unit test).
 quotedChar :: Gen Char
-quotedChar = Gen.element [c | c <- [' ' .. '~'], c /= '"', c /= '\\']
+quotedChar = Gen.element (['\t'] <> [' ' .. '~'] <> ['\x80' .. '\xff'])
 
 
 quotedText :: Gen ST.ShortText
@@ -196,5 +269,10 @@ tests =
       , unit_render
       , unit_render_multi
       , unit_quote_escape
+      , unit_wire_references
+      , unit_opaque_quotes
+      , unit_authored_quotes
+      , unit_parameter_semantics
+      , unit_invalid_parameters
       , it "render/parse round-trips" prop_roundtrip
       ]

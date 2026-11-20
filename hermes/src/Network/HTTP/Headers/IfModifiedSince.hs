@@ -14,10 +14,9 @@ module Network.HTTP.Headers.IfModifiedSince (
   ifModifiedSinceParser,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import Data.Time.Clock (UTCTime)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
 import Network.HTTP.Headers.HeaderFieldName (hIfModifiedSince)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -33,13 +32,7 @@ instance KnownHeader IfModifiedSince where
   type Direction IfModifiedSince = 'Request
 
 
-  parseFromHeaders _ headers = do
-    let header = NE.head headers
-    case runParser ifModifiedSinceParser header of
-      OK ims "" -> Right ims
-      OK _ rest -> Left $ "Unconsumed input after parsing If-Modified-Since header: " <> show rest
-      Fail -> Left "Failed to parse If-Modified-Since header"
-      Err e -> Left e
+  parseFromHeaders settings = parseSingleFieldLine "If-Modified-Since" (IfModifiedSince <$> dateParserWith settings)
 
 
   renderToHeaders _ = M.toStrictByteString . renderIfModifiedSince

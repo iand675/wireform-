@@ -17,7 +17,7 @@ The two values are case-insensitive on the wire but, by convention, lower-case;
 we model them as a closed enumeration and render the canonical lower-case form.
 
 Spec: <https://docs.oasis-open.org/odata/repeatable-requests/v1.0/repeatable-requests-v1.0.html>
-(OASIS OData Repeatable Requests Version 1.0, §4.2).
+(OASIS OData Repeatable Requests Version 1.0, §3.2.1).
 
 See also: "Network.HTTP.Headers.RepeatabilityRequestID", "Network.HTTP.Headers.RepeatabilityClientID",
 "Network.HTTP.Headers.RepeatabilityFirstSent", "Network.HTTP.Headers.PreferenceApplied".
@@ -28,7 +28,7 @@ module Network.HTTP.Headers.RepeatabilityResult (
   renderRepeatabilityResult,
 ) where
 
-import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hRepeatabilityResult)
 import qualified Network.HTTP.Headers.Mason as M
@@ -50,11 +50,9 @@ instance KnownHeader RepeatabilityResult where
   type Direction RepeatabilityResult = 'Response
 
 
-  parseFromHeaders _ headers = case runParser repeatabilityResultParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Repeatability-Result header: " <> show rest
-    Fail -> Left "Failed to parse Repeatability-Result header"
-    Err e -> Left e
+  parseFromHeaders _ ("accepted" :| []) = Right Accepted
+  parseFromHeaders _ ("rejected" :| []) = Right Rejected
+  parseFromHeaders _ fields = parseSingleFieldLine "Repeatability-Result" repeatabilityResultParser fields
 
 
   renderToHeaders _ = M.toStrictByteString . renderRepeatabilityResult
@@ -65,12 +63,12 @@ instance KnownHeader RepeatabilityResult where
 
 repeatabilityResultParser :: ParserT st String RepeatabilityResult
 repeatabilityResultParser =
-  $( switch
-      [|
-        case _ of
-          "accepted" -> pure Accepted
-          "rejected" -> pure Rejected
-        |]
+  $( switchAsciiCI
+       [|
+         case _ of
+           "accepted" -> pure Accepted
+           "rejected" -> pure Rejected
+         |]
    )
 
 

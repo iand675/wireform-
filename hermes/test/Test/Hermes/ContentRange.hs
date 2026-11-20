@@ -4,10 +4,12 @@ module Test.Hermes.ContentRange (tests) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
 import qualified Network.HTTP.Headers.ContentRange as CR
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -71,17 +73,54 @@ unit_render_unsatisfied =
     in render v `shouldBe` "bytes */4096"
 
 
+unit_typed_lookup :: Spec
+unit_typed_lookup = it "retains the received unit and renders the full Word64 range" $ do
+  let readRange wire = lookupHeader @CR.ContentRange (headerMapFromList [("Content-Range", wire)])
+      value = CR.ContentRange "Bytes" (CR.RangeRespSatisfied 42 (maxBound - 1) (Just maxBound))
+  readRange " \tBytes 0042-18446744073709551614/18446744073709551615 \t"
+    `shouldBe` Right (Just value)
+  headerMapToList (setHeader value (headerMapFromList []))
+    `shouldBe` [("content-range", "Bytes 42-18446744073709551614/18446744073709551615")]
+  readRange "bytes 18446744073709551615-18446744073709551615/*"
+    `shouldBe` Right (Just (CR.ContentRange "bytes" (CR.RangeRespSatisfied maxBound maxBound Nothing)))
+  readRange "rows */0"
+    `shouldBe` Right (Just (CR.ContentRange "rows" (CR.RangeRespUnsatisfied (Just 0))))
+  lookupHeader @CR.ContentRange (headerMapFromList [("Content-Range", "bytes 0-1/3"), ("Content-Range", "bytes 2-3/4")])
+    `shouldSatisfy` isLeft
+
+
+unit_invalid :: Spec
+unit_invalid = it "rejects reversed bounds, inconsistent lengths, overflow and invalid delimiters" $ do
+  let readRange wire = lookupHeader @CR.ContentRange (headerMapFromList [("Content-Range", wire)])
+  mapM_
+    (\wire -> readRange wire `shouldSatisfy` isLeft)
+    [ "bytes 9-8/*"
+    , "bytes 0-9/9"
+    , "bytes 0-9/8"
+    , "bytes 0-0/0"
+    , "bytes */*"
+    , "bytes  0-0/1"
+    , "bytes\t0-0/1"
+    , "bytes 0-0/1x"
+    , "bytes 18446744073709551616-18446744073709551615/*"
+    , "bytes 0-18446744073709551616/*"
+    , "bytes 0-9/18446744073709551616"
+    , "bytes */18446744073709551616"
+    ]
+
+
 -- Property: satisfied form round-trips for arbitrary positions.
 respGen :: Gen CR.RangeResp
 respGen =
   Gen.choice
     [ do
-        a <- Gen.word64 (Range.linear 0 1_000_000)
-        b <- Gen.word64 (Range.linear a (a + 1_000_000))
-        t <- Gen.maybe (Gen.word64 (Range.linear (b + 1) 2_000_000))
+        a <- Gen.word64 (Range.linear 0 maxBound)
+        b <- Gen.word64 (Range.linear a maxBound)
+        t <- if b == maxBound then pure Nothing else Gen.maybe (Gen.word64 (Range.linear (b + 1) maxBound))
         pure (CR.RangeRespSatisfied a b t)
     , CR.RangeRespUnsatisfied
-        <$> Gen.maybe (Gen.word64 (Range.linear 0 1_000_000))
+        . Just
+        <$> Gen.word64 (Range.linear 0 maxBound)
     ]
 
 
@@ -104,5 +143,7 @@ tests =
       , unit_unsatisfied
       , unit_render_satisfied
       , unit_render_unsatisfied
+      , unit_typed_lookup
+      , unit_invalid
       , it "round-trip" prop_roundtrip
       ]

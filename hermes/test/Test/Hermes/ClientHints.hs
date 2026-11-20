@@ -3,13 +3,16 @@
 module Test.Hermes.ClientHints (tests) where
 
 import Data.ByteString (ByteString)
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
 import qualified Network.HTTP.Headers.AcceptCH as ACH
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util (ParserT, RFC8941Token (..), Result (..), runParser)
+import Network.HTTP.Headers.Parsing.Util (ItemValue (..), ParserT, RFC8941String (..), RFC8941Token (..), Result (..), StructuredFieldItem (..), StructuredFieldMember (..), StructuredFieldParameter (..), runParser)
 import qualified Network.HTTP.Headers.SecGPC as GPC
 import qualified Network.HTTP.Headers.SecPurpose as SP
 import Test.Syd
@@ -101,6 +104,44 @@ prop_secPurpose_roundtrip = property $ do
     Left err -> error (err <> " on " <> show (renderSP v))
 
 
+unit_typed_accept_ch :: Spec
+unit_typed_accept_ch = it "retains the ordered hints and an explicit empty client-hint opt-in" $ do
+  let empty = headerMapFromList []
+      singleton value = headerMapFromList [("Accept-CH", value)]
+      repeated = headerMapFromList [("Accept-CH", "\t Sec-CH-UA;sample=1\t"), ("accept-ch", "DPR;new=%\"caf%c3%a9\", Width ")]
+      hints = ACH.AcceptCH [tok "Sec-CH-UA", tok "DPR", tok "Width"]
+  lookupHeader @ACH.AcceptCH repeated `shouldBe` Right (Just hints)
+  lookupHeader @ACH.AcceptCH empty `shouldBe` Right Nothing
+  lookupHeader @ACH.AcceptCH (singleton "\t ") `shouldBe` Right (Just (ACH.AcceptCH []))
+  lookupRawHeader "Accept-CH" (setHeader (ACH.AcceptCH []) empty) `shouldBe` Just ("" :| [])
+  lookupRawHeader "Accept-CH" (setHeader hints empty) `shouldBe` Just ("Sec-CH-UA, DPR, Width" :| [])
+  mapM_
+    (\wire -> lookupHeader @ACH.AcceptCH (singleton wire) `shouldSatisfy` isLeft)
+    ["DPR,, Width", "DPR,", "DPR/Width", "DPR:Width", "1Width", "\"DPR\"", "(DPR)", "DPR;\tflag", "DPR;bad="]
+  lookupHeader @ACH.AcceptCH (headerMapFromList [("Accept-CH", "DPR"), ("Accept-CH", "")]) `shouldSatisfy` isLeft
+
+
+unit_typed_sec_purpose :: Spec
+unit_typed_sec_purpose = it "retains purpose Items, normalized parameters, and extension members" $ do
+  let empty = headerMapFromList []
+      params = [StructuredFieldParameter "prerender" (Boolean False), StructuredFieldParameter "anonymous-client-ip" (Integer 2)]
+      otherParams = [StructuredFieldParameter "label" (String (RFC8941String "a,b"))]
+      members =
+        [ StructuredItem (StructuredFieldItem (Token (tok "prefetch")) params)
+        , StructuredInnerList [StructuredFieldItem (Token (tok "future")) [], StructuredFieldItem (Integer 3) []] otherParams
+        , StructuredItem (StructuredFieldItem (Token (tok "prefetch")) [StructuredFieldParameter "prerender" (Boolean True)])
+        ]
+      wire = "prefetch;prerender=?0;anonymous-client-ip=2, (future 3);label=\"a,b\", prefetch;prerender"
+      fields = headerMapFromList [("Sec-Purpose", "\t prefetch;prerender;anonymous-client-ip=2;prerender=?0"), ("Sec-Purpose", "(future 3);label=\"a,b\", prefetch;prerender=?1\t")]
+      expected = SP.SecPurposeList members
+  lookupHeader @SP.SecPurpose fields `shouldBe` Right (Just expected)
+  SP.secPurposePrefetches expected `shouldBe` [SP.PrefetchPurpose False True, SP.PrefetchPurpose True False]
+  lookupRawHeader "Sec-Purpose" (setHeader expected empty) `shouldBe` Just (wire :| [])
+  mapM_
+    (\bad -> lookupHeader @SP.SecPurpose (headerMapFromList [("Sec-Purpose", bad)]) `shouldSatisfy` isLeft)
+    ["prefetch;", "prefetch;\tprerender", "prefetch,, future", "prefetch,", "prefetch;x=\"bad\\q\""]
+
+
 -- Sec-GPC -----------------------------------------------------------------
 
 unit_secGPC_parse :: Spec
@@ -114,6 +155,25 @@ unit_secGPC_render :: Spec
 unit_secGPC_render =
   it "renders the GPC signal" $
     renderGPC GPC.SecGPC `shouldBe` "1"
+
+
+unit_secGPC_field_lines :: Spec
+unit_secGPC_field_lines = it "uses any exact asserted Sec-GPC field line" $ do
+  let field values = headerMapFromList (map (\wire -> ("Sec-GPC", wire)) values)
+      check values = do
+        let headers = field values
+        GPC.hasSecGPC headers `shouldBe` True
+        lookupHeader @GPC.SecGPC headers `shouldBe` Right (Just GPC.SecGPC)
+  mapM_ check [["1"], ["\t 1 \t"], ["0", "1"], ["bad", "1", "1"], ["1", "0"]]
+  mapM_
+    ( \values -> do
+        let headers = field values
+        GPC.hasSecGPC headers `shouldBe` False
+        lookupHeader @GPC.SecGPC headers `shouldSatisfy` isLeft
+    )
+    [[""], ["1, 1"], ["0, 1"], ["0", "01"], ["1\r"], ["\"1\""], ["1;flag"]]
+  GPC.hasSecGPC (field []) `shouldBe` False
+  lookupRawHeader "Sec-GPC" (setHeader GPC.SecGPC (field ["0", "0"])) `shouldBe` Just ("1" :| [])
 
 
 prop_secGPC_roundtrip :: Property
@@ -131,10 +191,13 @@ tests =
       [ unit_acceptCH_parse
       , unit_acceptCH_render
       , it "Accept-CH round-trips" prop_acceptCH_roundtrip
+      , unit_typed_accept_ch
       , unit_secPurpose_parse
       , unit_secPurpose_render
       , it "Sec-Purpose round-trips" prop_secPurpose_roundtrip
+      , unit_typed_sec_purpose
       , unit_secGPC_parse
       , unit_secGPC_render
+      , unit_secGPC_field_lines
       , it "Sec-GPC round-trips" prop_secGPC_roundtrip
       ]

@@ -19,12 +19,14 @@ module CBOR.Decode (
   decodeSequence,
 ) where
 
+import CBOR.Internal (halfToFloat)
 import CBOR.Value qualified as C
 import Control.Monad.ST (ST, runST)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BSU
+import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Vector.Mutable qualified as MV
 import Data.Word (Word16, Word32, Word64, Word8)
@@ -63,7 +65,7 @@ rdByte !bs !off = BSU.unsafeIndex bs off
 
 ensureBytes :: ByteString -> Int -> Int -> Either String ()
 ensureBytes !bs !off !n
-  | off + n > BS.length bs = Left "CBOR.Decode: unexpected end of input"
+  | n > BS.length bs - off = Left "CBOR.Decode: unexpected end of input"
   | otherwise = Right ()
 {-# INLINE ensureBytes #-}
 
@@ -111,6 +113,18 @@ readArg !bs !off !info
   | otherwise = Left $ "CBOR.Decode: reserved additional info: " ++ show info
 
 
+-- Check the unsigned count before narrowing it to Int. An array item
+-- needs at least one byte and a map entry needs at least two.
+readCount :: Int -> ByteString -> Int -> Word8 -> Either String (Int, Int)
+readCount !bytesPerItem !bs !off !info = do
+  (count, start) <- readArg bs off info
+  let !maxCount = (BS.length bs - start) `quot` bytesPerItem
+  if count > fromIntegral maxCount
+    then Left "CBOR.Decode: unexpected end of input"
+    else Right (fromIntegral count, start)
+{-# INLINE readCount #-}
+
+
 decodeOne :: ByteString -> Int -> Either String (C.Value, Int)
 decodeOne !bs !off
   | off >= BS.length bs = Left "CBOR.Decode: unexpected end of input"
@@ -148,9 +162,7 @@ decodeBStr :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
 decodeBStr bs off info
   | info == 31 = decodeIndefiniteBStr bs off
   | otherwise = do
-      (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
-      ensureBytes bs off' len
+      (len, off') <- readCount 1 bs off info
       let !chunk = BSU.unsafeTake len (BSU.unsafeDrop off' bs)
       Right (C.ByteString chunk, off' + len)
 
@@ -159,9 +171,7 @@ decodeTStr :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
 decodeTStr bs off info
   | info == 31 = decodeIndefiniteTStr bs off
   | otherwise = do
-      (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
-      ensureBytes bs off' len
+      (len, off') <- readCount 1 bs off info
       let !raw = BSU.unsafeTake len (BSU.unsafeDrop off' bs)
       case decodeTextFast raw of
         Left _ -> Left "CBOR.Decode: invalid UTF-8 in text string"
@@ -181,9 +191,7 @@ decodeIndefiniteBStr bs off0 = go off0 []
           if m /= 2
             then Left "CBOR.Decode: non-byte-string chunk in indefinite byte string"
             else do
-              (len64, off') <- readArg bs (off + 1) ai
-              let !len = fromIntegral len64
-              ensureBytes bs off' len
+              (len, off') <- readCount 1 bs (off + 1) ai
               let !chunk = BSU.unsafeTake len (BSU.unsafeDrop off' bs)
               go (off' + len) (chunk : acc)
 
@@ -193,11 +201,7 @@ decodeIndefiniteTStr bs off0 = go off0 []
   where
     go !off !acc
       | off >= BS.length bs = Left "CBOR.Decode: unexpected end of input in indefinite text string"
-      | rdByte bs off == 0xff = do
-          let !combined = BS.concat (reverse acc)
-          case decodeTextFast combined of
-            Left _ -> Left "CBOR.Decode: invalid UTF-8 in indefinite text string"
-            Right t -> Right (C.TextString t, off + 1)
+      | rdByte bs off == 0xff = Right (C.TextString (T.concat (reverse acc)), off + 1)
       | otherwise = do
           let !ib = rdByte bs off
               !m = ib `shiftR` 5
@@ -205,19 +209,18 @@ decodeIndefiniteTStr bs off0 = go off0 []
           if m /= 3
             then Left "CBOR.Decode: non-text-string chunk in indefinite text string"
             else do
-              (len64, off') <- readArg bs (off + 1) ai
-              let !len = fromIntegral len64
-              ensureBytes bs off' len
+              (len, off') <- readCount 1 bs (off + 1) ai
               let !chunk = BSU.unsafeTake len (BSU.unsafeDrop off' bs)
-              go (off' + len) (chunk : acc)
+              case decodeTextFast chunk of
+                Left _ -> Left "CBOR.Decode: invalid UTF-8 in indefinite text string"
+                Right txt -> go (off' + len) (txt : acc)
 
 
 decodeArray :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
 decodeArray bs off info
   | info == 31 = decodeIndefiniteArray bs off
   | otherwise = do
-      (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
+      (len, off') <- readCount 1 bs off info
       decodeNItems bs off' len
 {-# INLINE decodeArray #-}
 
@@ -268,8 +271,7 @@ decodeMap :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
 decodeMap bs off info
   | info == 31 = decodeIndefiniteMap bs off
   | otherwise = do
-      (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
+      (len, off') <- readCount 2 bs off info
       decodeNPairs bs off' len
 {-# INLINE decodeMap #-}
 
@@ -337,7 +339,9 @@ decodeSimpleOrFloat bs off info
   | info == 24 = do
       ensureBytes bs off 1
       let !sv = rdByte bs off
-      Right (C.Simple sv, off + 1)
+      if sv < 32
+        then Left "CBOR.Decode: invalid two-byte simple value"
+        else Right (C.Simple sv, off + 1)
   | info == 25 = do
       ensureBytes bs off 2
       let !b0 = rdByte bs off
@@ -377,27 +381,3 @@ decodeSimpleOrFloat bs off info
       Right (C.Float64 (castWord64ToDouble w), off + 8)
   | info == 31 = Left "CBOR.Decode: break (0xff) at top level is not valid"
   | otherwise = Left $ "CBOR.Decode: reserved simple value info: " ++ show info
-
-
-halfToFloat :: Word16 -> Float
-halfToFloat !h =
-  let !sign = (fromIntegral h :: Word32) `shiftR` 15
-      !expo = (fromIntegral h :: Word32) `shiftR` 10 .&. 0x1f
-      !mant = fromIntegral h .&. 0x03ff :: Word32
-      !signBit = sign `shiftL` 31
-  in if expo == 0
-       then
-         if mant == 0
-           then castWord32ToFloat signBit
-           else
-             let !f = (fromIntegral mant :: Float) / 1024.0 * (2 ** (-14))
-             in if sign /= 0 then negate f else f
-       else
-         if expo == 0x1f
-           then
-             if mant == 0
-               then castWord32ToFloat (signBit .|. 0x7f800000)
-               else castWord32ToFloat (signBit .|. 0x7fc00000)
-           else
-             castWord32ToFloat
-               (signBit .|. ((expo + 112) `shiftL` 23) .|. (mant `shiftL` 13))

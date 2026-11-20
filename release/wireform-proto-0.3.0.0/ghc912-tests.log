@@ -1,0 +1,2471 @@
+Warning: The package list for 'hackage.haskell.org' is 24 days old.
+Run 'cabal update' to get the latest list of available packages.
+Resolving dependencies...
+Build profile: -w ghc-9.12.4 -O2
+In order, the following will be built (use -v for more details):
+ - OneTuple-0.4.3 (lib) (requires build)
+ - StateVar-1.2.2 (lib) (requires build)
+ - blaze-builder-0.4.4.1 (lib) (requires build)
+ - base-orphans-0.9.4 (lib) (requires build)
+ - base16-bytestring-1.0.2.0 (lib) (requires build)
+ - base64-bytestring-1.2.1.0 (lib) (requires download & build)
+ - character-ps-0.1 (lib) (requires build)
+ - call-stack-0.4.0 (lib) (requires build)
+ - colour-2.3.7 (lib) (requires build)
+ - cryptohash-md5-0.11.101.0 (lib) (requires download & build)
+ - dlist-1.0 (lib) (requires build)
+ - happy-lib-2.2 (lib:grammar) (requires build)
+ - hsc2hs-0.68.10 (exe:hsc2hs) (requires build)
+ - hashable-1.5.1.0 (lib) (requires build)
+ - haskell-lexer-1.2.1 (lib) (requires build)
+ - libyaml-clib-0.2.5 (lib) (requires build)
+ - indexed-traversable-0.1.5 (lib) (requires build)
+ - unliftio-core-0.2.1.0 (lib) (requires build)
+ - integer-logarithms-1.0.5 (lib) (requires build)
+ - unix-compat-0.7.4.1 (lib) (requires build)
+ - primitive-0.9.1.0 (lib) (requires build)
+ - parser-combinators-1.3.1 (lib) (requires download & build)
+ - prettyprinter-1.7.2 (lib) (requires download & build)
+ - path-0.9.6 (lib:os-string-compat) (requires build)
+ - erf-2.0.0.0 (lib:erf) (requires build)
+ - reflection-2.1.9 (lib) (requires download & build)
+ - safe-0.3.21 (lib) (requires build)
+ - safe-exceptions-0.1.7.4 (lib) (requires build)
+ - selective-0.7.0.1 (lib) (requires build)
+ - split-0.2.5.1 (lib) (requires build)
+ - splitmix-0.1.3.2 (lib) (requires build)
+ - assoc-1.1.1 (lib) (requires build)
+ - tagged-0.8.11 (lib) (requires build)
+ - th-abstraction-0.7.2.0 (lib) (requires build)
+ - th-compat-0.1.7 (lib) (requires build)
+ - transformers-compat-0.7.2 (lib) (requires build)
+ - attoparsec-0.14.4 (lib:attoparsec-internal) (requires build)
+ - vector-stream-0.1.0.1 (lib) (requires build)
+ - validity-0.12.1.0 (lib) (requires build)
+ - wl-pprint-annotated-0.1.0.2 (lib) (requires build)
+ - contravariant-1.5.6 (lib) (requires build)
+ - HUnit-1.6.2.0 (lib) (requires build)
+ - ansi-terminal-types-1.1.3 (lib) (requires build)
+ - happy-lib-2.2 (lib:tabular) (requires build)
+ - happy-lib-2.2 (lib:frontend) (requires build)
+ - terminal-size-0.3.4 (lib) (requires build)
+ - text-short-0.1.6.1 (lib) (requires build)
+ - time-compat-1.9.9 (lib) (requires build)
+ - unordered-containers-0.2.21 (lib) (requires build)
+ - data-fix-0.3.4 (lib) (requires build)
+ - case-insensitive-1.2.1.0 (lib) (requires download & build)
+ - scientific-0.3.9.0 (lib) (requires build)
+ - resourcet-1.3.0 (lib) (requires build)
+ - integer-conversion-0.1.1 (lib) (requires build)
+ - random-1.3.1 (lib) (requires build)
+ - these-1.2.1 (lib) (requires build)
+ - distributive-0.6.3 (lib) (requires build)
+ - boring-0.2.2.1 (lib) (requires build)
+ - network-uri-2.6.4.2 (lib) (requires build)
+ - transformers-base-0.4.6.1 (lib) (requires build)
+ - mmorph-1.2.2 (lib) (requires build)
+ - vector-0.13.2.0 (lib) (requires build)
+ - validity-text-0.3.1.3 (lib) (requires build)
+ - validity-containers-0.5.0.5 (lib) (requires build)
+ - validity-bytestring-0.4.1.1 (lib) (requires build)
+ - ansi-terminal-1.1.5 (lib) (requires build)
+ - happy-lib-2.2 (lib:backend-glr) (requires build)
+ - happy-lib-2.2 (lib:backend-lalr) (requires build)
+ - validity-unordered-containers-0.2.0.3 (lib) (requires build)
+ - async-2.2.6 (lib) (requires build)
+ - svg-builder-0.1.1 (lib) (requires build)
+ - validity-scientific-0.2.0.3 (lib) (requires build)
+ - attoparsec-0.14.4 (lib) (requires build)
+ - megaparsec-9.8.3 (lib) (requires download & build)
+ - text-iso8601-0.1.1.2 (lib) (requires build)
+ - temporary-1.3 (lib) (requires build)
+ - uuid-types-1.0.6.1 (lib) (requires build)
+ - QuickCheck-2.18.0.0 (lib) (requires build)
+ - MonadRandom-0.6.2.1 (lib) (requires build)
+ - strict-0.5.1 (lib) (requires build)
+ - comonad-5.0.10 (lib) (requires build)
+ - barbies-2.1.1.0 (lib) (requires build)
+ - constraints-0.14.4 (lib) (requires build)
+ - monad-control-1.0.3.1 (lib) (requires build)
+ - wireform-core-0.2.0.1 (lib) (requires build)
+ - validity-vector-0.2.0.3 (lib) (requires build)
+ - indexed-traversable-instances-0.1.2.1 (lib) (requires build)
+ - fast-myers-diff-0.0.2 (lib) (requires build)
+ - bitvec-1.1.6.0 (lib) (requires build)
+ - safe-coloured-text-0.6.0.0 (lib) (requires build)
+ - happy-lib-2.2 (lib) (requires build)
+ - concurrent-output-1.10.21 (lib) (requires build)
+ - quickcheck-io-0.2.0 (lib) (requires build)
+ - genvalidity-1.1.1.0 (lib) (requires build)
+ - random-shuffle-0.0.4 (lib:random-shuffle) (requires build)
+ - bifunctors-5.6.3 (lib) (requires build)
+ - lifted-base-0.2.3.12 (lib) (requires build)
+ - witherable-0.5 (lib) (requires build)
+ - vector-algorithms-0.9.1.0 (lib) (requires build)
+ - safe-coloured-text-terminfo-0.3.0.0 (lib) (requires build)
+ - safe-coloured-text-layout-0.2.0.2 (lib) (requires build)
+ - happy-2.2 (exe:happy) (requires build)
+ - genvalidity-text-1.0.0.1 (lib) (requires build)
+ - genvalidity-containers-1.0.0.2 (lib) (requires build)
+ - semigroupoids-6.0.2 (lib) (requires build)
+ - lifted-async-0.11.0 (lib) (requires build)
+ - mono-traversable-1.0.21.0 (lib) (requires build)
+ - pretty-show-1.10 (lib) (requires build)
+ - semialign-1.4 (lib) (requires build)
+ - conduit-1.3.6.1 (lib) (requires build)
+ - hedgehog-1.7 (lib) (requires build)
+ - aeson-2.2.5.1 (lib) (requires build)
+ - libyaml-0.1.4 (lib) (requires build)
+ - wireform-derive-0.2.0.0 (lib) (requires build)
+ - validity-aeson-0.2.0.5 (lib) (requires build)
+ - autodocodec-0.7.0.0 (lib) (requires build)
+ - path-0.9.6 (lib) (requires build)
+ - yaml-0.11.11.2 (lib) (requires build)
+ - wireform-proto-0.3.0.0 (lib) (first run)
+ - autodocodec-schema-0.2.0.2 (lib) (requires build)
+ - autodocodec-nix-0.1.1.0 (lib) (requires build)
+ - validity-path-0.4.0.1 (lib) (requires build)
+ - path-io-1.8.2 (lib) (requires build)
+ - genvalidity-path-1.0.0.1 (lib) (requires build)
+ - autodocodec-yaml-0.4.0.3 (lib) (requires build)
+ - sydtest-mutation-runtime-0.2.0.0 (lib) (requires build)
+ - opt-env-conf-0.15.0.3 (lib) (requires build)
+ - sydtest-0.33.0.0 (lib) (requires build)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-regression-test) (first run)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-derive-test) (first run)
+ - sydtest-hedgehog-0.4.0.0 (lib) (requires build)
+ - wireform-proto-0.3.0.0 (test:wireform-proto-test) (first run)
+Downloading  parser-combinators-1.3.1
+Starting     StateVar-1.2.2 (lib)
+Starting     OneTuple-0.4.3 (lib)
+Downloaded   parser-combinators-1.3.1
+Downloading  base64-bytestring-1.2.1.0
+Downloaded   base64-bytestring-1.2.1.0
+Downloading  cryptohash-md5-0.11.101.0
+Downloaded   cryptohash-md5-0.11.101.0
+Downloading  reflection-2.1.9
+Downloaded   reflection-2.1.9
+Downloading  case-insensitive-1.2.1.0
+Downloaded   case-insensitive-1.2.1.0
+Downloading  prettyprinter-1.7.2
+Downloaded   prettyprinter-1.7.2
+Downloading  megaparsec-9.8.3
+Building     OneTuple-0.4.3 (lib)
+Building     StateVar-1.2.2 (lib)
+Downloaded   megaparsec-9.8.3
+Installing   StateVar-1.2.2 (lib)
+Installing   OneTuple-0.4.3 (lib)
+Completed    StateVar-1.2.2 (lib)
+Starting     blaze-builder-0.4.4.1 (lib)
+Completed    OneTuple-0.4.3 (lib)
+Starting     base-orphans-0.9.4 (lib)
+Building     blaze-builder-0.4.4.1 (lib)
+Building     base-orphans-0.9.4 (lib)
+Installing   base-orphans-0.9.4 (lib)
+Completed    base-orphans-0.9.4 (lib)
+Starting     base16-bytestring-1.0.2.0 (lib)
+Building     base16-bytestring-1.0.2.0 (lib)
+Installing   blaze-builder-0.4.4.1 (lib)
+Completed    blaze-builder-0.4.4.1 (lib)
+Starting     base64-bytestring-1.2.1.0 (lib)
+Installing   base16-bytestring-1.0.2.0 (lib)
+Completed    base16-bytestring-1.0.2.0 (lib)
+Starting     character-ps-0.1 (lib)
+Building     base64-bytestring-1.2.1.0 (lib)
+Building     character-ps-0.1 (lib)
+Installing   base64-bytestring-1.2.1.0 (lib)
+Completed    base64-bytestring-1.2.1.0 (lib)
+Starting     call-stack-0.4.0 (lib)
+Installing   character-ps-0.1 (lib)
+Completed    character-ps-0.1 (lib)
+Starting     colour-2.3.7 (lib)
+Building     call-stack-0.4.0 (lib)
+Building     colour-2.3.7 (lib)
+Installing   call-stack-0.4.0 (lib)
+Completed    call-stack-0.4.0 (lib)
+Starting     cryptohash-md5-0.11.101.0 (lib)
+Building     cryptohash-md5-0.11.101.0 (lib)
+Installing   cryptohash-md5-0.11.101.0 (lib)
+Completed    cryptohash-md5-0.11.101.0 (lib)
+Starting     dlist-1.0 (lib)
+Installing   colour-2.3.7 (lib)
+Completed    colour-2.3.7 (lib)
+Starting     happy-lib-2.2 (lib:grammar)
+Building     dlist-1.0 (lib)
+Building     happy-lib-2.2 (lib:grammar)
+Installing   happy-lib-2.2 (lib:grammar)
+Completed    happy-lib-2.2 (lib:grammar)
+Starting     hsc2hs-0.68.10 (exe:hsc2hs)
+Installing   dlist-1.0 (lib)
+Completed    dlist-1.0 (lib)
+Starting     hashable-1.5.1.0 (lib)
+Building     hsc2hs-0.68.10 (exe:hsc2hs)
+Building     hashable-1.5.1.0 (lib)
+Installing   hashable-1.5.1.0 (lib)
+Completed    hashable-1.5.1.0 (lib)
+Starting     haskell-lexer-1.2.1 (lib)
+Installing   hsc2hs-0.68.10 (exe:hsc2hs)
+Completed    hsc2hs-0.68.10 (exe:hsc2hs)
+Starting     libyaml-clib-0.2.5 (lib)
+Building     haskell-lexer-1.2.1 (lib)
+Building     libyaml-clib-0.2.5 (lib)
+Installing   libyaml-clib-0.2.5 (lib)
+Completed    libyaml-clib-0.2.5 (lib)
+Starting     indexed-traversable-0.1.5 (lib)
+Building     indexed-traversable-0.1.5 (lib)
+Installing   haskell-lexer-1.2.1 (lib)
+Completed    haskell-lexer-1.2.1 (lib)
+Starting     unliftio-core-0.2.1.0 (lib)
+Installing   indexed-traversable-0.1.5 (lib)
+Completed    indexed-traversable-0.1.5 (lib)
+Starting     integer-logarithms-1.0.5 (lib)
+Building     unliftio-core-0.2.1.0 (lib)
+Installing   unliftio-core-0.2.1.0 (lib)
+Building     integer-logarithms-1.0.5 (lib)
+Completed    unliftio-core-0.2.1.0 (lib)
+Starting     unix-compat-0.7.4.1 (lib)
+Building     unix-compat-0.7.4.1 (lib)
+Installing   integer-logarithms-1.0.5 (lib)
+Completed    integer-logarithms-1.0.5 (lib)
+Starting     primitive-0.9.1.0 (lib)
+Building     primitive-0.9.1.0 (lib)
+Installing   unix-compat-0.7.4.1 (lib)
+Completed    unix-compat-0.7.4.1 (lib)
+Starting     parser-combinators-1.3.1 (lib)
+Building     parser-combinators-1.3.1 (lib)
+Installing   parser-combinators-1.3.1 (lib)
+Completed    parser-combinators-1.3.1 (lib)
+Starting     prettyprinter-1.7.2 (lib)
+Building     prettyprinter-1.7.2 (lib)
+Installing   primitive-0.9.1.0 (lib)
+Completed    primitive-0.9.1.0 (lib)
+Starting     path-0.9.6 (lib:os-string-compat)
+Building     path-0.9.6 (lib:os-string-compat)
+Installing   path-0.9.6 (lib:os-string-compat)
+Completed    path-0.9.6 (lib:os-string-compat)
+Starting     erf-2.0.0.0 (all, legacy fallback: cabal-version is less than 1.8)
+Building     erf-2.0.0.0 (all, legacy fallback: cabal-version is less than 1.8)
+Installing   erf-2.0.0.0 (all, legacy fallback: cabal-version is less than 1.8)
+Completed    erf-2.0.0.0 (all, legacy fallback: cabal-version is less than 1.8)
+Starting     reflection-2.1.9 (lib)
+Building     reflection-2.1.9 (lib)
+Installing   prettyprinter-1.7.2 (lib)
+Completed    prettyprinter-1.7.2 (lib)
+Starting     safe-0.3.21 (lib)
+Installing   reflection-2.1.9 (lib)
+Completed    reflection-2.1.9 (lib)
+Starting     safe-exceptions-0.1.7.4 (lib)
+Building     safe-0.3.21 (lib)
+Building     safe-exceptions-0.1.7.4 (lib)
+Installing   safe-exceptions-0.1.7.4 (lib)
+Installing   safe-0.3.21 (lib)
+Completed    safe-exceptions-0.1.7.4 (lib)
+Starting     selective-0.7.0.1 (lib)
+Completed    safe-0.3.21 (lib)
+Starting     split-0.2.5.1 (lib)
+Building     selective-0.7.0.1 (lib)
+Building     split-0.2.5.1 (lib)
+Installing   split-0.2.5.1 (lib)
+Completed    split-0.2.5.1 (lib)
+Starting     splitmix-0.1.3.2 (lib)
+Installing   selective-0.7.0.1 (lib)
+Completed    selective-0.7.0.1 (lib)
+Starting     assoc-1.1.1 (lib)
+Building     splitmix-0.1.3.2 (lib)
+Building     assoc-1.1.1 (lib)
+Installing   splitmix-0.1.3.2 (lib)
+Completed    splitmix-0.1.3.2 (lib)
+Starting     tagged-0.8.11 (lib)
+Installing   assoc-1.1.1 (lib)
+Completed    assoc-1.1.1 (lib)
+Starting     th-abstraction-0.7.2.0 (lib)
+Building     tagged-0.8.11 (lib)
+Building     th-abstraction-0.7.2.0 (lib)
+Installing   tagged-0.8.11 (lib)
+Completed    tagged-0.8.11 (lib)
+Starting     th-compat-0.1.7 (lib)
+Building     th-compat-0.1.7 (lib)
+Installing   th-abstraction-0.7.2.0 (lib)
+Installing   th-compat-0.1.7 (lib)
+Completed    th-abstraction-0.7.2.0 (lib)
+Starting     transformers-compat-0.7.2 (lib)
+Completed    th-compat-0.1.7 (lib)
+Starting     attoparsec-0.14.4 (lib:attoparsec-internal)
+Building     transformers-compat-0.7.2 (lib)
+Building     attoparsec-0.14.4 (lib:attoparsec-internal)
+Installing   attoparsec-0.14.4 (lib:attoparsec-internal)
+Installing   transformers-compat-0.7.2 (lib)
+Completed    attoparsec-0.14.4 (lib:attoparsec-internal)
+Starting     vector-stream-0.1.0.1 (lib)
+Completed    transformers-compat-0.7.2 (lib)
+Starting     validity-0.12.1.0 (lib)
+Building     vector-stream-0.1.0.1 (lib)
+Building     validity-0.12.1.0 (lib)
+Installing   validity-0.12.1.0 (lib)
+Completed    validity-0.12.1.0 (lib)
+Starting     wl-pprint-annotated-0.1.0.2 (lib)
+Installing   vector-stream-0.1.0.1 (lib)
+Completed    vector-stream-0.1.0.1 (lib)
+Starting     contravariant-1.5.6 (lib)
+Building     wl-pprint-annotated-0.1.0.2 (lib)
+Building     contravariant-1.5.6 (lib)
+Installing   wl-pprint-annotated-0.1.0.2 (lib)
+Completed    wl-pprint-annotated-0.1.0.2 (lib)
+Starting     HUnit-1.6.2.0 (lib)
+Installing   contravariant-1.5.6 (lib)
+Completed    contravariant-1.5.6 (lib)
+Starting     ansi-terminal-types-1.1.3 (lib)
+Building     HUnit-1.6.2.0 (lib)
+Building     ansi-terminal-types-1.1.3 (lib)
+Installing   HUnit-1.6.2.0 (lib)
+Completed    HUnit-1.6.2.0 (lib)
+Starting     happy-lib-2.2 (lib:tabular)
+Installing   ansi-terminal-types-1.1.3 (lib)
+Completed    ansi-terminal-types-1.1.3 (lib)
+Starting     happy-lib-2.2 (lib:frontend)
+Building     happy-lib-2.2 (lib:tabular)
+Building     happy-lib-2.2 (lib:frontend)
+Installing   happy-lib-2.2 (lib:tabular)
+Completed    happy-lib-2.2 (lib:tabular)
+Starting     text-short-0.1.6.1 (lib)
+Building     text-short-0.1.6.1 (lib)
+Installing   happy-lib-2.2 (lib:frontend)
+Completed    happy-lib-2.2 (lib:frontend)
+Starting     time-compat-1.9.9 (lib)
+Installing   text-short-0.1.6.1 (lib)
+Completed    text-short-0.1.6.1 (lib)
+Starting     unordered-containers-0.2.21 (lib)
+Building     time-compat-1.9.9 (lib)
+Building     unordered-containers-0.2.21 (lib)
+Installing   time-compat-1.9.9 (lib)
+Completed    time-compat-1.9.9 (lib)
+Starting     data-fix-0.3.4 (lib)
+Building     data-fix-0.3.4 (lib)
+Installing   data-fix-0.3.4 (lib)
+Completed    data-fix-0.3.4 (lib)
+Starting     case-insensitive-1.2.1.0 (lib)
+Building     case-insensitive-1.2.1.0 (lib)
+Installing   case-insensitive-1.2.1.0 (lib)
+Completed    case-insensitive-1.2.1.0 (lib)
+Starting     terminal-size-0.3.4 (lib)
+Installing   unordered-containers-0.2.21 (lib)
+Completed    unordered-containers-0.2.21 (lib)
+Starting     scientific-0.3.9.0 (lib)
+Building     terminal-size-0.3.4 (lib)
+Building     scientific-0.3.9.0 (lib)
+Installing   terminal-size-0.3.4 (lib)
+Completed    terminal-size-0.3.4 (lib)
+Starting     resourcet-1.3.0 (lib)
+Building     resourcet-1.3.0 (lib)
+Installing   scientific-0.3.9.0 (lib)
+Completed    scientific-0.3.9.0 (lib)
+Starting     integer-conversion-0.1.1 (lib)
+Building     integer-conversion-0.1.1 (lib)
+Installing   resourcet-1.3.0 (lib)
+Completed    resourcet-1.3.0 (lib)
+Starting     random-1.3.1 (lib)
+Installing   integer-conversion-0.1.1 (lib)
+Completed    integer-conversion-0.1.1 (lib)
+Starting     these-1.2.1 (lib)
+Building     random-1.3.1 (lib)
+Building     these-1.2.1 (lib)
+Installing   these-1.2.1 (lib)
+Completed    these-1.2.1 (lib)
+Starting     distributive-0.6.3 (lib)
+Building     distributive-0.6.3 (lib)
+Installing   distributive-0.6.3 (lib)
+Completed    distributive-0.6.3 (lib)
+Starting     boring-0.2.2.1 (lib)
+Building     boring-0.2.2.1 (lib)
+Installing   boring-0.2.2.1 (lib)
+Completed    boring-0.2.2.1 (lib)
+Starting     network-uri-2.6.4.2 (lib)
+Installing   random-1.3.1 (lib)
+Completed    random-1.3.1 (lib)
+Starting     transformers-base-0.4.6.1 (lib)
+Building     network-uri-2.6.4.2 (lib)
+Building     transformers-base-0.4.6.1 (lib)
+Installing   transformers-base-0.4.6.1 (lib)
+Completed    transformers-base-0.4.6.1 (lib)
+Starting     mmorph-1.2.2 (lib)
+Building     mmorph-1.2.2 (lib)
+Installing   mmorph-1.2.2 (lib)
+Installing   network-uri-2.6.4.2 (lib)
+Completed    mmorph-1.2.2 (lib)
+Starting     validity-text-0.3.1.3 (lib)
+Completed    network-uri-2.6.4.2 (lib)
+Starting     validity-containers-0.5.0.5 (lib)
+Building     validity-text-0.3.1.3 (lib)
+Building     validity-containers-0.5.0.5 (lib)
+Installing   validity-text-0.3.1.3 (lib)
+Completed    validity-text-0.3.1.3 (lib)
+Starting     validity-bytestring-0.4.1.1 (lib)
+Installing   validity-containers-0.5.0.5 (lib)
+Completed    validity-containers-0.5.0.5 (lib)
+Starting     vector-0.13.2.0 (lib)
+Building     validity-bytestring-0.4.1.1 (lib)
+Building     vector-0.13.2.0 (lib)
+Installing   validity-bytestring-0.4.1.1 (lib)
+Completed    validity-bytestring-0.4.1.1 (lib)
+Starting     ansi-terminal-1.1.5 (lib)
+Building     ansi-terminal-1.1.5 (lib)
+Installing   ansi-terminal-1.1.5 (lib)
+Completed    ansi-terminal-1.1.5 (lib)
+Starting     happy-lib-2.2 (lib:backend-glr)
+Building     happy-lib-2.2 (lib:backend-glr)
+Installing   happy-lib-2.2 (lib:backend-glr)
+Completed    happy-lib-2.2 (lib:backend-glr)
+Starting     happy-lib-2.2 (lib:backend-lalr)
+Building     happy-lib-2.2 (lib:backend-lalr)
+Installing   happy-lib-2.2 (lib:backend-lalr)
+Completed    happy-lib-2.2 (lib:backend-lalr)
+Starting     validity-unordered-containers-0.2.0.3 (lib)
+Building     validity-unordered-containers-0.2.0.3 (lib)
+Installing   validity-unordered-containers-0.2.0.3 (lib)
+Completed    validity-unordered-containers-0.2.0.3 (lib)
+Starting     async-2.2.6 (lib)
+Building     async-2.2.6 (lib)
+Installing   async-2.2.6 (lib)
+Completed    async-2.2.6 (lib)
+Starting     svg-builder-0.1.1 (lib)
+Building     svg-builder-0.1.1 (lib)
+Installing   svg-builder-0.1.1 (lib)
+Completed    svg-builder-0.1.1 (lib)
+Starting     validity-scientific-0.2.0.3 (lib)
+Building     validity-scientific-0.2.0.3 (lib)
+Installing   validity-scientific-0.2.0.3 (lib)
+Completed    validity-scientific-0.2.0.3 (lib)
+Starting     attoparsec-0.14.4 (lib)
+Building     attoparsec-0.14.4 (lib)
+Installing   attoparsec-0.14.4 (lib)
+Completed    attoparsec-0.14.4 (lib)
+Starting     megaparsec-9.8.3 (lib)
+Building     megaparsec-9.8.3 (lib)
+Installing   vector-0.13.2.0 (lib)
+Completed    vector-0.13.2.0 (lib)
+Starting     text-iso8601-0.1.1.2 (lib)
+Building     text-iso8601-0.1.1.2 (lib)
+Installing   megaparsec-9.8.3 (lib)
+Completed    megaparsec-9.8.3 (lib)
+Starting     strict-0.5.1 (lib)
+Installing   text-iso8601-0.1.1.2 (lib)
+Completed    text-iso8601-0.1.1.2 (lib)
+Starting     comonad-5.0.10 (lib)
+Building     strict-0.5.1 (lib)
+Building     comonad-5.0.10 (lib)
+Installing   strict-0.5.1 (lib)
+Completed    strict-0.5.1 (lib)
+Starting     barbies-2.1.1.0 (lib)
+Installing   comonad-5.0.10 (lib)
+Completed    comonad-5.0.10 (lib)
+Starting     constraints-0.14.4 (lib)
+Building     barbies-2.1.1.0 (lib)
+Building     constraints-0.14.4 (lib)
+Installing   constraints-0.14.4 (lib)
+Completed    constraints-0.14.4 (lib)
+Starting     temporary-1.3 (lib)
+Building     temporary-1.3 (lib)
+Installing   barbies-2.1.1.0 (lib)
+Installing   temporary-1.3 (lib)
+Completed    barbies-2.1.1.0 (lib)
+Starting     uuid-types-1.0.6.1 (lib)
+Completed    temporary-1.3 (lib)
+Starting     QuickCheck-2.18.0.0 (lib)
+Building     uuid-types-1.0.6.1 (lib)
+Building     QuickCheck-2.18.0.0 (lib)
+Installing   uuid-types-1.0.6.1 (lib)
+Completed    uuid-types-1.0.6.1 (lib)
+Starting     MonadRandom-0.6.2.1 (lib)
+Building     MonadRandom-0.6.2.1 (lib)
+Installing   MonadRandom-0.6.2.1 (lib)
+Completed    MonadRandom-0.6.2.1 (lib)
+Starting     monad-control-1.0.3.1 (lib)
+Building     monad-control-1.0.3.1 (lib)
+Installing   monad-control-1.0.3.1 (lib)
+Completed    monad-control-1.0.3.1 (lib)
+Starting     safe-coloured-text-0.6.0.0 (lib)
+Building     safe-coloured-text-0.6.0.0 (lib)
+Installing   QuickCheck-2.18.0.0 (lib)
+Completed    QuickCheck-2.18.0.0 (lib)
+Starting     happy-lib-2.2 (lib)
+Installing   safe-coloured-text-0.6.0.0 (lib)
+Completed    safe-coloured-text-0.6.0.0 (lib)
+Starting     concurrent-output-1.10.21 (lib)
+Building     happy-lib-2.2 (lib)
+Installing   happy-lib-2.2 (lib)
+Completed    happy-lib-2.2 (lib)
+Starting     wireform-core-0.2.0.1 (lib)
+Building     concurrent-output-1.10.21 (lib)
+Building     wireform-core-0.2.0.1 (lib)
+Installing   concurrent-output-1.10.21 (lib)
+Completed    concurrent-output-1.10.21 (lib)
+Starting     validity-vector-0.2.0.3 (lib)
+Building     validity-vector-0.2.0.3 (lib)
+Installing   validity-vector-0.2.0.3 (lib)
+Completed    validity-vector-0.2.0.3 (lib)
+Starting     indexed-traversable-instances-0.1.2.1 (lib)
+Building     indexed-traversable-instances-0.1.2.1 (lib)
+Installing   indexed-traversable-instances-0.1.2.1 (lib)
+Completed    indexed-traversable-instances-0.1.2.1 (lib)
+Starting     fast-myers-diff-0.0.2 (lib)
+Building     fast-myers-diff-0.0.2 (lib)
+Installing   fast-myers-diff-0.0.2 (lib)
+Completed    fast-myers-diff-0.0.2 (lib)
+Starting     bitvec-1.1.6.0 (lib)
+Installing   wireform-core-0.2.0.1 (lib)
+Completed    wireform-core-0.2.0.1 (lib)
+Starting     bifunctors-5.6.3 (lib)
+Building     bitvec-1.1.6.0 (lib)
+Building     bifunctors-5.6.3 (lib)
+Installing   bifunctors-5.6.3 (lib)
+Completed    bifunctors-5.6.3 (lib)
+Starting     random-shuffle-0.0.4 (all, legacy fallback: cabal-version is less than 1.8)
+Building     random-shuffle-0.0.4 (all, legacy fallback: cabal-version is less than 1.8)
+Installing   random-shuffle-0.0.4 (all, legacy fallback: cabal-version is less than 1.8)
+Completed    random-shuffle-0.0.4 (all, legacy fallback: cabal-version is less than 1.8)
+Starting     lifted-base-0.2.3.12 (lib)
+Building     lifted-base-0.2.3.12 (lib)
+Installing   bitvec-1.1.6.0 (lib)
+Completed    bitvec-1.1.6.0 (lib)
+Starting     quickcheck-io-0.2.0 (lib)
+Installing   lifted-base-0.2.3.12 (lib)
+Building     quickcheck-io-0.2.0 (lib)
+Completed    lifted-base-0.2.3.12 (lib)
+Starting     genvalidity-1.1.1.0 (lib)
+Installing   quickcheck-io-0.2.0 (lib)
+Completed    quickcheck-io-0.2.0 (lib)
+Starting     safe-coloured-text-terminfo-0.3.0.0 (lib)
+Building     genvalidity-1.1.1.0 (lib)
+Building     safe-coloured-text-terminfo-0.3.0.0 (lib)
+Installing   safe-coloured-text-terminfo-0.3.0.0 (lib)
+Completed    safe-coloured-text-terminfo-0.3.0.0 (lib)
+Starting     safe-coloured-text-layout-0.2.0.2 (lib)
+Installing   genvalidity-1.1.1.0 (lib)
+Completed    genvalidity-1.1.1.0 (lib)
+Starting     happy-2.2 (exe:happy)
+Building     safe-coloured-text-layout-0.2.0.2 (lib)
+Building     happy-2.2 (exe:happy)
+Installing   safe-coloured-text-layout-0.2.0.2 (lib)
+Completed    safe-coloured-text-layout-0.2.0.2 (lib)
+Starting     witherable-0.5 (lib)
+Installing   happy-2.2 (exe:happy)
+Completed    happy-2.2 (exe:happy)
+Starting     semigroupoids-6.0.2 (lib)
+Building     witherable-0.5 (lib)
+Building     semigroupoids-6.0.2 (lib)
+Installing   witherable-0.5 (lib)
+Completed    witherable-0.5 (lib)
+Starting     vector-algorithms-0.9.1.0 (lib)
+Building     vector-algorithms-0.9.1.0 (lib)
+Installing   semigroupoids-6.0.2 (lib)
+Completed    semigroupoids-6.0.2 (lib)
+Starting     lifted-async-0.11.0 (lib)
+Building     lifted-async-0.11.0 (lib)
+Installing   lifted-async-0.11.0 (lib)
+Completed    lifted-async-0.11.0 (lib)
+Starting     genvalidity-text-1.0.0.1 (lib)
+Building     genvalidity-text-1.0.0.1 (lib)
+Installing   genvalidity-text-1.0.0.1 (lib)
+Completed    genvalidity-text-1.0.0.1 (lib)
+Starting     genvalidity-containers-1.0.0.2 (lib)
+Building     genvalidity-containers-1.0.0.2 (lib)
+Installing   genvalidity-containers-1.0.0.2 (lib)
+Completed    genvalidity-containers-1.0.0.2 (lib)
+Starting     pretty-show-1.10 (lib)
+Building     pretty-show-1.10 (lib)
+Installing   pretty-show-1.10 (lib)
+Completed    pretty-show-1.10 (lib)
+Starting     semialign-1.4 (lib)
+Building     semialign-1.4 (lib)
+Installing   semialign-1.4 (lib)
+Completed    semialign-1.4 (lib)
+Starting     hedgehog-1.7 (lib)
+Building     hedgehog-1.7 (lib)
+Installing   vector-algorithms-0.9.1.0 (lib)
+Completed    vector-algorithms-0.9.1.0 (lib)
+Starting     aeson-2.2.5.1 (lib)
+Building     aeson-2.2.5.1 (lib)
+Installing   hedgehog-1.7 (lib)
+Completed    hedgehog-1.7 (lib)
+Starting     mono-traversable-1.0.21.0 (lib)
+Building     mono-traversable-1.0.21.0 (lib)
+Installing   mono-traversable-1.0.21.0 (lib)
+Completed    mono-traversable-1.0.21.0 (lib)
+Installing   aeson-2.2.5.1 (lib)
+Starting     conduit-1.3.6.1 (lib)
+Completed    aeson-2.2.5.1 (lib)
+Starting     wireform-derive-0.2.0.0 (lib)
+Building     conduit-1.3.6.1 (lib)
+Building     wireform-derive-0.2.0.0 (lib)
+Installing   wireform-derive-0.2.0.0 (lib)
+Completed    wireform-derive-0.2.0.0 (lib)
+Starting     validity-aeson-0.2.0.5 (lib)
+Building     validity-aeson-0.2.0.5 (lib)
+Installing   conduit-1.3.6.1 (lib)
+Completed    conduit-1.3.6.1 (lib)
+Starting     autodocodec-0.7.0.0 (lib)
+Installing   validity-aeson-0.2.0.5 (lib)
+Completed    validity-aeson-0.2.0.5 (lib)
+Starting     path-0.9.6 (lib)
+Building     autodocodec-0.7.0.0 (lib)
+Building     path-0.9.6 (lib)
+Installing   autodocodec-0.7.0.0 (lib)
+Completed    autodocodec-0.7.0.0 (lib)
+Configuring library for wireform-proto-0.3.0.0...
+Preprocessing library for wireform-proto-0.3.0.0...
+Building library for wireform-proto-0.3.0.0...
+[ 1 of 70] Compiling Paths_wireform_proto ( /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/autogen/Paths_wireform_proto.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Paths_wireform_proto.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Paths_wireform_proto.dyn_o )
+[ 2 of 70] Compiling Proto.IDL.AST.Span ( src/Proto/IDL/AST/Span.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/AST/Span.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/AST/Span.dyn_o )
+src/Proto/IDL/AST/Span.hs:94:25: warning: [GHC-39567] [-Wstar-is-type]
+    Using ‘*’ (or its Unicode variant) to mean ‘Data.Kind.Type’
+    relies on the StarIsType extension, which will become
+    deprecated in the future.
+    Suggested fix: Use ‘Type’ from ‘Data.Kind’ instead.
+   |
+94 | type family XNode (p :: *)
+   |                         ^
+
+[ 3 of 70] Compiling Proto.IDL.AST    ( src/Proto/IDL/AST.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/AST.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/AST.dyn_o )
+[ 4 of 70] Compiling Proto.IDL.Annotations ( src/Proto/IDL/Annotations.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Annotations.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Annotations.dyn_o )
+[ 5 of 70] Compiling Proto.IDL.Inspect ( src/Proto/IDL/Inspect.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Inspect.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Inspect.dyn_o )
+[ 6 of 70] Compiling Proto.Compat     ( src/Proto/Compat.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Compat.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Compat.dyn_o )
+Installing   path-0.9.6 (lib)
+[ 7 of 70] Compiling Proto.IDL.Options ( src/Proto/IDL/Options.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Options.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Options.dyn_o )
+Completed    path-0.9.6 (lib)
+Starting     libyaml-0.1.4 (lib)
+[ 8 of 70] Compiling Proto.IDL.Options.Custom ( src/Proto/IDL/Options/Custom.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Options/Custom.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Options/Custom.dyn_o )
+[ 9 of 70] Compiling Proto.CodeGen.Hooks ( src/Proto/CodeGen/Hooks.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Hooks.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Hooks.dyn_o )
+src/Proto/CodeGen/Hooks.hs:173:56: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘emptyCustomOptionRegistry, extractExtensionOptions,
+                   registerCustomOption’
+    from module ‘Proto.IDL.Options.Custom’ is redundant
+    |
+173 | import Proto.IDL.Options.Custom (CustomOptionRegistry, emptyCustomOptionRegistry, extractExtensionOptions, registerCustomOption)
+    |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[10 of 70] Compiling Proto.IDL.Parser.Error ( src/Proto/IDL/Parser/Error.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Error.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Error.dyn_o )
+[11 of 70] Compiling Proto.IDL.Parser.Lexer ( src/Proto/IDL/Parser/Lexer.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Lexer.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Lexer.dyn_o )
+Building     libyaml-0.1.4 (lib)
+src/Proto/IDL/Parser/Lexer.hs:374:9: warning: [GHC-53633] [-Woverlapping-patterns]
+    Pattern match is redundant
+    In a case alternative: [] -> ...
+    |
+374 |         [] -> IntMap.empty
+    |         ^^^^^^^^^^^^^^^^^^
+
+Installing   libyaml-0.1.4 (lib)
+Completed    libyaml-0.1.4 (lib)
+Starting     autodocodec-schema-0.2.0.2 (lib)
+[12 of 70] Compiling Proto.IDL.Parser ( src/Proto/IDL/Parser.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser.dyn_o )
+src/Proto/IDL/Parser.hs:25:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.IDL.AST.Span’ is redundant
+      except perhaps to import instances from ‘Proto.IDL.AST.Span’
+    To import instances alone, use: import Proto.IDL.AST.Span()
+   |
+25 | import Proto.IDL.AST.Span (Span, SrcSpan (..), mkSpan)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/IDL/Parser.hs:815:11: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘between’ shadows the existing binding
+      imported from ‘Text.Megaparsec’ at src/Proto/IDL/Parser.hs:28:1-38
+      (and originally defined in ‘parser-combinators-1.3.1:Control.Applicative.Combinators’)
+    |
+815 |           between = filter (\lc -> lcLine lc > afterLine && lcLine lc < startLine) unclaimed
+    |           ^^^^^^^
+
+src/Proto/IDL/Parser.hs:886:11: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘between’ shadows the existing binding
+      imported from ‘Text.Megaparsec’ at src/Proto/IDL/Parser.hs:28:1-38
+      (and originally defined in ‘parser-combinators-1.3.1:Control.Applicative.Combinators’)
+    |
+886 |           between = filter (\lc -> lcLine lc > afterLine && lcLine lc < startLine) unclaimed
+    |           ^^^^^^^
+
+Building     autodocodec-schema-0.2.0.2 (lib)
+Installing   autodocodec-schema-0.2.0.2 (lib)
+Completed    autodocodec-schema-0.2.0.2 (lib)
+Starting     autodocodec-nix-0.1.1.0 (lib)
+Building     autodocodec-nix-0.1.1.0 (lib)
+[13 of 70] Compiling Proto.IDL.Parser.Resolver ( src/Proto/IDL/Parser/Resolver.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Resolver.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Parser/Resolver.dyn_o )
+[14 of 70] Compiling Proto.IDL.Print  ( src/Proto/IDL/Print.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Print.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Print.dyn_o )
+Installing   autodocodec-nix-0.1.1.0 (lib)
+[15 of 70] Compiling Proto.Internal.CodeGen.Combinators ( src/Proto/Internal/CodeGen/Combinators.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/CodeGen/Combinators.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/CodeGen/Combinators.dyn_o )
+Completed    autodocodec-nix-0.1.1.0 (lib)
+Starting     validity-path-0.4.0.1 (lib)
+[16 of 70] Compiling Proto.CodeGen.Service ( src/Proto/CodeGen/Service.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Service.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Service.dyn_o )
+[17 of 70] Compiling Proto.Internal.Either ( src/Proto/Internal/Either.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Either.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Either.dyn_o )
+[18 of 70] Compiling Proto.Internal.FieldPresence ( src/Proto/Internal/FieldPresence.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/FieldPresence.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/FieldPresence.dyn_o )
+[19 of 70] Compiling Proto.Internal.GrowList ( src/Proto/Internal/GrowList.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/GrowList.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/GrowList.dyn_o )
+[20 of 70] Compiling Proto.Internal.JSON.Number ( src/Proto/Internal/JSON/Number.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/Number.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/Number.dyn_o )
+Building     validity-path-0.4.0.1 (lib)
+[21 of 70] Compiling Proto.Internal.JSON ( src/Proto/Internal/JSON.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON.dyn_o )
+src/Proto/Internal/JSON.hs:434:25: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: Eq k
+    In the type signature for:
+         parseHashMapFromJSON :: forall k v.
+                                 (Eq k, Hashable k, Aeson.FromJSON k, Aeson.FromJSON v) =>
+                                 Aeson.Value -> Aeson.Parser (HM.HashMap k v)
+    |
+434 | parseHashMapFromJSON :: (Eq k, Hashable k, Aeson.FromJSON k, Aeson.FromJSON v) => Aeson.Value -> Aeson.Parser (HM.HashMap k v)
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[22 of 70] Compiling Proto.Internal.Maybe ( src/Proto/Internal/Maybe.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Maybe.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Maybe.dyn_o )
+[23 of 70] Compiling Proto.Internal.Wire ( src/Proto/Internal/Wire.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire.dyn_o )
+[24 of 70] Compiling Proto.Internal.Wire.Decode ( src/Proto/Internal/Wire/Decode.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire/Decode.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire/Decode.dyn_o )
+Installing   validity-path-0.4.0.1 (lib)
+Completed    validity-path-0.4.0.1 (lib)
+Starting     path-io-1.8.2 (lib)
+[25 of 70] Compiling Proto.Internal.Wire.Encode ( src/Proto/Internal/Wire/Encode.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire/Encode.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Wire/Encode.dyn_o )
+src/Proto/Internal/Wire/Encode.hs:60:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.ByteString.Lazy’ is redundant
+      except perhaps to import instances from ‘Data.ByteString.Lazy’
+    To import instances alone, use: import Data.ByteString.Lazy()
+   |
+60 | import Data.ByteString.Lazy qualified as BL
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[26 of 70] Compiling Proto.Internal.SizedBuilder ( src/Proto/Internal/SizedBuilder.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/SizedBuilder.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/SizedBuilder.dyn_o )
+[27 of 70] Compiling Proto.Internal.Encode.Archetype ( src/Proto/Internal/Encode/Archetype.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Encode/Archetype.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Encode/Archetype.dyn_o )
+src/Proto/Internal/Encode/Archetype.hs:60:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text.Encoding’ is redundant
+      except perhaps to import instances from ‘Data.Text.Encoding’
+    To import instances alone, use: import Data.Text.Encoding()
+   |
+60 | import Data.Text.Encoding qualified as TE
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Internal/Encode/Archetype.hs:71:3: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘zigZag32, zigZag64’
+    from module ‘Proto.Internal.Wire.Encode’ is redundant
+   |
+71 |   zigZag32,
+   |   ^^^^^^^^^...
+
+[28 of 70] Compiling Proto.Encode     ( src/Proto/Encode.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Encode.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Encode.dyn_o )
+src/Proto/Encode.hs:126:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Vector’ is redundant
+      except perhaps to import instances from ‘Data.Vector’
+    To import instances alone, use: import Data.Vector()
+    |
+126 | import Data.Vector qualified as V
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Encode.hs:130:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Foreign.ForeignPtr’ is redundant
+      except perhaps to import instances from ‘Foreign.ForeignPtr’
+    To import instances alone, use: import Foreign.ForeignPtr()
+    |
+130 | import Foreign.ForeignPtr (withForeignPtr)
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Encode.hs:132:36: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘sizeOf’ from module ‘Foreign.Storable’ is redundant
+    |
+132 | import Foreign.Storable (Storable, sizeOf)
+    |                                    ^^^^^^
+
+Building     path-io-1.8.2 (lib)
+Installing   path-io-1.8.2 (lib)
+Completed    path-io-1.8.2 (lib)
+Starting     yaml-0.11.11.2 (lib)
+[29 of 70] Compiling Proto.Decode     ( src/Proto/Decode.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Decode.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Decode.dyn_o )
+src/Proto/Decode.hs:136:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.List’ is redundant
+      except perhaps to import instances from ‘Data.List’
+    To import instances alone, use: import Data.List()
+    |
+136 | import Data.List (foldl')
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Decode.hs:149:29: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Tag’ from module ‘Proto.Internal.Wire’ is redundant
+    |
+149 | import Proto.Internal.Wire (Tag (..), WireType (..))
+    |                             ^^^^^^^^
+
+Building     yaml-0.11.11.2 (lib)
+[30 of 70] Compiling Proto.Google.Protobuf.Descriptor ( src/Proto/Google/Protobuf/Descriptor.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Descriptor.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Descriptor.dyn_o )
+Installing   yaml-0.11.11.2 (lib)
+Completed    yaml-0.11.11.2 (lib)
+Starting     genvalidity-path-1.0.0.1 (lib)
+Building     genvalidity-path-1.0.0.1 (lib)
+Installing   genvalidity-path-1.0.0.1 (lib)
+Completed    genvalidity-path-1.0.0.1 (lib)
+Starting     autodocodec-yaml-0.4.0.3 (lib)
+Building     autodocodec-yaml-0.4.0.3 (lib)
+Installing   autodocodec-yaml-0.4.0.3 (lib)
+Completed    autodocodec-yaml-0.4.0.3 (lib)
+Starting     sydtest-mutation-runtime-0.2.0.0 (lib)
+Building     sydtest-mutation-runtime-0.2.0.0 (lib)
+Installing   sydtest-mutation-runtime-0.2.0.0 (lib)
+Completed    sydtest-mutation-runtime-0.2.0.0 (lib)
+Starting     opt-env-conf-0.15.0.3 (lib)
+[31 of 70] Compiling Proto.IDL.Descriptor ( src/Proto/IDL/Descriptor.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Descriptor.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/IDL/Descriptor.dyn_o )
+[32 of 70] Compiling Proto.CodeGen    ( src/Proto/CodeGen.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen.dyn_o )
+Building     opt-env-conf-0.15.0.3 (lib)
+[33 of 70] Compiling Proto.CodeGen.Types ( src/Proto/CodeGen/Types.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Types.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Types.dyn_o )
+[34 of 70] Compiling Proto.CodeGen.Encode ( src/Proto/CodeGen/Encode.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Encode.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Encode.dyn_o )
+[35 of 70] Compiling Proto.CodeGen.Decode ( src/Proto/CodeGen/Decode.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Decode.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/CodeGen/Decode.dyn_o )
+[36 of 70] Compiling Proto.Google.Protobuf.Compiler.Plugin ( src/Proto/Google/Protobuf/Compiler/Plugin.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Compiler/Plugin.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Compiler/Plugin.dyn_o )
+src/Proto/Google/Protobuf/Compiler/Plugin.hs:22:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.ByteString’ is redundant
+      except perhaps to import instances from ‘Data.ByteString’
+    To import instances alone, use: import Data.ByteString()
+   |
+22 | import Data.ByteString (ByteString)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[37 of 70] Compiling Proto.Extension  ( src/Proto/Extension.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Extension.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Extension.dyn_o )
+[38 of 70] Compiling Proto.Internal.JSON.Extension ( src/Proto/Internal/JSON/Extension.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/Extension.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/Extension.dyn_o )
+[39 of 70] Compiling Proto.Decode.Stream ( src/Proto/Decode/Stream.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Decode/Stream.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Decode/Stream.dyn_o )
+[40 of 70] Compiling Proto.Conformance ( src/Proto/Conformance.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Conformance.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Conformance.dyn_o )
+[41 of 70] Compiling Proto.JSONSchema ( src/Proto/JSONSchema.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/JSONSchema.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/JSONSchema.dyn_o )
+[42 of 70] Compiling Proto.Repr       ( src/Proto/Repr.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Repr.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Repr.dyn_o )
+src/Proto/Repr.hs:218:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.List’ is redundant
+      except perhaps to import instances from ‘Data.List’
+    To import instances alone, use: import Data.List()
+    |
+218 | import Data.List (foldl')
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Installing   opt-env-conf-0.15.0.3 (lib)
+Completed    opt-env-conf-0.15.0.3 (lib)
+Starting     sydtest-0.33.0.0 (lib)
+[43 of 70] Compiling Proto.Schema     ( src/Proto/Schema.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Schema.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Schema.dyn_o )
+[44 of 70] Compiling Proto.Registry   ( src/Proto/Registry.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Registry.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Registry.dyn_o )
+src/Proto/Registry.hs:91:60: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Name’ from module ‘Language.Haskell.TH’ is redundant
+   |
+91 | import Language.Haskell.TH (Dec (..), Exp (..), Info (..), Name, Q, Type (..), mkName, reify)
+   |                                                            ^^^^
+
+src/Proto/Registry.hs:240:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: IsMessage a
+    In the type signature for:
+         lookupDecoder :: forall a.
+                          (Typeable a, IsMessage a) =>
+                          Text -> TypeRegistry -> Maybe (ByteString -> Either DecodeError a)
+    |
+240 |    . (Typeable a, IsMessage a)
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[45 of 70] Compiling Proto.Lens       ( src/Proto/Lens.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Lens.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Lens.dyn_o )
+[46 of 70] Compiling Proto.Internal.Derive ( src/Proto/Internal/Derive.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Derive.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/Derive.dyn_o )
+src/Proto/Internal/Derive.hs:87:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Internal.Wire’ is redundant
+      except perhaps to import instances from ‘Proto.Internal.Wire’
+    To import instances alone, use: import Proto.Internal.Wire()
+   |
+87 | import Proto.Internal.Wire (Tag)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/Internal/Derive.hs:92:39: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘BytesRep, MapAdapter, StringRep’
+    from module ‘Proto.Repr’ is redundant
+   |
+92 | import Proto.Repr (BytesAdapter (..), BytesRep (..), MapAdapter (..), RepeatedAdapter (..), StringAdapter (..), StringRep (..))
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Building     sydtest-0.33.0.0 (lib)
+[47 of 70] Compiling Proto.Google.Protobuf.Wrappers ( src/Proto/Google/Protobuf/Wrappers.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Wrappers.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Wrappers.dyn_o )
+[48 of 70] Compiling Proto.Google.Protobuf.Wrappers.Util ( src/Proto/Google/Protobuf/Wrappers/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Wrappers/Util.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Wrappers/Util.dyn_o )
+[49 of 70] Compiling Proto.Google.Protobuf.Timestamp ( src/Proto/Google/Protobuf/Timestamp.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Timestamp.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Timestamp.dyn_o )
+src/Proto/Google/Protobuf/Timestamp.hs:215:82: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Timestamp.hs:215:82-85
+        (Num p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Timestamp.hs:215:82-85
+    • In the first argument of ‘dropTrailingZeros’, namely
+        ‘(pad9 (fromIntegral n))’
+      In the second argument of ‘(<>)’, namely
+        ‘dropTrailingZeros (pad9 (fromIntegral n))’
+      In the expression:
+        T.pack "." <> dropTrailingZeros (pad9 (fromIntegral n))
+    |
+215 |         nanoStr = if n == 0 then T.pack "" else T.pack "." <> dropTrailingZeros (pad9 (fromIntegral n))
+    |                                                                                  ^^^^
+
+src/Proto/Google/Protobuf/Timestamp.hs:220:16: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:220:16-19
+        (Num p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:220:16-19
+    • In the first argument of ‘(<>)’, namely ‘pad2 (fromIntegral m)’
+      In the second argument of ‘(<>)’, namely
+        ‘pad2 (fromIntegral m)
+           <>
+             T.pack "-"
+               <>
+                 pad2 (fromIntegral d)
+                   <>
+                     T.pack "T"
+                       <>
+                         pad2 hours
+                           <>
+                             T.pack ":"
+                               <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+      In the second argument of ‘(<>)’, namely
+        ‘T.pack "-"
+           <>
+             pad2 (fromIntegral m)
+               <>
+                 T.pack "-"
+                   <>
+                     pad2 (fromIntegral d)
+                       <>
+                         T.pack "T"
+                           <>
+                             pad2 hours
+                               <>
+                                 T.pack ":"
+                                   <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+    |
+220 |             <> pad2 (fromIntegral m)
+    |                ^^^^
+
+src/Proto/Google/Protobuf/Timestamp.hs:222:16: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:222:16-19
+        (Num p0)
+          arising from a use of ‘pad2’
+          at src/Proto/Google/Protobuf/Timestamp.hs:222:16-19
+    • In the first argument of ‘(<>)’, namely ‘pad2 (fromIntegral d)’
+      In the second argument of ‘(<>)’, namely
+        ‘pad2 (fromIntegral d)
+           <>
+             T.pack "T"
+               <>
+                 pad2 hours
+                   <>
+                     T.pack ":"
+                       <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+      In the second argument of ‘(<>)’, namely
+        ‘T.pack "-"
+           <>
+             pad2 (fromIntegral d)
+               <>
+                 T.pack "T"
+                   <>
+                     pad2 hours
+                       <>
+                         T.pack ":"
+                           <> pad2 mins <> T.pack ":" <> pad2 secs <> nanoStr <> T.pack "Z"’
+    |
+222 |             <> pad2 (fromIntegral d)
+    |                ^^^^
+
+[50 of 70] Compiling Proto.Google.Protobuf.Struct ( src/Proto/Google/Protobuf/Struct.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Struct.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Struct.dyn_o )
+[51 of 70] Compiling Proto.Google.Protobuf.Struct.Util ( src/Proto/Google/Protobuf/Struct/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Struct/Util.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Struct/Util.dyn_o )
+[52 of 70] Compiling Proto.Google.Protobuf.SourceContext ( src/Proto/Google/Protobuf/SourceContext.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/SourceContext.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/SourceContext.dyn_o )
+[53 of 70] Compiling Proto.Google.Protobuf.FieldMask ( src/Proto/Google/Protobuf/FieldMask.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/FieldMask.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/FieldMask.dyn_o )
+[54 of 70] Compiling Proto.Google.Protobuf.FieldMask.Util ( src/Proto/Google/Protobuf/FieldMask/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/FieldMask/Util.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/FieldMask/Util.dyn_o )
+src/Proto/Google/Protobuf/FieldMask/Util.hs:41:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Set’ is redundant
+      except perhaps to import instances from ‘Data.Set’
+    To import instances alone, use: import Data.Set()
+   |
+41 | import Data.Set (Set)
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+Installing   sydtest-0.33.0.0 (lib)
+Completed    sydtest-0.33.0.0 (lib)
+[55 of 70] Compiling Proto.Google.Protobuf.Empty ( src/Proto/Google/Protobuf/Empty.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Empty.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Empty.dyn_o )
+Starting     sydtest-hedgehog-0.4.0.0 (lib)
+[56 of 70] Compiling Proto.Google.Protobuf.Duration ( src/Proto/Google/Protobuf/Duration.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Duration.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Duration.dyn_o )
+src/Proto/Google/Protobuf/Duration.hs:199:82: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘p0’ to type ‘Integer’ in the following constraints
+        (Show p0)
+          arising from a use of ‘pad9’
+          at src/Proto/Google/Protobuf/Duration.hs:199:82-85
+        (Num p0)
+          arising from a use of ‘abs’
+          at src/Proto/Google/Protobuf/Duration.hs:199:88-90
+    • In the first argument of ‘dropTrailingZeros’, namely
+        ‘(pad9 (abs (fromIntegral n)))’
+      In the second argument of ‘(<>)’, namely
+        ‘dropTrailingZeros (pad9 (abs (fromIntegral n)))’
+      In the expression:
+        T.pack "." <> dropTrailingZeros (pad9 (abs (fromIntegral n)))
+    |
+199 |         nanoStr = if n == 0 then T.pack "" else T.pack "." <> dropTrailingZeros (pad9 (abs (fromIntegral n)))
+    |                                                                                  ^^^^
+
+[57 of 70] Compiling Proto.Google.Protobuf.Timestamp.Util ( src/Proto/Google/Protobuf/Timestamp/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Timestamp/Util.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Timestamp/Util.dyn_o )
+src/Proto/Google/Protobuf/Timestamp/Util.hs:32:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+32 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:84:10: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+84 |         (fromIntegral (timestampSeconds ts) * nanosPerSecond + fromIntegral (timestampNanos ts))
+   |          ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:85:14: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+85 |           + (fromIntegral (durationSeconds dur) * nanosPerSecond + fromIntegral (durationNanos dur))
+   |              ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:96:16: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+96 |   let aNanos = fromIntegral (timestampSeconds a) * nanosPerSecond + fromIntegral (timestampNanos a)
+   |                ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:97:16: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int64 -> Int64
+      can probably be omitted
+   |
+97 |       bNanos = fromIntegral (timestampSeconds b) * nanosPerSecond + fromIntegral (timestampNanos b)
+   |                ^^^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Timestamp/Util.hs:129:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Ord Timestamp
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+    |
+129 | instance Ord Timestamp where
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[58 of 70] Compiling Proto.Google.Protobuf.Duration.Util ( src/Proto/Google/Protobuf/Duration/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Duration/Util.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Duration/Util.dyn_o )
+src/Proto/Google/Protobuf/Duration/Util.hs:40:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+40 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Google/Protobuf/Duration/Util.hs:183:8: warning: [GHC-18042] [-Wtype-defaults]
+    • Defaulting the type variable ‘a0’ to type ‘Integer’ in the following constraints
+        (Num a0)
+          arising from a use of ‘signsAgree’
+          at src/Proto/Google/Protobuf/Duration/Util.hs:183:8-17
+        (Ord a0)
+          arising from a use of ‘signsAgree’
+          at src/Proto/Google/Protobuf/Duration/Util.hs:183:8-17
+    • In the second argument of ‘(&&)’, namely
+        ‘signsAgree
+           (durationSeconds dur) (fromIntegral (durationNanos dur))’
+      In the second argument of ‘(&&)’, namely
+        ‘abs (fromIntegral (durationNanos dur) :: Int64) <= 999999999
+           &&
+             signsAgree
+               (durationSeconds dur) (fromIntegral (durationNanos dur))’
+      In the expression:
+        abs (durationSeconds dur) <= 315576000000
+          &&
+            abs (fromIntegral (durationNanos dur) :: Int64) <= 999999999
+              &&
+                signsAgree (durationSeconds dur) (fromIntegral (durationNanos dur))
+    |
+183 |     && signsAgree (durationSeconds dur) (fromIntegral (durationNanos dur))
+    |        ^^^^^^^^^^
+
+src/Proto/Google/Protobuf/Duration/Util.hs:195:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Ord Duration
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+    |
+195 | instance Ord Duration where
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[59 of 70] Compiling Proto.Google.Protobuf.Any ( src/Proto/Google/Protobuf/Any.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Any.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Any.dyn_o )
+Building     sydtest-hedgehog-0.4.0.0 (lib)
+[60 of 70] Compiling Proto.Internal.JSON.WellKnown ( src/Proto/Internal/JSON/WellKnown.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/WellKnown.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Internal/JSON/WellKnown.dyn_o )
+Installing   sydtest-hedgehog-0.4.0.0 (lib)
+Completed    sydtest-hedgehog-0.4.0.0 (lib)
+[61 of 70] Compiling Proto.Google.Protobuf.Any.Util ( src/Proto/Google/Protobuf/Any/Util.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Any/Util.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Google/Protobuf/Any/Util.dyn_o )
+[62 of 70] Compiling Proto.Dynamic    ( src/Proto/Dynamic.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Dynamic.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Dynamic.dyn_o )
+src/Proto/Dynamic.hs:60:18: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Int32’ from module ‘Data.Int’ is redundant
+   |
+60 | import Data.Int (Int32, Int64)
+   |                  ^^^^^
+
+src/Proto/Dynamic.hs:79:3: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘getDouble, getFloat, getText’
+    from module ‘Proto.Internal.Wire.Decode’ is redundant
+   |
+79 |   getDouble,
+   |   ^^^^^^^^^^...
+
+src/Proto/Dynamic.hs:298:7: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘nFields’ shadows the existing binding
+      bound at src/Proto/Dynamic.hs:320:5
+    |
+298 |       nFields = length fieldList'
+    |       ^^^^^^^
+
+[63 of 70] Compiling Proto.Decode.Collect ( src/Proto/Decode/Collect.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Decode/Collect.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Decode/Collect.dyn_o )
+[64 of 70] Compiling Proto            ( src/Proto.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto.dyn_o )
+[65 of 70] Compiling Proto.Setup      ( src/Proto/Setup.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Setup.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/Setup.dyn_o )
+src/Proto/Setup.hs:72:34: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘ProtoFile'’ from module ‘Proto.IDL.AST’ is redundant
+   |
+72 | import Proto.IDL.AST (ProtoFile, ProtoFile' (..))
+   |                                  ^^^^^^^^^^^^^^^
+
+[66 of 70] Compiling Proto.TH.Derive  ( src/Proto/TH/Derive.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TH/Derive.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TH/Derive.dyn_o )
+src/Proto/TH/Derive.hs:7:1: warning: [GHC-42044] [-Wunrecognised-pragmas]
+    Unrecognised pragma: HLINT
+  |
+7 | {-# HLINT ignore "Unused LANGUAGE pragma" #-}
+  | ^^^^^^^^^
+
+src/Proto/TH/Derive.hs:114:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text’ is redundant
+      except perhaps to import instances from ‘Data.Text’
+    To import instances alone, use: import Data.Text()
+    |
+114 | import Data.Text qualified as T
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Derive.hs:548:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘stripMaybe’
+    |
+548 | stripMaybe (AppT (ConT n) t) | n == ''Maybe = t
+    | ^^^^^^^^^^
+
+[67 of 70] Compiling Proto.TH.Metadata ( src/Proto/TH/Metadata.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TH/Metadata.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TH/Metadata.dyn_o )
+src/Proto/TH/Metadata.hs:2221:1: warning: [GHC-40910] [-Wunused-top-binds]
+    Defined but not used: ‘scalarValueToJSON’
+     |
+2221 | scalarValueToJSON _ _ =
+     | ^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2287:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: Ord k
+    In the type signature for:
+         scalarMapToJSON :: forall k v.
+                            (AesonT.ToJSON k, AesonT.ToJSON v, Ord k) =>
+                            JsonScalar -> JsonScalar -> Map.Map k v -> AesonT.Value
+     |
+2287 |    . (Aeson.ToJSON k, Aeson.ToJSON v, Ord k)
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2357:6: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraint: AesonT.FromJSON k
+    In the type signature for:
+         parseScalarMapMaybe :: forall k v.
+                                (Ord k, AesonT.FromJSON k, AesonT.FromJSONKey k,
+                                 AesonT.FromJSON v) =>
+                                JsonScalar
+                                -> JsonScalar
+                                -> AesonT.Object
+                                -> Text
+                                -> AesonT.Parser (Maybe (Map.Map k v))
+     |
+2357 |    . (Ord k, Aeson.FromJSON k, Aeson.FromJSONKey k, Aeson.FromJSON v)
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/Proto/TH/Metadata.hs:2726:23: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘conE’ shadows the existing binding
+      imported from ‘Language.Haskell.TH’ at src/Proto/TH/Metadata.hs:92:1-26
+      (and originally defined in ‘ghc-internal-9.1204.0:GHC.Internal.TH.Lib’)
+     |
+2726 | oneofScalarParserE sc conE valE =
+     |                       ^^^^
+
+[68 of 70] Compiling Proto.TH         ( src/Proto/TH.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TH.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TH.dyn_o )
+src/Proto/TH.hs:609:28: warning: [GHC-63397] [-Wname-shadowing]
+    This binding for ‘fields’ shadows the existing binding
+      bound at src/Proto/TH.hs:585:5
+    |
+609 |             MEExtend owner fields -> extendToDecls (scPackage childScope) owner fields
+    |                            ^^^^^^
+
+[69 of 70] Compiling Proto.TH.QQ      ( src/Proto/TH/QQ.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TH/QQ.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TH/QQ.dyn_o )
+src/Proto/TH/QQ.hs:29:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.IDL.AST’ is redundant
+      except perhaps to import instances from ‘Proto.IDL.AST’
+    To import instances alone, use: import Proto.IDL.AST()
+   |
+29 | import Proto.IDL.AST (stripSpans)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[70 of 70] Compiling Proto.TextFormat ( src/Proto/TextFormat.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TextFormat.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/opt/build/Proto/TextFormat.dyn_o )
+Configuring test suite 'wireform-proto-test' for wireform-proto-0.3.0.0...
+Configuring test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+Preprocessing test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-regression-test' for wireform-proto-0.3.0.0...
+Preprocessing test suite 'wireform-proto-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-test' for wireform-proto-0.3.0.0...
+[1 of 4] Compiling Generated.Edition2023 ( test-regression/Generated/Edition2023.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Generated/Edition2023.o )
+[ 1 of 19] Compiling Test.CodeGen     ( test-integration/Test/CodeGen.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/CodeGen.o )
+[ 2 of 19] Compiling Test.Collect     ( test-integration/Test/Collect.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Collect.o )
+[ 3 of 19] Compiling Test.Compat      ( test-integration/Test/Compat.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Compat.o )
+[ 4 of 19] Compiling Test.Hooks       ( test-integration/Test/Hooks.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Hooks.o )
+test-integration/Test/Hooks.hs:7:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.CodeGen.Hooks’ is redundant
+      except perhaps to import instances from ‘Proto.CodeGen.Hooks’
+    To import instances alone, use: import Proto.CodeGen.Hooks()
+  |
+7 | import Proto.CodeGen.Hooks
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/Hooks.hs:251:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h1’
+    |
+251 |                 let h1 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:252:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h2’
+    |
+252 |                     h2 = mempty :: THHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:256:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h1’
+    |
+256 |                 let h1 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:257:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘h2’
+    |
+257 |                     h2 = defaultTHHooks
+    |                     ^^
+
+test-integration/Test/Hooks.hs:258:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘combined’
+    |
+258 |                     combined = h1 <> h2
+    |                     ^^^^^^^^
+
+test-integration/Test/Hooks.hs:261:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+261 |                 let hook = thOnMessageAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+test-integration/Test/Hooks.hs:265:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+265 |                 let hook = thOnEnumAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+test-integration/Test/Hooks.hs:269:21: warning: [GHC-40910] [-Wunused-local-binds]
+    Defined but not used: ‘hook’
+    |
+269 |                 let hook = thOnFileAttribute "my_attr" $ \_val _ctx ->
+    |                     ^^^^
+
+[ 5 of 19] Compiling Test.JSON        ( test-integration/Test/JSON.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/JSON.o )
+test-integration/Test/JSON.hs:211:27: warning: [GHC-62161] [-Wincomplete-uni-patterns]
+    Pattern match(es) are non-exhaustive
+    In a pattern binding:
+        Patterns of type ‘AesonT.Value’ not matched:
+            AesonT.Array _
+            AesonT.String _
+            AesonT.Number _
+            AesonT.Bool _
+            ...
+    |
+211 |                           Aeson.Object o = ordMapToJSON m
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/JSON.hs:238:27: warning: [GHC-62161] [-Wincomplete-uni-patterns]
+    Pattern match(es) are non-exhaustive
+    In a pattern binding:
+        Patterns of type ‘AesonT.Value’ not matched:
+            AesonT.Array _
+            AesonT.String _
+            AesonT.Number _
+            AesonT.Bool _
+            ...
+    |
+238 |                           Aeson.Object o = hashMapToJSON m
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/JSON.hs:290:16: warning: [GHC-30606] [-Wredundant-constraints]
+    Redundant constraints: (Show a, Eq a)
+    In the type signature for:
+         runParserOK :: forall a. (Show a, Eq a) => AesonT.Parser a -> IO a
+    |
+290 | runParserOK :: (Show a, Eq a) => AesonT.Parser a -> IO a
+    |                ^^^^^^^^^^^^^^
+
+[ 6 of 19] Compiling Test.Lens        ( test-integration/Test/Lens.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Lens.o )
+[ 7 of 19] Compiling Test.Options     ( test-integration/Test/Options.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Options.o )
+test-integration/Test/Options.hs:158:32: warning: [GHC-63394] [-Wx-partial]
+    In the use of ‘head’
+    (imported from Prelude, but defined in GHC.Internal.List):
+    "This is a partial function, it throws an error on empty lists. Use pattern matching, 'Data.List.uncons' or 'Data.Maybe.listToMaybe' instead. Consider refactoring to use "Data.List.NonEmpty"."
+    |
+158 |                     fieldName (head deps) `shouldBe` "old"
+    |                                ^^^^
+
+[ 8 of 19] Compiling Test.Parser      ( test-integration/Test/Parser.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Parser.o )
+[2 of 4] Compiling Generated.Edition2024 ( test-regression/Generated/Edition2024.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Generated/Edition2024.o )
+[ 9 of 19] Compiling Test.PrintInspect ( test-integration/Test/PrintInspect.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/PrintInspect.o )
+test-integration/Test/PrintInspect.hs:310:30: warning: [GHC-63394] [-Wx-partial]
+    In the use of ‘head’
+    (imported from Prelude, but defined in GHC.Internal.List):
+    "This is a partial function, it throws an error on empty lists. Use pattern matching, 'Data.List.uncons' or 'Data.Maybe.listToMaybe' instead. Consider refactoring to use "Data.List.NonEmpty"."
+    |
+310 |                     svcName (head svcs) `shouldBe` "PersonService"
+    |                              ^^^^
+
+test-integration/Test/PrintInspect.hs:338:34: warning: [GHC-63394] [-Wx-partial]
+    In the use of ‘head’
+    (imported from Prelude, but defined in GHC.Internal.List):
+    "This is a partial function, it throws an error on empty lists. Use pattern matching, 'Data.List.uncons' or 'Data.Maybe.listToMaybe' instead. Consider refactoring to use "Data.List.NonEmpty"."
+    |
+338 |                       oneofName (head oneofs) `shouldBe` "contact"
+    |                                  ^^^^
+
+test-integration/Test/PrintInspect.hs:347:37: warning: [GHC-63394] [-Wx-partial]
+    In the use of ‘head’
+    (imported from Prelude, but defined in GHC.Internal.List):
+    "This is a partial function, it throws an error on empty lists. Use pattern matching, 'Data.List.uncons' or 'Data.Maybe.listToMaybe' instead. Consider refactoring to use "Data.List.NonEmpty"."
+    |
+347 |                       mapFieldName (head maps) `shouldBe` "metadata"
+    |                                     ^^^^
+
+[3 of 4] Compiling THFixtures       ( test-regression/THFixtures.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/THFixtures.o )
+[10 of 19] Compiling Test.Resolver    ( test-integration/Test/Resolver.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Resolver.o )
+[11 of 19] Compiling Test.RingSink    ( test-integration/Test/RingSink.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/RingSink.o )
+[12 of 19] Compiling Test.Roundtrip   ( test-integration/Test/Roundtrip.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Roundtrip.o )
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:9:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+  |
+9 | $(loadProto "test-regression/proto/edition2023.proto")
+  |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:11:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘ov’
+   |
+11 | $(loadProto "test-regression/proto/json_numbers.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-regression/THFixtures.hs:11:2: warning: [GHC-40910] [-Wunused-matches]
+    Defined but not used: ‘v’
+   |
+11 | $(loadProto "test-regression/proto/json_numbers.proto")
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[13 of 19] Compiling Test.Schema      ( test-integration/Test/Schema.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Schema.o )
+[14 of 19] Compiling Test.StreamCodec ( test-integration/Test/StreamCodec.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/StreamCodec.o )
+[15 of 19] Compiling Test.TDP         ( test-integration/Test/TDP.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/TDP.o )
+test-integration/Test/TDP.hs:6:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Int’ is redundant
+      except perhaps to import instances from ‘Data.Int’
+    To import instances alone, use: import Data.Int()
+  |
+6 | import Data.Int (Int32, Int64)
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/TDP.hs:21:29: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Tag’ from module ‘Proto.Internal.Wire’ is redundant
+   |
+21 | import Proto.Internal.Wire (Tag (..), WireType (..), fieldTag)
+   |                             ^^^^^^^^
+
+test-integration/Test/TDP.hs:23:3: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘DecodeError, DecodeResult, Decoder, getFixed32,
+                   getFixed64, getLengthDelimited, getTag, getText, getVarint,
+                   runDecoder, skipWireType, withTagM’
+    from module ‘Proto.Internal.Wire.Decode’ is redundant
+   |
+23 |   DecodeError (..),
+   |   ^^^^^^^^^^^^^^^^^...
+
+test-integration/Test/TDP.hs:37:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Proto.Internal.Wire.Decode’ is redundant
+      except perhaps to import instances from ‘Proto.Internal.Wire.Decode’
+    To import instances alone, use: import Proto.Internal.Wire.Decode()
+   |
+37 | import Proto.Internal.Wire.Decode qualified as WD
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/TDP.hs:587:33: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int -> IntMap.Key
+      can probably be omitted
+    |
+587 |           [ case IntMap.lookup (fromIntegral b) tagMap of
+    |                                 ^^^^^^^^^^^^
+
+test-integration/Test/TDP.hs:587:33: warning: [GHC-04214] [-Widentities]
+    Call of fromIntegral :: Int -> IntMap.Key
+      can probably be omitted
+    |
+587 |           [ case IntMap.lookup (fromIntegral b) tagMap of
+    |                                 ^^^^^^^^^^^^
+
+[4 of 4] Compiling Main             ( test-regression/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test-tmp/Main.o )
+[16 of 19] Compiling Test.WellKnown   ( test-integration/Test/WellKnown.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/WellKnown.o )
+test-integration/Test/WellKnown.hs:22:24: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘TypeRegistry’
+    from module ‘Proto.Registry’ is redundant
+   |
+22 | import Proto.Registry (TypeRegistry, emptyRegistry, lookupCodec, lookupDecoder, registerMessage)
+   |                        ^^^^^^^^^^^^
+
+[17 of 19] Compiling Test.WellKnownUtil ( test-integration/Test/WellKnownUtil.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/WellKnownUtil.o )
+test-integration/Test/WellKnownUtil.hs:4:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Int’ is redundant
+      except perhaps to import instances from ‘Data.Int’
+    To import instances alone, use: import Data.Int()
+  |
+4 | import Data.Int (Int32, Int64)
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:8:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Text’ is redundant
+      except perhaps to import instances from ‘Data.Text’
+    To import instances alone, use: import Data.Text()
+  |
+8 | import Data.Text qualified as T
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:9:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Time.Clock’ is redundant
+      except perhaps to import instances from ‘Data.Time.Clock’
+    To import instances alone, use: import Data.Time.Clock()
+  |
+9 | import Data.Time.Clock (NominalDiffTime, UTCTime)
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:10:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Data.Time.Clock.POSIX’ is redundant
+      except perhaps to import instances from ‘Data.Time.Clock.POSIX’
+    To import instances alone, use: import Data.Time.Clock.POSIX()
+   |
+10 | import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:11:1: warning: [GHC-66111] [-Wunused-imports]
+    The qualified import of ‘Data.Vector’ is redundant
+      except perhaps to import instances from ‘Data.Vector’
+    To import instances alone, use: import Data.Vector()
+   |
+11 | import Data.Vector qualified as V
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:17:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Google.Protobuf.FieldMask’ is redundant
+      except perhaps to import instances from ‘Proto.Google.Protobuf.FieldMask’
+    To import instances alone, use: import Proto.Google.Protobuf.FieldMask()
+   |
+17 | import Proto.Google.Protobuf.FieldMask
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:19:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Google.Protobuf.Struct’ is redundant
+      except perhaps to import instances from ‘Proto.Google.Protobuf.Struct’
+    To import instances alone, use: import Proto.Google.Protobuf.Struct()
+   |
+19 | import Proto.Google.Protobuf.Struct
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test-integration/Test/WellKnownUtil.hs:23:1: warning: [GHC-66111] [-Wunused-imports]
+    The import of ‘Proto.Google.Protobuf.Wrappers’ is redundant
+      except perhaps to import instances from ‘Proto.Google.Protobuf.Wrappers’
+    To import instances alone, use: import Proto.Google.Protobuf.Wrappers()
+   |
+23 | import Proto.Google.Protobuf.Wrappers
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+[18 of 19] Compiling Test.Wire        ( test-integration/Test/Wire.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Test/Wire.o )
+test-integration/Test/Wire.hs:7:19: warning: [GHC-38856] [-Wunused-imports]
+    The import of ‘Word32’ from module ‘Data.Word’ is redundant
+  |
+7 | import Data.Word (Word32, Word64)
+  |                   ^^^^^^
+
+[19 of 19] Compiling Main             ( test-integration/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test-tmp/Main.o )
+[20 of 20] Linking /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/build/wireform-proto-test/wireform-proto-test
+Running 1 test suites...
+Test suite wireform-proto-test: RUNNING...
+[5 of 5] Linking /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/build/wireform-proto-regression-test/wireform-proto-regression-test
+WARNING: Only one CPU core detected, make sure to compile your test suite with these ghc options:
+         -threaded -rtsopts -with-rtsopts=-N
+         (This is important for correctness as well as speed, as a parallel test suite can find thread safety problems.)
+Tests:
+
+wireform-proto
+  CodeGen Hooks
+    messageOptions extraction
+      ✓ extracts MEOption from message elements                                           0.92 ms
+    Hook context construction
+      ✓ message hook receives correct type name                                           1.44 ms
+      ✓ message hook receives FQ proto name                                               0.17 ms
+      ✓ enum hook receives correct type name                                              0.22 ms
+      ✓ file hook receives module name                                                    9.56 ms
+    Attribute query helpers
+      ✓ lookupAttribute returns Nothing for missing                                       0.01 ms
+      ✓ lookupAttribute finds extension option                                            0.05 ms
+      ✓ type mismatch returns Nothing                                                     0.00 ms
+      ✓ attributeAsFloat                                                                  0.00 ms
+      ✓ attributeAsBool                                                                   0.01 ms
+      ✓ attributeAsAggregate                                                              0.04 ms
+      ✓ attributeAsText                                                                   0.00 ms
+      ✓ attributeAsInt                                                                    0.01 ms
+      ✓ hasAttribute                                                                      0.00 ms
+    THHooks construction
+      ✓ defaultTHHooks is mempty                                                          0.00 ms
+      ✓ thOnEnumAttribute constructs without error                                        0.01 ms
+      ✓ thOnFileAttribute constructs without error                                        0.00 ms
+      ✓ thOnMessageAttribute constructs without error                                     0.00 ms
+      ✓ THHooks compose with <>                                                           0.01 ms
+    Hook composition
+      ✓ mempty produces no extra output                                                   0.20 ms
+      ✓ composed hooks both produce output                                                0.09 ms
+    Attribute-driven hooks
+      ✓ onMessageAttribute does not fire without attribute                                0.07 ms
+      ✓ onEnumAttribute fires with matching option                                        0.10 ms
+      ✓ onFileAttribute fires with matching file option                                   0.03 ms
+      ✓ onMessageAttribute fires when attribute present                                   0.07 ms
+  Well-Known Types
+    Timestamp
+      ✓ roundtrip                                                                         2.15 ms
+        passed for all of 100 inputs.
+      ✓ sized encoding matches                                                            0.04 ms
+      ✓ JSON with nanos                                                                   0.01 ms
+      ✓ JSON nanos trailing zeros trimmed                                                 0.00 ms
+      ✓ JSON canonical RFC 3339                                                           0.03 ms
+      ✓ default is zero-length                                                            0.00 ms
+    Empty
+      ✓ empty roundtrip                                                                   0.00 ms
+    Struct
+      ✓ list value roundtrip                                                              0.04 ms
+      ✓ value null roundtrip                                                              0.00 ms
+      ✓ value number roundtrip                                                            0.00 ms
+      ✓ empty struct roundtrip                                                            0.01 ms
+      ✓ value bool roundtrip                                                              0.00 ms
+      ✓ value string roundtrip                                                            0.01 ms
+    Hashable instances
+      ✓ Timestamp: equal values have equal hashes                                         1.36 ms
+        passed for all of 100 inputs.
+      ✓ Struct: hashable with map field                                                   0.68 ms
+        passed for all of 100 inputs.
+      ✓ Timestamp: different values have different hashes                                 0.01 ms
+      ✓ Duration: hashWithSalt works                                                      0.03 ms
+      ✓ Empty: hashable                                                                   0.00 ms
+      ✓ FieldMask: hashable with vector field                                             1.75 ms
+        passed for all of 100 inputs.
+    FieldMask
+      ✓ roundtrip                                                                         0.04 ms
+    Exact-size encoding
+      ✓ encodeMessageSized matches encodeMessage for Timestamp                            1.20 ms
+        passed for all of 100 inputs.
+      ✓ encodeMessageSized matches encodeMessage for Duration                             1.40 ms
+        passed for all of 100 inputs.
+    Duration
+      ✓ JSON negative                                                                     0.04 ms
+      ✓ JSON canonical seconds                                                            0.03 ms
+      ✓ roundtrip                                                                         1.36 ms
+        passed for all of 100 inputs.
+      ✓ JSON with nanos                                                                   0.01 ms
+    Any
+      ✓ TypeRegistry unknown type returns Nothing                                         0.08 ms
+      ✓ packAnyWithPrefix custom prefix                                                   0.01 ms
+      ✓ unpackAny type mismatch returns Nothing                                           0.00 ms
+      ✓ packAny Timestamp roundtrip                                                       1.24 ms
+        passed for all of 100 inputs.
+      ✓ isMessageType                                                                     0.01 ms
+      ✓ TypeRegistry codec lookup                                                         0.08 ms
+      ✓ packAny Empty                                                                     0.00 ms
+      ✓ packAny Duration roundtrip                                                        1.14 ms
+        passed for all of 100 inputs.
+      ✓ Any wire roundtrip preserves content                                              0.03 ms
+      ✓ typeNameFromUrl strips prefix                                                     0.00 ms
+      ✓ raw Any roundtrip                                                                 8.98 ms
+        passed for all of 100 inputs.
+    Wrappers
+      ✓ BytesValue roundtrip                                                              6.82 ms
+        passed for all of 100 inputs.
+      ✓ DoubleValue roundtrip                                                             1.07 ms
+        passed for all of 100 inputs.
+      ✓ Int32Value roundtrip                                                              1.22 ms
+        passed for all of 100 inputs.
+      ✓ StringValue roundtrip                                                             7.89 ms
+        passed for all of 100 inputs.
+      ✓ FloatValue roundtrip                                                              1.25 ms
+        passed for all of 100 inputs.
+      ✓ Int64Value roundtrip                                                              1.28 ms
+        passed for all of 100 inputs.
+      ✓ BoolValue roundtrip                                                               1.11 ms
+        passed for all of 100 inputs.
+      ✓ UInt64Value roundtrip                                                             1.26 ms
+        passed for all of 100 inputs.
+    SourceContext
+      ✓ roundtrip                                                                         5.26 ms
+        passed for all of 100 inputs.
+  JSON representation helpers
+    Strict Text
+      ✓ .=: / parseFieldMaybe roundtrip                                                   8.32 ms
+        passed for all of 100 inputs.
+    ShortByteString (base64)
+      ✓ roundtrip via Value                                                               8.66 ms
+        passed for all of 100 inputs.
+      ✓ field helper roundtrip                                                            7.67 ms
+        passed for all of 100 inputs.
+    Missing / null field handling
+      ✓ parseShortTextFieldMaybe missing -> Nothing                                       0.01 ms
+      ✓ parseLazyTextFieldMaybe missing -> Nothing                                        0.00 ms
+      ✓ parseShortBytesFieldMaybe missing -> Nothing                                      0.07 ms
+      ✓ parseLazyBytesFieldMaybe missing -> Nothing                                       0.00 ms
+      ✓ parseBytesFieldMaybe null -> Nothing                                              0.01 ms
+      ✓ parseBytesFieldMaybe missing -> Nothing                                           0.00 ms
+      ✓ parseHsStringFieldMaybe missing -> Nothing                                        0.00 ms
+    Strict ByteString (base64)
+      ✓ field helper roundtrip                                                            8.76 ms
+        passed for all of 100 inputs.
+      ✓ encodes as base64 string                                                          0.01 ms
+      ✓ roundtrip via Value                                                               8.34 ms
+        passed for all of 100 inputs.
+    Haskell String
+      ✓ field helper roundtrip                                                            8.38 ms
+        passed for all of 100 inputs.
+    Map representations
+      HashMap
+        ✓ hashMapToJSON preserves entries                                                 0.12 ms
+        ✓ hashMapToJSON roundtrip                                                         5.48 ms
+          passed for all of 100 inputs.
+        ✓ hashMapToJSON empty                                                             0.02 ms
+      Cross-representation consistency
+        ✓ ordMap JSON parses as hashMap and vice versa                                    5.62 ms
+          passed for all of 100 inputs.
+        ✓ ordMap and hashMap produce same JSON                                            6.62 ms
+          passed for all of 100 inputs.
+      ✓ parseHashMapFromJSON non-object -> fail                                           0.06 ms
+      Ordered Map (Map.Map)
+        ✓ ordMapToJSON roundtrip                                                          5.65 ms
+          passed for all of 100 inputs.
+        ✓ ordMapToJSON empty                                                              0.01 ms
+        ✓ ordMapToJSON preserves entries                                                  0.01 ms
+      ✓ parseOrdMapFromJSON non-object -> fail                                            0.05 ms
+    Cross-representation consistency
+      ✓ all bytes reps produce same base64                                                8.33 ms
+        passed for all of 100 inputs.
+      ✓ all text reps produce same JSON string                                            8.67 ms
+        passed for all of 100 inputs.
+    Lazy Text
+      ✓ field helper roundtrip                                                            9.06 ms
+        passed for all of 100 inputs.
+    ShortByteString as text (UTF-8)
+      ✓ field helper roundtrip                                                            9.14 ms
+        passed for all of 100 inputs.
+    Type mismatch errors
+      ✓ parseHsStringFieldMaybe non-string -> fail                                        0.01 ms
+      ✓ parseBytesFieldMaybe non-string -> fail                                           0.05 ms
+      ✓ parseShortTextFieldMaybe non-string -> fail                                       0.00 ms
+      ✓ parseLazyTextFieldMaybe non-string -> fail                                        0.00 ms
+    Lazy ByteString (base64)
+      ✓ roundtrip via Value                                                               9.99 ms
+        passed for all of 100 inputs.
+      ✓ field helper roundtrip                                                            8.62 ms
+        passed for all of 100 inputs.
+  Print & Inspect
+    Exact printing
+      ✓ field options roundtrip                                                           0.15 ms
+      ✓ editions reserved identifiers print unquoted                                      0.10 ms
+      ✓ service roundtrip                                                                 0.13 ms
+      ✓ public import                                                                     0.01 ms
+      ✓ option with extension name roundtrip                                              0.10 ms
+      ✓ oneof roundtrip                                                                   0.10 ms
+      ✓ package declaration                                                               0.00 ms
+      ✓ proto3 reserved names still print quoted                                          0.03 ms
+      ✓ aggregate with list / extension-key values roundtrip                              0.16 ms
+      ✓ syntax proto2                                                                     0.03 ms
+      ✓ reserved roundtrip                                                                0.12 ms
+      ✓ nested message roundtrip                                                          0.06 ms
+      ✓ enum roundtrip                                                                    0.06 ms
+      ✓ map field roundtrip                                                               0.10 ms
+      ✓ streaming rpc roundtrip                                                           0.05 ms
+      ✓ syntax declaration                                                                0.00 ms
+      ✓ editions reserved identifiers roundtrip                                           0.05 ms
+      ✓ nested extend roundtrip                                                           0.06 ms
+      ✓ simple message roundtrip                                                          0.05 ms
+      ✓ extensions with options roundtrip                                                 0.07 ms
+      ✓ import                                                                            0.02 ms
+      ✓ proto2 group roundtrip (desugared to message + field)                             0.08 ms
+      ✓ roundtrip: parse -> print -> parse yields same AST                                0.62 ms
+    AST inspection
+      ✓ allTypeNames                                                                      0.03 ms
+      ✓ referencedTypes                                                                   0.06 ms
+      ✓ nestedMessages                                                                    0.00 ms
+      ✓ messageOneofs                                                                     0.02 ms
+      ✓ allServices                                                                       0.00 ms
+      ✓ findMessage                                                                       0.00 ms
+      ✓ messageFields                                                                     0.01 ms
+      ✓ messageMapFields                                                                  0.00 ms
+      ✓ allMessages finds top-level and nested                                            0.00 ms
+      ✓ summarize                                                                         0.00 ms
+      ✓ allEnums                                                                          0.01 ms
+    Exact printing (byte-for-byte)
+      ✓ preserves a trailing ';' after a message block                                    0.02 ms
+      ✓ preserves extensions options source verbatim                                      0.02 ms
+      ✓ preserves proto2 group source verbatim                                            0.03 ms
+      ✓ preserves stray ';' between and inside declarations                               0.02 ms
+      ✓ reproduces a complex file byte-for-byte                                           0.29 ms
+      ✓ preserves a trailing ';' after enum and service blocks                            0.12 ms
+  RingSink (sendBuilderDirect)
+    ✓ generated StringValue with mixed-width UTF-8 matches the reference encoding        37.92 ms
+      passed for all of 100 inputs.
+    ✓ string field at ring boundaries matches the reference encoding                    107.52 ms
+      passed for all of 100 inputs.
+  Streaming & Lazy Codecs
+    Lazy encoding
+      ✓ encodeMessageLazy matches strict                                                  5.99 ms
+        passed for all of 100 inputs.
+      ✓ encodeMessageLazy matches strict                                                 30.23 ms
+        passed for all of 100 inputs.
+      ✓ encodeMessageLazy matches encodeMessageLazy                                      11.14 ms
+        passed for all of 100 inputs.
+    Incremental decoder
+      ✓ single message fed byte-by-byte                                                  12.38 ms
+        passed for all of 100 inputs.
+      ✓ split at arbitrary byte boundary                                                  7.35 ms
+        passed for all of 100 inputs.
+      ✓ Nothing at start yields IFail                                                     0.01 ms
+      ✓ two messages fed together                                                        13.87 ms
+        passed for all of 100 inputs.
+      ✓ truncated payload                                                                 0.01 ms
+      ✓ truncated varint                                                                  0.05 ms
+      ✓ empty message                                                                     0.00 ms
+      ✓ preserves leftover bytes                                                         11.87 ms
+        passed for all of 100 inputs.
+      ✓ single message fed all at once                                                    6.97 ms
+        passed for all of 100 inputs.
+    Lazy decoding
+      ✓ decodeMessageLazy roundtrip                                                       7.00 ms
+        passed for all of 100 inputs.
+      ✓ decodeMessageLazy empty                                                           0.02 ms
+      ✓ decodeMessageLazy multi-chunk                                                     0.07 ms
+    Stream framing roundtrip
+      ✓ stream decode truncated payload                                                   0.01 ms
+      ✓ stream decode truncated length                                                    0.00 ms
+      ✓ stream roundtrip (no size)                                                       32.03 ms
+        passed for all of 100 inputs.
+      ✓ single-message stream                                                             0.07 ms
+      ✓ empty stream                                                                      0.01 ms
+      ✓ sized stream matches non-sized stream                                            29.05 ms
+        passed for all of 100 inputs.
+      ✓ stream roundtrip (sized)                                                         36.90 ms
+        passed for all of 100 inputs.
+      ✓ stream framing matches manual framing                                            18.44 ms
+        passed for all of 100 inputs.
+  Schema (generated record fields)
+    ✓ generated field names                                                               0.01 ms
+    ✓ record update                                                                       0.05 ms
+    ✓ default value                                                                       0.00 ms
+  Parser
+    Syntax declaration
+      ✓ proto3 syntax                                                                     0.03 ms
+      ✓ default syntax is proto3                                                          0.02 ms
+      ✓ proto2 syntax                                                                     0.01 ms
+    Oneof
+      ✓ oneof definition                                                                  0.06 ms
+    Lexical & grammar conformance
+      ✓ two-hex-digit escape still works (\x41)                                           0.05 ms
+      ✓ identifier prefixed by 'inf' is an identifier, not infinity                       0.02 ms
+      ✓ bare 'true' is still a boolean                                                    0.01 ms
+      ✓ BMP unicode escape (\u00e9)                                                       0.03 ms
+      ✓ bare 'inf' is still infinity                                                      0.01 ms
+      ✓ bare 'nan' is still NaN                                                           0.01 ms
+      ✓ single-hex-digit escape (\xA)                                                     0.03 ms
+      ✓ enum reserved numeric ranges (to / to max)                                        0.04 ms
+      ✓ negative leading-dot float (-.25)                                                 0.05 ms
+      ✓ identifier prefixed by 'true' is an identifier, not a bool                        0.03 ms
+      ✓ trailing-dot float (5.)                                                           0.02 ms
+      ✓ nested extension option name (a).(b).c                                            0.02 ms
+      ✓ leading-dot float (.5)                                                            0.03 ms
+      ✓ full unicode escape (\U0001F600)                                                  0.02 ms
+    Complex proto files
+      ✓ full proto file                                                                   0.18 ms
+    Comments
+      ✓ line comments                                                                     0.03 ms
+      ✓ block comments                                                                    0.02 ms
+    Message definitions
+      ✓ simple message with scalar fields                                                 0.03 ms
+      ✓ repeated fields                                                                   0.12 ms
+      ✓ nested message                                                                    0.03 ms
+      ✓ map fields                                                                        0.02 ms
+      ✓ message with all scalar types                                                     0.10 ms
+    Rich aggregate option values
+      ✓ extension keys keep their brackets                                                0.03 ms
+      ✓ Any-URL keys are accepted                                                         0.02 ms
+      ✓ angle-bracket message values are accepted                                         0.09 ms
+      ✓ list values desugar to repeated key/value pairs                                   0.04 ms
+    Reserved
+      ✓ reserved field names                                                              0.02 ms
+      ✓ reserved field numbers                                                            0.02 ms
+    Service definitions
+      ✓ streaming rpc                                                                     0.02 ms
+      ✓ simple service                                                                    0.03 ms
+    Enum definitions
+      ✓ enum with allow_alias option                                                      0.04 ms
+      ✓ simple enum                                                                       0.02 ms
+    Options and annotations
+      ✓ file-level option                                                                 0.02 ms
+      ✓ aggregate option value                                                            0.02 ms
+      ✓ field options                                                                     0.03 ms
+      ✓ custom extension option                                                           0.02 ms
+    Editions reserved identifiers
+      ✓ message reserved accepts bare identifiers                                         0.02 ms
+      ✓ enum reserved accepts a bare identifier                                           0.02 ms
+    Package declaration
+      ✓ dotted package                                                                    0.02 ms
+      ✓ simple package                                                                    0.01 ms
+    Nested extends
+      ✓ group inside a top-level extend hoists a top-level message                        0.03 ms
+      ✓ group inside a nested extend hoists the group message                             0.04 ms
+      ✓ extend inside a message body is retained as MEExtend                              0.02 ms
+    Empty statements (trailing/stray semicolons)
+      ✓ trailing ';' after an extend block                                                0.02 ms
+      ✓ stray ';' inside a service body and after an rpc block                            0.04 ms
+      ✓ trailing ';' after a service block                                                0.02 ms
+      ✓ trailing ';' after an enum block                                                  0.02 ms
+      ✓ stray ';' between top-level declarations                                          0.03 ms
+      ✓ stray ';' between message elements                                                0.02 ms
+      ✓ trailing ';' after a oneof block                                                  0.03 ms
+      ✓ trailing ';' after a message block (protoc tolerates '};')                        0.02 ms
+      ✓ stray ';' inside an enum body                                                     0.02 ms
+      ✓ trailing ';' after a nested message inside a message body                         0.04 ms
+      ✓ still rejects a genuinely missing closing brace                                   0.02 ms
+    Groups and extension-range options
+      ✓ extensions without options still parse (empty option list)                        0.02 ms
+      ✓ extensions with a verification option                                             0.02 ms
+      ✓ unlabeled group parses                                                            0.03 ms
+      ✓ extensions with a declaration aggregate option                                    0.03 ms
+      ✓ proto2 group desugars to a nested message plus a field                            0.02 ms
+      ✓ a field whose name starts with 'group' is still a field                           0.02 ms
+    Error message quality
+      ✓ invalid syntax version gives clear message                                        0.04 ms
+      ✓ error messages include source context with line numbers                           0.04 ms
+      ✓ missing message name gives clear message                                          0.03 ms
+      ✓ missing field number gives helpful message                                        0.04 ms
+      ✓ error output rejects invalid inputs                                               0.02 ms
+      ✓ missing comma in map type gives clear message                                     0.04 ms
+      ✓ unclosed string literal gives clear message                                       0.01 ms
+      ✓ missing equals sign gives helpful message                                         0.02 ms
+      ✓ missing semicolon points to correct location                                      0.03 ms
+      ✓ unexpected token at top level gives clear message                                 0.02 ms
+    Import declarations
+      ✓ public import                                                                     0.01 ms
+      ✓ simple import                                                                     0.02 ms
+  Proto.Decode.Collect
+    ✓ clean message: no issues, value decoded                                             0.01 ms
+    ✓ truncated top-level field is reported structurally                                  0.00 ms
+    ✓ invalid UTF-8 string field is reported with its path                                0.01 ms
+  Proto.IDL.Parser.Resolver
+    ✓ circular import detected                                                            1.44 ms
+    ✓ missing import returns FileNotFound                                                 0.76 ms
+    ✓ getBundledIncludeDir returns valid path                                             0.03 ms
+    ✓ resolve proto with subdirectory import                                              1.76 ms
+    ✓ resolve simple proto with no imports                                                0.69 ms
+    ✓ resolve proto with local import                                                     1.01 ms
+    ✓ types from imported files available via registry                                    1.94 ms
+    ✓ well-known import google/protobuf/timestamp.proto resolves                          1.60 ms
+  Well-Known Type Utilities
+    Duration.Util
+      ✓ absDuration of negative                                                           0.06 ms
+      ✓ fromNanos . toNanos is identity                                                   3.37 ms
+        passed for all of 100 inputs.
+      ✓ durationFromSeconds                                                               0.08 ms
+      ✓ isValidDuration valid                                                             0.00 ms
+      ✓ addDurations                                                                      0.00 ms
+      ✓ Ord is consistent with compareDuration                                            2.67 ms
+        passed for all of 100 inputs.
+      ✓ durationToMicros                                                                  0.01 ms
+      ✓ durationFromMillis                                                                0.00 ms
+      ✓ durationFromMillis negative                                                       0.03 ms
+      ✓ NominalDiffTime roundtrip                                                         1.86 ms
+        passed for all of 100 inputs.
+      ✓ durationToMillis                                                                  0.01 ms
+      ✓ isValidDuration invalid range                                                     0.03 ms
+      ✓ durationToNanos                                                                   0.00 ms
+      ✓ normalizeDuration                                                                 0.00 ms
+      ✓ isValidDuration invalid sign mismatch                                             0.01 ms
+      ✓ durationFromMicros                                                                0.00 ms
+      ✓ durationFromNanos                                                                 0.00 ms
+      ✓ negateDuration                                                                    0.01 ms
+    Wrappers.Util
+      ✓ UInt32Value roundtrip                                                             1.29 ms
+        passed for all of 100 inputs.
+      ✓ DoubleValue roundtrip                                                             1.35 ms
+        passed for all of 100 inputs.
+      ✓ BytesValue roundtrip                                                              4.66 ms
+        passed for all of 100 inputs.
+      ✓ Maybe conversions                                                                 0.04 ms
+      ✓ StringValue roundtrip                                                            10.12 ms
+        passed for all of 100 inputs.
+      ✓ FloatValue roundtrip                                                              1.46 ms
+        passed for all of 100 inputs.
+      ✓ BoolValue roundtrip                                                               1.92 ms
+        passed for all of 100 inputs.
+      ✓ Int32Value roundtrip                                                              1.40 ms
+        passed for all of 100 inputs.
+      ✓ Int64Value roundtrip                                                              1.27 ms
+        passed for all of 100 inputs.
+      ✓ UInt64Value roundtrip                                                             1.52 ms
+        passed for all of 100 inputs.
+    Timestamp.Util
+      ✓ epoch is zero                                                                     0.01 ms
+      ✓ specific POSIX time                                                               0.01 ms
+      ✓ addDuration then subtract gives identity                                          3.07 ms
+        passed for all of 100 inputs.
+      ✓ isValidTimestamp valid                                                            0.01 ms
+      ✓ addDuration                                                                       0.12 ms
+      ✓ POSIXTime roundtrip                                                               2.54 ms
+        passed for all of 100 inputs.
+      ✓ subtractTimestamps                                                                0.02 ms
+      ✓ isValidTimestamp invalid nanos                                                    0.05 ms
+      ✓ UTCTime roundtrip                                                                 2.19 ms
+        passed for all of 100 inputs.
+      ✓ Ord is consistent with compareTimestamp                                           2.59 ms
+        passed for all of 100 inputs.
+    FieldMask.Util
+      ✓ isEmpty                                                                           0.07 ms
+      ✓ contains parent covers child                                                      0.01 ms
+      ✓ union deduplicates                                                                0.02 ms
+      ✓ intersection with parent coverage                                                 0.00 ms
+      ✓ toSnakeCase                                                                       0.02 ms
+      ✓ normalize sorts and deduplicates                                                  0.00 ms
+      ✓ contains direct                                                                   0.00 ms
+      ✓ isValid accepts sub-paths when top-level matches                                  0.01 ms
+      ✓ allFieldMask for Timestamp                                                        0.00 ms
+      ✓ toCamelCase                                                                       0.02 ms
+      ✓ canonicalForm                                                                     0.00 ms
+      ✓ fromPaths / toPaths                                                               0.00 ms
+      ✓ subtractMask                                                                      0.01 ms
+      ✓ union removes sub-paths                                                           0.00 ms
+      ✓ isValid against Timestamp                                                         0.00 ms
+      ✓ intersection                                                                      0.00 ms
+      ✓ normalize removes sub-paths                                                       0.03 ms
+    Struct.Util
+      ✓ Aeson roundtrip via Value                                                         0.02 ms
+      ✓ fromPairs / toMap                                                                 0.00 ms
+      ✓ stringValue extraction                                                            0.01 ms
+      ✓ listValue extraction                                                              0.00 ms
+      ✓ numberValue extraction                                                            0.01 ms
+      ✓ nullValue extraction                                                              0.00 ms
+      ✓ structValue extraction                                                            0.00 ms
+      ✓ boolValue extraction                                                              0.01 ms
+      ✓ Aeson roundtrip via Struct                                                        0.01 ms
+  Roundtrip Encoding/Decoding
+    Packed encoding helpers
+      ✓ packed fixed32 roundtrip                                                          6.24 ms
+        passed for all of 100 inputs.
+      ✓ packed sint32 roundtrip                                                           9.57 ms
+        passed for all of 100 inputs.
+      ✓ packed double roundtrip                                                           4.40 ms
+        passed for all of 100 inputs.
+      ✓ packed varint roundtrip                                                           5.71 ms
+        passed for all of 100 inputs.
+    Multi-field message roundtrip
+      ✓ multi-field roundtrip                                                             7.73 ms
+        passed for all of 100 inputs.
+    Hand-crafted message roundtrip
+      ✓ nested message encode/decode                                                      0.02 ms
+      ✓ message with missing optional fields                                              0.05 ms
+      ✓ packed repeated field                                                             0.01 ms
+      ✓ simple message encode/decode                                                      0.00 ms
+      ✓ message with repeated field                                                       0.01 ms
+      ✓ message with unknown fields                                                       0.00 ms
+    Unknown field preservation
+      ✓ capture and re-encode unknown fields                                              0.03 ms
+    Size calculation
+      ✓ tagSize correct                                                                   1.69 ms
+        passed for all of 100 inputs.
+      ✓ varintSize correct                                                                1.49 ms
+        passed for all of 100 inputs.
+    Field type roundtrips
+      ✓ fixed32 field roundtrip                                                           1.33 ms
+        passed for all of 100 inputs.
+      ✓ bytes field roundtrip                                                            24.26 ms
+        passed for all of 100 inputs.
+      ✓ string field roundtrip                                                           40.65 ms
+        passed for all of 100 inputs.
+      ✓ int32 field roundtrip                                                             1.22 ms
+        passed for all of 100 inputs.
+    MessageEncode/MessageDecode typeclass roundtrip
+      ✓ TestMsg roundtrip                                                                 6.06 ms
+        passed for all of 100 inputs.
+      ✓ TestMsg size always matches                                                      11.65 ms
+        passed for all of 100 inputs.
+      ✓ TestMsg with submessage roundtrip                                                 4.60 ms
+        passed for all of 100 inputs.
+      ✓ TestMsg size calculation matches encoding                                         0.02 ms
+    Lazy submessage decoding
+      ✓ lazy message captures bytes                                                       0.04 ms
+    SizedBuilder (fused size+builder)
+      ✓ sizedFieldString size matches                                                    10.76 ms
+        passed for all of 100 inputs.
+      ✓ sizedFieldVarint size matches                                                     1.73 ms
+        passed for all of 100 inputs.
+      ✓ sizedFieldDouble size matches                                                     1.81 ms
+        passed for all of 100 inputs.
+      ✓ sizedFieldBool size matches                                                       2.36 ms
+        passed for all of 100 inputs.
+      ✓ sizedFieldMessage size matches                                                    4.02 ms
+        passed for all of 100 inputs.
+  Dynamic Schema-Driven Decoder
+    Packed field optimizations
+      ✓ packed sint64 pre-allocated path                                                  6.08 ms
+        passed for all of 100 inputs.
+      ✓ packed varint single-byte fast path                                              10.07 ms
+        passed for all of 100 inputs.
+      ✓ packed double bulk memcpy path                                                    7.85 ms
+        passed for all of 100 inputs.
+      ✓ packed sint32 pre-allocated path                                                  7.77 ms
+        passed for all of 100 inputs.
+      ✓ packed varint multi-byte values                                                   5.30 ms
+        passed for all of 100 inputs.
+      ✓ packed float bulk memcpy path                                                     8.82 ms
+        passed for all of 100 inputs.
+      ✓ packed fixed32 bulk memcpy path                                                   9.33 ms
+        passed for all of 100 inputs.
+      ✓ packed fixed64 bulk memcpy path                                                  10.31 ms
+        passed for all of 100 inputs.
+    withTagM CPS dispatch
+      ✓ withTagM at EOF returns kEOF                                                      0.02 ms
+      ✓ map entry decode via withTagM                                                     0.05 ms
+      ✓ map entry with reversed field order                                               0.01 ms
+      ✓ withTagM dispatches correctly on wire type                                        0.00 ms
+      ✓ withTagM on varint field                                                          0.01 ms
+    SWAR UTF-8 validation
+      ✓ empty is valid                                                                    0.00 ms
+      ✓ valid 3-byte UTF-8                                                                0.00 ms
+      ✓ long ASCII string                                                                 0.00 ms
+      ✓ invalid: bare continuation byte                                                   0.00 ms
+      ✓ invalid: truncated 3-byte                                                         0.00 ms
+      ✓ invalid: truncated 2-byte                                                         0.01 ms
+      ✓ all generated unicode text is valid                                              33.72 ms
+        passed for all of 100 inputs.
+      ✓ invalid: overlong 2-byte                                                          0.02 ms
+      ✓ invalid: byte 0xFF                                                                0.05 ms
+      ✓ invalid: surrogate                                                                0.00 ms
+      ✓ valid 4-byte UTF-8                                                                0.00 ms
+      ✓ ASCII is valid                                                                    0.00 ms
+      ✓ valid 2-byte UTF-8                                                                0.01 ms
+      ✓ mixed ASCII and multibyte                                                         0.00 ms
+    Core interpreter
+      ✓ last value wins for scalar fields                                                 0.03 ms
+      ✓ single varint field                                                               0.00 ms
+      ✓ unknown fields are skipped                                                        0.02 ms
+      ✓ fields out of order                                                               0.00 ms
+      ✓ multiple fields in order                                                          0.00 ms
+      ✓ fixed32 field                                                                     0.01 ms
+      ✓ empty message                                                                     0.00 ms
+      ✓ multiple varint fields roundtrip                                                  1.88 ms
+        passed for all of 100 inputs.
+      ✓ fixed64 field                                                                     0.01 ms
+      ✓ varint field roundtrip through TDP                                                1.32 ms
+        passed for all of 100 inputs.
+    Compilation from schema
+      ✓ compiled table decodes matching wire data                                         0.08 ms
+      ✓ compileParseTable produces non-empty table                                        0.00 ms
+      ✓ compiled table roundtrips with encodeMessage                                      3.40 ms
+        passed for all of 100 inputs.
+      ✓ TagLUT has entries for small field numbers                                        0.01 ms
+    Wire FFI (SWAR)
+      ✓ countPackedVarints single byte                                                    0.00 ms
+      ✓ countPackedVarints matches manual count                                           6.09 ms
+        passed for all of 100 inputs.
+      ✓ countPackedVarints empty                                                          0.01 ms
+      ✓ countPackedVarints mixed                                                          0.05 ms
+      ✓ countPackedVarints all single byte                                                0.00 ms
+      ✓ packedAllSingleByte all small                                                     0.00 ms
+      ✓ packedAllSingleByte correct for small values                                      8.88 ms
+        passed for all of 100 inputs.
+      ✓ packedAllSingleByte false when large varint present                               4.05 ms
+        passed for all of 100 inputs.
+      ✓ packedAllSingleByte empty                                                         0.06 ms
+      ✓ countPackedVarints two-byte varints                                               0.00 ms
+      ✓ packedAllSingleByte has continuation                                              0.00 ms
+  Standard Options
+    Cross-language packages
+      ✓ extractLanguagePackages                                                           0.08 ms
+    Deprecation helpers
+      ✓ deprecatedFields                                                                  0.06 ms
+      ✓ isDeprecated                                                                      0.00 ms
+    Field options
+      ✓ json_name                                                                         0.04 ms
+      ✓ deprecated field                                                                  0.02 ms
+    File options
+      ✓ defaults when no options                                                          0.01 ms
+      ✓ optimize_for                                                                      0.04 ms
+      ✓ deprecated file                                                                   0.01 ms
+      ✓ java_package                                                                      0.02 ms
+      ✓ go_package                                                                        0.01 ms
+    Enum options
+      ✓ allow_alias                                                                       0.05 ms
+  Code Generation
+    Annotations
+      ✓ lookup simple option                                                              0.02 ms
+      ✓ extension option lookup                                                           0.02 ms
+      ✓ hasOption check                                                                   0.02 ms
+      ✓ typed option extraction                                                           0.00 ms
+      ✓ extract custom annotation                                                         0.04 ms
+    Code generation from parsed proto
+      ✓ generates enum                                                                    0.10 ms
+      ✓ proto3 optional scalar gets Maybe wrapper                                         0.21 ms
+      ✓ generates module for simple message                                               0.13 ms
+    Type name conversion
+      ✓ field name no underscore                                                          0.00 ms
+      ✓ enum constructor                                                                  0.01 ms
+      ✓ simple name                                                                       0.00 ms
+      ✓ field name conversion                                                             0.01 ms
+      ✓ already capitalized                                                               0.00 ms
+      ✓ module name                                                                       0.00 ms
+  Wire Format
+    Error handling
+      ✓ unexpected end on fixed64                                                         0.01 ms
+      ✓ unexpected end on varint                                                          0.00 ms
+      ✓ extra bytes after decode                                                          0.00 ms
+      ✓ unexpected end on fixed32                                                         0.01 ms
+    ZigZag encoding
+      ✓ sint64 roundtrip                                                                  1.62 ms
+        passed for all of 100 inputs.
+      ✓ zigzag 1                                                                          0.01 ms
+      ✓ zigzag32 roundtrip                                                                1.64 ms
+        passed for all of 100 inputs.
+      ✓ zigzag -1                                                                         0.01 ms
+      ✓ sint32 roundtrip                                                                  1.34 ms
+        passed for all of 100 inputs.
+      ✓ zigzag -2                                                                         0.01 ms
+      ✓ zigzag64 roundtrip                                                                1.27 ms
+        passed for all of 100 inputs.
+      ✓ zigzag 0                                                                          0.04 ms
+    Length-delimited
+      ✓ text roundtrip                                                                   13.90 ms
+        passed for all of 100 inputs.
+      ✓ zero-copy bytestring                                                              0.06 ms
+      ✓ bytestring roundtrip                                                             33.55 ms
+        passed for all of 100 inputs.
+    Protobuf spec conformance vectors
+      Nested messages (length-delimited)
+        ✓ 3-level nesting roundtrip                                                       0.02 ms
+      Unknown field skipping
+        ✓ skip unknown length-delimited                                                   0.00 ms
+        ✓ skip unknown fixed64                                                            0.05 ms
+        ✓ skip unknown fixed32                                                            0.00 ms
+        ✓ skip unknown varint field                                                       0.00 ms
+      Tag format correctness
+        ✓ field 1 32-bit = 0x0D                                                           0.01 ms
+        ✓ field 2 varint = 0x10                                                           0.00 ms
+        ✓ field 1 64-bit = 0x09                                                           0.01 ms
+        ✓ field 1 length-delimited = 0x0A                                                 0.00 ms
+        ✓ field 16 varint = 0x80 0x01 (2-byte tag)                                        0.00 ms
+        ✓ field 15 varint = 0x78                                                          0.01 ms
+        ✓ field 1 varint = 0x08                                                           0.00 ms
+      ZigZag spec compliance
+        ✓ zigzag(1) = 2                                                                   0.01 ms
+        ✓ zigzag(-2) = 3                                                                  0.00 ms
+        ✓ zigzag64(1) = 2                                                                 0.01 ms
+        ✓ zigzag(-1) = 1                                                                  0.00 ms
+        ✓ zigzag(0) = 0                                                                   0.00 ms
+        ✓ zigzag(-2147483648) = 4294967295                                                0.01 ms
+        ✓ zigzag64(max int64) roundtrip                                                   0.00 ms
+        ✓ zigzag64(0) = 0                                                                 0.00 ms
+        ✓ zigzag(2147483647) = 4294967294                                                 0.01 ms
+        ✓ zigzag64(-1) = 1                                                                0.00 ms
+        ✓ zigzag64(min int64) roundtrip                                                   0.00 ms
+      Varint edge cases
+        ✓ varint 1 = [0x01]                                                               0.01 ms
+        ✓ negative int32 -150 via zigzag                                                  0.00 ms
+        ✓ negative int32 as 10-byte varint                                                0.00 ms
+        ✓ varint 0 = [0x00]                                                               0.01 ms
+        ✓ varint 150 = [0x96, 0x01]                                                       0.00 ms
+        ✓ varint max uint64 (10 bytes)                                                    0.01 ms
+      Packed repeated fields
+        ✓ packed fixed32 [1,2]                                                            0.00 ms
+        ✓ packed varints [1,2,3]                                                          0.01 ms
+        ✓ empty packed = just length 0                                                    0.00 ms
+      Fixed-width exact bytes
+        ✓ fixed32 little-endian 1                                                         0.00 ms
+        ✓ fixed32 little-endian 256                                                       0.01 ms
+        ✓ fixed64 little-endian 1                                                         0.00 ms
+        ✓ double 0.0 = 8 zero bytes                                                       0.00 ms
+        ✓ float 0.0 = [0,0,0,0]                                                           0.01 ms
+    Fixed-width encoding
+      ✓ double roundtrip                                                                  1.16 ms
+        passed for all of 100 inputs.
+      ✓ fixed32 roundtrip                                                                 1.79 ms
+        passed for all of 100 inputs.
+      ✓ float roundtrip                                                                   1.38 ms
+        passed for all of 100 inputs.
+      ✓ fixed64 roundtrip                                                                 1.23 ms
+        passed for all of 100 inputs.
+    Skip unknown fields
+      ✓ skip varint                                                                       0.05 ms
+      ✓ skip fixed64                                                                      0.00 ms
+      ✓ skip fixed32                                                                      0.00 ms
+      ✓ skip length-delimited                                                             0.01 ms
+    Tag encoding
+      ✓ tag field 1 varint                                                                0.00 ms
+      ✓ tag field 2 varint                                                                0.00 ms
+      ✓ tag field 1 length-delimited                                                      0.01 ms
+      ✓ tag roundtrip                                                                     1.69 ms
+        passed for all of 100 inputs.
+    Varint encoding/decoding
+      ✓ decode 300                                                                        0.04 ms
+      ✓ encode 127                                                                        0.00 ms
+      ✓ decode 1                                                                          0.01 ms
+      ✓ varint size bound                                                                 1.28 ms
+        passed for all of 100 inputs.
+      ✓ varint roundtrip                                                                  1.38 ms
+        passed for all of 100 inputs.
+      ✓ encode 16384                                                                      0.01 ms
+      ✓ encode 128                                                                        0.05 ms
+      ✓ encode 0                                                                          0.03 ms
+      ✓ decode 0                                                                          0.01 ms
+      ✓ encode 300                                                                        0.03 ms
+      ✓ encode 1                                                                          0.00 ms
+  Proto.Lens (record field access)
+    ✓ update via record syntax                                                            0.00 ms
+    ✓ read timestampNanos                                                                 0.01 ms
+    ✓ read timestampSeconds                                                               0.00 ms
+    ✓ default values                                                                      0.00 ms
+  Schema Compatibility
+    Transitive compatibility
+      ✓ checkCompatAll with multiple versions                                             0.10 ms
+      ✓ transitive fails if any version is incompatible                                   0.04 ms
+    Enum compatibility
+      ✓ removing enum value breaks backward                                               0.08 ms
+      ✓ adding enum value warns for forward                                               0.04 ms
+      ✓ renaming enum value warns                                                         0.03 ms
+    NONE level
+      ✓ NONE always passes                                                                0.00 ms
+    FULL compatibility
+      ✓ adding optional field is full compatible                                          0.05 ms
+      ✓ removing field without reserving breaks full                                      0.03 ms
+    Field name changes
+      ✓ renaming a field warns                                                            0.03 ms
+    Complex schema evolution
+      ✓ safe evolution: add fields, reserve removed                                       0.07 ms
+    FORWARD compatibility
+      ✓ adding field is forward compatible (old ignores new)                              0.02 ms
+      ✓ removing field is forward compatible                                              0.02 ms
+      ✓ type change (incompatible wire) breaks forward                                    0.03 ms
+    BACKWARD compatibility
+      ✓ changing between wire-compatible types warns                                      0.03 ms
+      ✓ adding required field breaks backward                                             0.01 ms
+      ✓ removing field with reservation is backward compatible                            0.04 ms
+      ✓ adding optional field is backward compatible                                      0.01 ms
+      ✓ removing field without reserving breaks backward                                  0.00 ms
+      ✓ changing field type (incompatible wire) breaks backward                           0.03 ms
+      ✓ identical schemas are compatible                                                  0.02 ms
+
+  Examples:                     11715
+  Passed:                       528
+  Failed:                       0
+  Sum of test runtimes:         0.96 seconds
+  Test suite took:              0.96 seconds
+
+Test suite wireform-proto-test: PASS
+Test suite logged to:
+/private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-test/opt/test/wireform-proto-0.3.0.0-wireform-proto-test.log
+1 of 1 test suites (1 of 1 test cases) passed.
+Configuring test suite 'wireform-proto-derive-test' for wireform-proto-0.3.0.0...
+Running 1 test suites...
+Test suite wireform-proto-regression-test: RUNNING...
+WARNING: Only one CPU core detected, make sure to compile your test suite with these ghc options:
+         -threaded -rtsopts -with-rtsopts=-N
+         (This is important for correctness as well as speed, as a parallel test suite can find thread safety problems.)
+Tests:
+
+Editions field presence
+  ✓ standalone codegen preserves every explicitly present scalar default           0.30 ms
+  ✓ loadProto preserves every explicitly present scalar default                    0.12 ms
+  ✓ repeated, map, oneof and nested fields retain their wire shapes                0.19 ms
+  ✓ file and field overrides, aggregate options and nested messages agree          0.15 ms
+  ✓ committed standalone fixtures exactly match the generator                      7.07 ms
+  ✓ absent and explicitly zero fields remain distinct in both generators           0.06 ms
+  ✓ merge preserves an explicitly present zero over a nonzero value                0.03 ms
+  ✓ does not silently accept unsupported LEGACY_REQUIRED presence                  0.07 ms
+ProtoJSON quoted numbers
+  ✓ rejects whitespace, trailing junk, noncanonical sentinels and overflow         0.05 ms
+  ✓ optional and oneof floating fields use the same number grammar                 0.04 ms
+  ✓ retains canonical NaN/Infinity strings                                         0.00 ms
+  ✓ runtime float/double and int64 helpers accept quoted exponents                 0.02 ms
+  ✓ generated Float and Double accept e/E and signed exponents                     0.01 ms
+
+  Passed:                       13
+  Failed:                       0
+  Sum of test runtimes:         0.01 seconds
+  Test suite took:              0.01 seconds
+
+Test suite wireform-proto-regression-test: PASS
+Test suite logged to:
+/private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-regression-test/opt/test/wireform-proto-0.3.0.0-wireform-proto-regression-test.log
+1 of 1 test suites (1 of 1 test cases) passed.
+Preprocessing test suite 'wireform-proto-derive-test' for wireform-proto-0.3.0.0...
+Building test suite 'wireform-proto-derive-test' for wireform-proto-0.3.0.0...
+[ 1 of 19] Compiling Test.Proto.Derive.AutoTypes ( test/Test/Proto/Derive/AutoTypes.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/AutoTypes.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/AutoTypes.dyn_o )
+[ 2 of 19] Compiling Test.Proto.Derive.AutoInstances ( test/Test/Proto/Derive/AutoInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/AutoInstances.o )
+[ 3 of 19] Compiling Test.Proto.Derive.Auto ( test/Test/Proto/Derive/Auto.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Auto.o )
+[ 4 of 19] Compiling Test.Proto.Derive.OneofInstances ( test/Test/Proto/Derive/OneofInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/OneofInstances.o )
+[ 5 of 19] Compiling Test.Proto.Derive.Oneof ( test/Test/Proto/Derive/Oneof.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Oneof.o )
+[ 6 of 19] Compiling Test.Proto.Derive.RegressionTypes ( test/Test/Proto/Derive/RegressionTypes.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RegressionTypes.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RegressionTypes.dyn_o )
+[ 7 of 19] Compiling Test.Proto.Derive.RegressionInstances ( test/Test/Proto/Derive/RegressionInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RegressionInstances.o )
+[ 8 of 19] Compiling Test.Proto.Derive.Golden ( test/Test/Proto/Derive/Golden.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Golden.o )
+[ 9 of 19] Compiling Test.Proto.Derive.RichTypes ( test/Test/Proto/Derive/RichTypes.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RichTypes.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RichTypes.dyn_o )
+[10 of 19] Compiling Test.Proto.Derive.RichInstances ( test/Test/Proto/Derive/RichInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/RichInstances.o )
+[11 of 19] Compiling Test.Proto.Derive.TopEnumInstances ( test/Test/Proto/Derive/TopEnumInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TopEnumInstances.o )
+test/Test/Proto/Derive/TopEnumInstances.hs:26:1: warning: [GHC-90177] [-Worphans]
+    Orphan class instance: instance Given ExtensionRegistry
+    Suggested fix:
+      Move the instance declaration to the module of the class or of the type, or
+      wrap the type with a newtype and declare the instance on the new type.
+   |
+26 | instance Given ExtensionRegistry where
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+[12 of 19] Compiling Test.Proto.Derive.TopEnum ( test/Test/Proto/Derive/TopEnum.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TopEnum.o )
+[13 of 19] Compiling Test.Proto.Derive.Metadata ( test/Test/Proto/Derive/Metadata.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Metadata.o )
+[14 of 19] Compiling Test.Proto.Derive.TranslatedTypes ( test/Test/Proto/Derive/TranslatedTypes.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TranslatedTypes.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TranslatedTypes.dyn_o )
+[15 of 19] Compiling Test.Proto.Derive.TranslatedInstances ( test/Test/Proto/Derive/TranslatedInstances.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/TranslatedInstances.o )
+[16 of 19] Compiling Test.Proto.Derive.Types ( test/Test/Proto/Derive/Types.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Types.o, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Types.dyn_o )
+[17 of 19] Compiling Test.Proto.Derive.Instances ( test/Test/Proto/Derive/Instances.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive/Instances.o )
+[18 of 19] Compiling Test.Proto.Derive ( test/Test/Proto/Derive.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Test/Proto/Derive.o )
+[19 of 19] Compiling Main             ( test/Main.hs, /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test-tmp/Main.o )
+[20 of 20] Linking /private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/build/wireform-proto-derive-test/wireform-proto-derive-test
+Running 1 test suites...
+Test suite wireform-proto-derive-test: RUNNING...
+WARNING: Only one CPU core detected, make sure to compile your test suite with these ghc options:
+         -threaded -rtsopts -with-rtsopts=-N
+         (This is important for correctness as well as speed, as a parallel test suite can find thread safety problems.)
+Tests:
+
+wireform-proto:Derive
+  Proto.TH.Derive
+    ✓ Profile (oneof): unset oneof round-trips                                     0.17 ms
+    ✓ regression: single RegItem matches BridgeRegItem bytes                       0.07 ms
+    ✓ Tagged (map<string, string>): three entries round-trip                       0.14 ms
+    ✓ Profile (oneof): AvatarBlob variant round-trips                              0.07 ms
+    ✓ regression: empty RegInventory matches BridgeRegInventory bytes              0.48 ms
+    ✓ Profile (oneof): later variant wins on the wire                              0.01 ms
+    ✓ Inventory (Vector-repeated submessages): empty round-trips                   0.04 ms
+    ✓ Maybe Address absent skips field                                             0.03 ms
+    ✓ Profile (oneof): AvatarSeed variant round-trips                              0.00 ms
+    ✓ Painting (enum field): zero-valued enum is skipped                           0.02 ms
+    ✓ Painting (enum field): non-default round-trips                               0.01 ms
+    ✓ regression: name-only RegInventory matches                                   0.01 ms
+    ✓ Profile (oneof): AvatarUrl variant round-trips                               0.01 ms
+    ✓ ZigZag override on negative sint32                                           0.01 ms
+    ✓ Tagged (map<string, string>): empty map round-trips                          0.00 ms
+    ✓ LooseInventory (list-repeated strings): preserves order                      0.03 ms
+    ✓ scalar fields round-trip                                                     0.01 ms
+    ✓ default User round-trips                                                     0.00 ms
+    ✓ deriveProtoFromTranslated: round-trip preserves UserT                        0.05 ms
+    ✓ deriveProtoFromTranslated: byte-identical to deriveProto                     0.04 ms
+    ✓ Painting (enum field): default round-trips                                   0.00 ms
+    ✓ regression: repeated submessages produce identical bytes                     0.01 ms
+    ✓ fixed32 override on uint32                                                   0.01 ms
+    ✓ Inventory (Vector-repeated submessages): three elements                      0.00 ms
+    ✓ Maybe Address present round-trips                                            0.00 ms
+  Proto.TH oneof bridge
+    ✓ later variant on the wire wins (proto3 oneof semantics)                      0.03 ms
+    ✓ choice_url variant round-trips                                               0.04 ms
+    ✓ choice_seed variant round-trips                                              0.02 ms
+    ✓ choice_blob variant round-trips                                              0.01 ms
+    ✓ no choice variant set: round-trips empty payload                             0.03 ms
+    ✓ choice_inner submessage variant round-trips                                  0.01 ms
+    ✓ label only: round-trips                                                      0.01 ms
+  loadProto satellite instances
+    ProtoEnum (Status)
+      ✓ primary names round-trip through to/fromProtoEnumValue                     0.06 ms
+      ✓ protoEnumValues lists every declared value                                 0.08 ms
+      ✓ fully qualified protoEnumName                                              0.02 ms
+    Aeson.ToJSON / FromJSON for messages (camelCase keys)
+      ✓ Status enum FromJSON accepts both name and number                          0.02 ms
+      ✓ Account ToJSON / FromJSON round-trip                                       0.12 ms
+      ✓ non-default Account emits both fields with camelCase keys                  0.00 ms
+      ✓ Status enum encodes as its primary name string                             0.01 ms
+      ✓ PackedBag with empty bagNums encodes to {} (proto3-canonical)              0.01 ms
+      ✓ default Account encodes to {} (proto3 canonical: defaults skipped)         0.00 ms
+      ✓ PackedBag ToJSON / FromJSON round-trip                                     2.61 ms
+    Hashable
+      ✓ different Accounts hash differently (sanity)                               0.01 ms
+      ✓ equal Accounts hash equal                                                  0.03 ms
+      ✓ PackedBag hashes survive vector permutation differences                    0.00 ms
+      ✓ Status hashes match its proto wire number                                  0.00 ms
+    ProtoMessage
+      ✓ Account field descriptors expose names + numbers                           0.02 ms
+      ✓ PackedBag schema describes a repeated int32                                0.01 ms
+      ✓ Account name + package + default                                           0.01 ms
+      ✓ Account field descriptor by name returns acct_status                       0.01 ms
+  Proto.TH top-level enum + packed scalar
+    packed scalar (proto3 spec default for repeated int32)
+      ✓ decoder still accepts unpacked encoding                                    0.03 ms
+      ✓ empty bag encodes to 0 bytes                                               0.00 ms
+      ✓ encoded length stays small as element count grows                          0.00 ms
+      ✓ Vector [1,2,3] is one length-delimited block                               0.00 ms
+    top-level enum field encodes as varint, not submessage
+      ✓ enum decoder truncates oversized varint to int32                           0.01 ms
+      ✓ Status = STATUS_BANNED round-trips                                         0.00 ms
+      ✓ Status = STATUS_ACTIVE encodes as varint 1, not as a submessage            0.00 ms
+      ✓ default Status (UNSPECIFIED = 0) is skipped                                0.00 ms
+      ✓ all four Status values round-trip                                          0.00 ms
+  Proto.TH.Derive byte-exact golden vectors
+    ✓ RegItem { regi_count = 1 } skips empty name                                  0.01 ms
+    ✓ RegInventory { name = "warehouse-7" }                                        0.00 ms
+    ✓ RegItem { regi_name = "widget", regi_count = 99 }                            0.01 ms
+    ✓ empty RegInventory encodes to 0 bytes                                        0.00 ms
+    ✓ RegInventory { name = "depot", items = 3 entries }                           0.01 ms
+    ✓ empty RegItem encodes to 0 bytes                                             0.00 ms
+  Proto.TH.Derive auto-detection (analyseField)
+    auto-detected oneof (sum of tagged single-arg constructors)
+      ✓ later variant on wire wins (proto3 oneof semantics)                        0.03 ms
+      ✓ no variant set: round-trips empty payload                                  0.01 ms
+      ✓ AutoSeed variant round-trips                                               0.00 ms
+      ✓ AutoUrl variant round-trips                                                0.01 ms
+    auto-detected list-repeated string (FKRepeated RepList)
+      ✓ preserves order                                                            0.03 ms
+      ✓ empty list round-trips                                                     0.01 ms
+    auto-detected Vector Int32 — packed encoding by default
+      ✓ empty vector encodes to 0 bytes                                            0.02 ms
+      ✓ packed bytes have only one tag for the whole vector                        0.01 ms
+      ✓ decoder accepts unpacked encoding (proto3 spec)                            0.02 ms
+      ✓ Vector [1,2,3] encodes as a packed length-delimited block                  0.00 ms
+      ✓ Vector with a tag field also round-trips                                   0.01 ms
+    auto-detected enum (Maybe AutoColor)
+      ✓ Just AutoRed (zero-valued enum) still encodes                              0.00 ms
+      ✓ default round-trips                                                        0.00 ms
+      ✓ Just AutoBlue round-trips                                                  0.00 ms
+    auto-detected map (FKMap MapKeyString)
+      ✓ empty map round-trips                                                      0.02 ms
+      ✓ two entries round-trip                                                     0.01 ms
+
+  Passed:                       81
+  Failed:                       0
+  Sum of test runtimes:         0.00 seconds
+  Test suite took:              0.01 seconds
+
+Test suite wireform-proto-derive-test: PASS
+Test suite logged to:
+/private/tmp/wireform-proto-release-2026-11-06/repo/dist-ghc912/build/aarch64-osx/ghc-9.12.4/wireform-proto-0.3.0.0/t/wireform-proto-derive-test/opt/test/wireform-proto-0.3.0.0-wireform-proto-derive-test.log
+1 of 1 test suites (1 of 1 test cases) passed.

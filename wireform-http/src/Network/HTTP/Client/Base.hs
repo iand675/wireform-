@@ -41,6 +41,7 @@ import Network.HTTP.Client.Response
 import Network.HTTP.Client.Transport
 import Network.HTTP.Client.URI qualified as WURI
 import Network.HTTP.Connection qualified as Conn
+import Network.HTTP.Internal.Convert qualified as Conv
 import Network.HTTP.Message qualified as Msg
 import Network.HTTP.Types.Body qualified as LB
 import Network.HTTP.Types.Version qualified as LV
@@ -111,29 +112,32 @@ baseTransportVia versionRange pcfg = Transport $ \req -> do
               _ -> ":" <> BS8.pack port
           )
 
-  lowBody <- toLowLevelBody (WReq.body req)
+  prepared <- Conv.prepareRequestBody toLowLevelBody req
   let lowReq =
         Msg.Request
           { Msg.requestMethod = WReq.method req
           , Msg.requestTarget = target
           , Msg.requestAuthority = authority
           , Msg.requestScheme = lowScheme
-          , Msg.requestHeaders = WReq.headers req
-          , Msg.requestBody = lowBody
+          , Msg.requestHeaders = WReq.headers prepared
+          , Msg.requestBody = WReq.body prepared
           , Msg.requestVersion = VR.preferredVersion versionRange
           , Msg.requestTrailers = pure []
           }
 
   Conn.withConnectionVia connCfg mProxy Nothing $ \conn -> do
-    resp <- Conn.sendOn conn lowReq
+    let hints = WReq.protocolHints req
+    framed <- Conv.prepareRequestTrailers (Conn.negotiatedVersion conn) hints lowReq
+    resp <- Conn.sendOnWithContinueTimeout (continueTimeoutMicros hints) conn framed
     materialised <- lowLevelBodyBytes (Msg.responseBody resp)
+    trailers <- Msg.responseTrailers resp
     newPopper <- popperFromStrict materialised
     pure
       RawResponse
         { statusCode = Msg.responseStatus resp
         , headers = Msg.responseHeaders resp
         , bodyPopper = newPopper
-        , protocolInfo = lowToProtocol resp
+        , protocolInfo = withBufferedTrailers trailers (lowToProtocol resp)
         }
 
 
@@ -159,9 +163,7 @@ toLowLevelBody :: BodyStream -> IO LB.Body
 toLowLevelBody bs = case knownSize bs of
   Just 0 -> pure LB.BodyEmpty
   Just _ -> LB.BodyBytes <$> bodyStreamBytes bs
-  Nothing -> pure $ LB.BodyStream $ do
-    chunk <- pull bs
-    if BS.null chunk then pure Nothing else pure (Just chunk)
+  Nothing -> pure (Conv.streamedRequestBody bs)
 
 
 {- | Materialise a low-level 'LB.Body' into a strict 'ByteString'.

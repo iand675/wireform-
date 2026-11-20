@@ -1,19 +1,10 @@
 {- |
-RFC 9110 §7.6.1 @Close@ — a reserved field name registered to avoid
-conflicts with the @close@ connection option carried by the
-'Network.HTTP.Headers.Connection.Connection' header. It has no value of
-its own beyond the literal @close@ connection-option token, so this is a
-deliberately thin type.
+The @close@ connection option from RFC 9112 §9.6. The typed header instance
+reads the option from @Connection@ and writes @Connection: close@. Use the
+full 'Network.HTTP.Headers.Connection.Connection' type to retain other
+options when editing the field. RFC 9112 reserves the field name @Close@.
 
-== Grammar
-
-@
-Close = "close"
-@
-
-The token is matched case-insensitively and rendered lower-case.
-
-Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1>
+Spec: <https://www.rfc-editor.org/rfc/rfc9112#section-9.6>
 
 See also: "Network.HTTP.Headers.Connection", "Network.HTTP.Headers.KeepAlive".
 -}
@@ -23,16 +14,16 @@ module Network.HTTP.Headers.Close (
   renderClose,
 ) where
 
-import qualified Data.List.NonEmpty as NE
-import qualified Data.Text as T
-import qualified Data.Text.Short as ST
+import qualified Data.CaseInsensitive as CI
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
-import Network.HTTP.Headers.HeaderFieldName (hClose)
+import qualified Network.HTTP.Headers.Connection as Connection
+import Network.HTTP.Headers.HeaderFieldName (hConnection)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 
 
--- | The @Close@ connection-option token. The only valid value is @close@.
+-- | A typed view of the @close@ connection option.
 data Close = Close
   deriving stock (Eq, Show)
 
@@ -43,19 +34,24 @@ instance KnownHeader Close where
   type Direction Close = 'RequestAndResponse
 
 
-  parseFromHeaders _ headers = case runParser closeParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Close header: " <> show rest
-    Fail -> Left "Failed to parse Close header"
-    Err e -> Left e
-  renderToHeaders _ = M.toStrictByteString . renderClose
-  headerName _ = hClose
+  parseFromHeaders _ ("close" :| []) = Right Close
+  parseFromHeaders settings fields = do
+    options <- parseFromHeaders @Connection.Connection settings fields
+    if Connection.connectionHasClose options
+      then Right Close
+      else Left "Connection has no close option"
+
+
+  renderToHeaders _ Close = "close"
+
+
+  headerName _ = hConnection
 
 
 closeParser :: ParserT st String Close
 closeParser = do
-  tok <- rfc9110Token
-  if T.toLower (ST.toText tok) == "close"
+  tok <- rfc9110TokenBS
+  if tok == "close" || CI.foldCase tok == "close"
     then pure Close
     else failed
 

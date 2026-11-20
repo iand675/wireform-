@@ -2,18 +2,24 @@
 
 module Test.Hermes.OAuthDpop (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.Headers (HeaderMap, headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
 import qualified Network.HTTP.Headers.DPoP as DP
 import qualified Network.HTTP.Headers.DPoPNonce as DN
+import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName, toCIByteString)
 import qualified Network.HTTP.Headers.Hobareg as H
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.OptionalWWWAuthenticate as OW
-import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Headers.Parsing.Util (RFC8941String (..), Result (..), runParser)
 import qualified Network.HTTP.Headers.ReplayNonce as RN
 import Network.HTTP.Headers.WWWAuthenticate (
   AuthChallenge (..),
@@ -78,6 +84,10 @@ parseOWA bs = case runParser OW.optionalWWWAuthenticateParser bs of
   Err e -> Left e
 
 
+fieldLines :: HeaderFieldName -> [ByteString] -> HeaderMap
+fieldLines name = headerMapFromList . map (\value -> (toCIByteString name, value))
+
+
 -- ---------------------------------------------------------------------------
 -- DPoP
 -- ---------------------------------------------------------------------------
@@ -95,6 +105,22 @@ unit_dpop_render =
   it "renders a DPoP proof JWT verbatim" $
     M.toStrictByteString (DP.renderDPoP (DP.DPoP (ST.fromString "aaa.bbb.ccc")))
       `shouldBe` "aaa.bbb.ccc"
+
+
+unit_dpop_fields :: Spec
+unit_dpop_fields = it "validates every token68 octet and requires a single DPoP field" $ do
+  let field = fieldLines "DPoP"
+      token = "ALPHA.123-_.~+/=="
+      value = DP.DPoP "ALPHA.123-_.~+/=="
+  lookupHeader @DP.DPoP (field [" \t" <> token <> "\t "]) `shouldBe` Right (Just value)
+  lookupRawHeader "DPoP" (setHeader value (field [])) `shouldBe` Just (token :| [])
+  forM_ [[""], ["===="], ["a=b"], ["a,b"], ["abc", "def"]] $ \bad ->
+    lookupHeader @DP.DPoP (field bad) `shouldSatisfy` isLeft
+  forM_ [minBound .. maxBound] $ \octet -> do
+    let wire = BS.pack [0x41, octet, 0x42]
+    if BS.elem octet (BSC.pack (base64urlChars <> ".~+/"))
+      then lookupHeader @DP.DPoP (field [wire]) `shouldBe` Right (Just (DP.DPoP (ST.fromString (BSC.unpack wire))))
+      else lookupHeader @DP.DPoP (field [wire]) `shouldSatisfy` isLeft
 
 
 -- ---------------------------------------------------------------------------
@@ -115,6 +141,21 @@ unit_dpopnonce_render =
       `shouldBe` "nonce-123_~"
 
 
+unit_dpopnonce_fields :: Spec
+unit_dpopnonce_fields = it "keeps opaque NQCHAR bytes including commas in one DPoP-Nonce field" $ do
+  let field = fieldLines "DPoP-Nonce"
+      value = DN.DPoPNonce "one,two"
+  lookupHeader @DN.DPoPNonce (field ["\tone,two \t"]) `shouldBe` Right (Just value)
+  lookupRawHeader "DPoP-Nonce" (setHeader value (field [])) `shouldBe` Just ("one,two" :| [])
+  forM_ [[""], [" \t"], ["one", "two"]] $ \bad ->
+    lookupHeader @DN.DPoPNonce (field bad) `shouldSatisfy` isLeft
+  forM_ [minBound .. maxBound] $ \octet -> do
+    let wire = BS.pack [0x41, octet, 0x42]
+    if octet >= 0x21 && octet <= 0x7e && octet /= 0x22 && octet /= 0x5c
+      then lookupHeader @DN.DPoPNonce (field [wire]) `shouldBe` Right (Just (DN.DPoPNonce (ST.fromString (BSC.unpack wire))))
+      else lookupHeader @DN.DPoPNonce (field [wire]) `shouldSatisfy` isLeft
+
+
 -- ---------------------------------------------------------------------------
 -- Replay-Nonce
 -- ---------------------------------------------------------------------------
@@ -133,26 +174,47 @@ unit_replay_render =
       `shouldBe` "abc_DEF-123"
 
 
+unit_replay_fields :: Spec
+unit_replay_fields = it "validates the unpadded Base64url alphabet and canonical tail of one Replay-Nonce" $ do
+  let field = fieldLines "Replay-Nonce"
+  forM_ ["Zg", "Zm8", "Zm9v", "-_8"] $ \wire -> do
+    let value = RN.ReplayNonce (ST.fromString (BSC.unpack wire))
+    lookupHeader @RN.ReplayNonce (field ["\t" <> wire <> " "]) `shouldBe` Right (Just value)
+    lookupRawHeader "Replay-Nonce" (setHeader value (field [])) `shouldBe` Just (wire :| [])
+  forM_ [[""], ["Z"], ["Zh"], ["Zm9"], ["Zg=="], ["+/8"], ["AA, AA"], ["Zg", "Zg"]] $ \bad ->
+    lookupHeader @RN.ReplayNonce (field bad) `shouldSatisfy` isLeft
+
+
 -- ---------------------------------------------------------------------------
 -- Hobareg
 -- ---------------------------------------------------------------------------
 
 unit_hobareg_register :: Spec
 unit_hobareg_register =
-  it "parses register" $
-    parseHobareg "register" `shouldBe` Right H.HobaregRegister
+  it "parses the case-insensitive regok status" $
+    parseHobareg "ReGoK" `shouldBe` Right H.HobaregRegister
 
 
 unit_hobareg_inprogress :: Spec
 unit_hobareg_inprogress =
-  it "parses reg-in-progress" $
-    parseHobareg "reg-in-progress" `shouldBe` Right H.HobaregInProgress
+  it "parses reginwork" $
+    parseHobareg "reginwork" `shouldBe` Right H.HobaregInProgress
 
 
 unit_hobareg_render :: Spec
 unit_hobareg_render = it "renders both Hobareg tokens" $ do
-  M.toStrictByteString (H.renderHobareg H.HobaregRegister) `shouldBe` "register"
-  M.toStrictByteString (H.renderHobareg H.HobaregInProgress) `shouldBe` "reg-in-progress"
+  M.toStrictByteString (H.renderHobareg H.HobaregRegister) `shouldBe` "regok"
+  M.toStrictByteString (H.renderHobareg H.HobaregInProgress) `shouldBe` "reginwork"
+
+
+unit_hobareg_fields :: Spec
+unit_hobareg_fields = it "interprets only one valid regok field as the registration-success signal" $ do
+  let field = fieldLines "Hobareg"
+  lookupHeader @H.Hobareg (field []) `shouldBe` Right Nothing
+  lookupHeader @H.Hobareg (field ["\t REGOK "]) `shouldBe` Right (Just H.HobaregRegister)
+  lookupRawHeader "Hobareg" (setHeader H.HobaregRegister (field [])) `shouldBe` Just ("regok" :| [])
+  forM_ [[""], ["register"], ["regokx"], ["regok, regok"], ["regok", "regok"], ["regok", "reginwork"]] $ \lines' ->
+    lookupHeader @H.Hobareg (field lines') `shouldBe` Right (Just H.HobaregInProgress)
 
 
 -- ---------------------------------------------------------------------------
@@ -178,7 +240,22 @@ unit_owa_render =
             , AuthChallenge (AuthScheme "Newauth") (ChallengeParams [("realm", "apps")])
             ]
     in M.toStrictByteString (OW.renderOptionalWWWAuthenticate v)
-        `shouldBe` "Bearer, Newauth realm=apps"
+         `shouldBe` "Bearer, Newauth realm=apps"
+
+
+unit_owa_fields :: Spec
+unit_owa_fields = it "keeps ordered challenges across lines and omits an empty authored list" $ do
+  let field = fieldLines "Optional-WWW-Authenticate"
+      value =
+        OW.OptionalWWWAuthenticate
+          [ AuthChallenge (AuthScheme "Basic") (ChallengeParams [("realm", CredentialParamString (RFC8941String "a,b"))])
+          , AuthChallenge (AuthScheme "Bearer") (ChallengeToken68 "abc==")
+          ]
+  lookupHeader @OW.OptionalWWWAuthenticate (field ["Basic realm=\"a,b\"", ", Bearer abc=="]) `shouldBe` Right (Just value)
+  lookupRawHeader "Optional-WWW-Authenticate" (setHeader value (field [])) `shouldBe` Just ("Basic realm=\"a,b\", Bearer abc==" :| [])
+  lookupHeader @OW.OptionalWWWAuthenticate (setHeader (OW.OptionalWWWAuthenticate []) (field ["Basic realm=example", "Bearer abc=="]))
+    `shouldBe` Right Nothing
+  lookupHeader @OW.OptionalWWWAuthenticate (field [" , ", ","]) `shouldSatisfy` isLeft
 
 
 -- ---------------------------------------------------------------------------
@@ -196,7 +273,18 @@ tokenGen =
 
 
 nonceGen :: Gen ST.ShortText
-nonceGen = ST.fromString <$> Gen.string (Range.linear 1 24) (Gen.element base64urlChars)
+nonceGen = ST.fromString <$> Gen.string (Range.linear 1 24) (Gen.element ('!' : ['#' .. '['] <> [']' .. '~']))
+
+
+replayNonceGen :: Gen ST.ShortText
+replayNonceGen = do
+  size <- Gen.filter ((/= 1) . (`rem` 4)) (Gen.int (Range.linear 2 24))
+  prefix <- Gen.string (Range.singleton (size - 1)) (Gen.element base64urlChars)
+  lastChar <- Gen.element $ case size `rem` 4 of
+    2 -> "AQgw"
+    3 -> "AEIMQUYcgkosw048"
+    _ -> base64urlChars
+  pure (ST.fromString (prefix <> [lastChar]))
 
 
 jwtGen :: Gen ST.ShortText
@@ -212,9 +300,10 @@ contentsGen :: Gen ChallengeContents
 contentsGen =
   Gen.choice
     [ pure ChallengeBare
-    , ChallengeParams <$> Gen.list (Range.linear 1 3) paramGen
+    , ChallengeParams . zipWith distinct ["a-", "b-", "c-"] <$> Gen.list (Range.linear 1 3) paramGen
     ]
   where
+    distinct prefix (name, value) = (prefix <> name, value)
     paramGen = do
       k <- tokenGen
       v <- tokenGen
@@ -245,7 +334,7 @@ prop_dpopnonce_roundtrip = property $ do
 
 prop_replay_roundtrip :: Property
 prop_replay_roundtrip = property $ do
-  v <- forAll (RN.ReplayNonce <$> nonceGen)
+  v <- forAll (RN.ReplayNonce <$> replayNonceGen)
   let bs = M.toStrictByteString (RN.renderReplayNonce v)
   parseReplay bs === Right v
 
@@ -270,15 +359,20 @@ tests =
     sequence_
       [ unit_dpop_parse
       , unit_dpop_render
+      , unit_dpop_fields
       , unit_dpopnonce_parse
       , unit_dpopnonce_render
+      , unit_dpopnonce_fields
       , unit_replay_parse
       , unit_replay_render
+      , unit_replay_fields
       , unit_hobareg_register
       , unit_hobareg_inprogress
       , unit_hobareg_render
+      , unit_hobareg_fields
       , unit_owa_parse
       , unit_owa_render
+      , unit_owa_fields
       , it "DPoP round-trips" prop_dpop_roundtrip
       , it "DPoP-Nonce round-trips" prop_dpopnonce_roundtrip
       , it "Replay-Nonce round-trips" prop_replay_roundtrip

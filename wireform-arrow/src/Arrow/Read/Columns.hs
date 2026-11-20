@@ -50,7 +50,6 @@ import Arrow.Column.Internal (
   SomePrimType (..),
   integralPrim,
   primTypeFor,
-  primWidth,
   withPrim,
  )
 import Arrow.Column.Internal qualified as I
@@ -76,10 +75,9 @@ import Data.Int (Int32, Int64, Int8)
 import Data.Text (Text)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
-import Data.Word (Word8)
 import Foreign.Marshal.Utils (copyBytes, fillBytes)
-import Foreign.Ptr (Ptr, castPtr, plusPtr)
-import Foreign.Storable (Storable (..), peekByteOff, pokeByteOff)
+import Foreign.Ptr (castPtr, plusPtr)
+import Foreign.Storable (Storable (..))
 import GHC.Generics (Generic)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Wireform.FFI (validateArrowBuffers)
@@ -89,9 +87,7 @@ import qualified Codec.Compression.Zstd as Zstd
 #endif
 
 #ifdef HAVE_LZ4
-import qualified Codec.Lz4 as Lz4
-import qualified Control.Exception as Exc
-import qualified Data.ByteString.Lazy as BL
+import Columnar.LZ4 qualified as Lz4
 #endif
 
 
@@ -209,7 +205,18 @@ decodeRecordBatch :: ReadOptions -> Schema -> RecordBatchDef -> ByteString -> Ei
 decodeRecordBatch opts schema rb body = do
   checkBatchBudgets opts rb
   src <- bodySource opts rb body
-  let !ctx = Ctx (arrowEndianness schema == Big) rb src opts
+  let !legacyUnionValidity = case rb of
+        RecordBatchDefV4 {} -> True
+        RecordBatchDef {} -> False
+      !ctx =
+        Ctx
+          (arrowEndianness schema == Big)
+          legacyUnionValidity
+          (rbNodes rb)
+          (rbBuffers rb)
+          (rbVariadicBufferCounts rb)
+          src
+          opts
   Outs cols _ <- fieldsN ctx (arrowFields schema) (Cur 0 0 0 0)
   case V.findIndex (\c -> fromIntegral (columnLength c) /= rbLength rb) cols of
     Nothing -> Right cols
@@ -301,7 +308,10 @@ bodySource opts rb body = case rbBodyCompression rb of
 data Ctx = Ctx
   { ctxSwap :: !Bool
   -- ^ Big-endian body: multi-byte values are byte-swapped into fresh buffers.
-  , ctxRb :: !RecordBatchDef
+  , ctxLegacyUnionValidity :: !Bool
+  , ctxNodes :: !(VS.Vector FieldNode)
+  , ctxBuffers :: !(VS.Vector Buffer)
+  , ctxVariadicBufferCounts :: !(V.Vector Int64)
   , ctxSrc :: !Source
   , ctxOpts :: !ReadOptions
   }
@@ -338,11 +348,11 @@ maxArrayLength = 1 `shiftL` 40
 
 -- | Field node @i@ with its length checked to lie in @[0, 'maxArrayLength']@.
 nodeAt :: Ctx -> Int -> Either String FieldNode
-nodeAt ctx i = case rbNodes (ctxRb ctx) VS.!? i of
+nodeAt ctx i = case ctxNodes ctx VS.!? i of
   Nothing ->
     Left
       ( "Arrow.Read.Columns: record batch has "
-          ++ show (VS.length (rbNodes (ctxRb ctx)))
+          ++ show (VS.length (ctxNodes ctx))
           ++ " field nodes, schema needs node #"
           ++ show i
       )
@@ -371,7 +381,7 @@ bufferAt ctx i
              then Left "Arrow.Read.Columns: buffer outside the body"
              else Right $! BSU.unsafeTake (fromIntegral l) (BSU.unsafeDrop (fromIntegral o) body)
   where
-    !bufs = rbBuffers (ctxRb ctx)
+    !bufs = ctxBuffers ctx
 {-# INLINE bufferAt #-}
 
 
@@ -434,7 +444,7 @@ fieldAt ctx f fn len cur = case fieldDictionary f of
     ALargeListView -> listView @Int64 ctx "large list view" I.ColLargeListView f fn len cur
     AFixedSizeList size -> fixedSizeList ctx size f fn len cur
     AMap _ -> mapCol ctx f fn len cur
-    AUnion mode ids -> union ctx mode ids f len cur
+    AUnion mode ids -> union ctx mode ids f fn len cur
     ARunEndEncoded -> runEndEncoded ctx f len cur
     ty -> case primTypeFor ty of
       Just (SomePrimType t) -> do
@@ -522,7 +532,7 @@ storableAt ctx what swapPat n i = do
       let !exact = BSU.unsafeTake need bs
       in Right $!
            if ctxSwap ctx && not (null swapPat)
-             then I.unsafeBytesToStorable (swapCopy swapPat w n exact)
+             then I.unsafeBytesToStorable (I.swapCopy swapPat w n exact)
              else I.bytesToStorable exact
 {-# INLINE storableAt #-}
 
@@ -539,40 +549,6 @@ offsetsAt ctx what rows i = do
 {-# INLINE offsetsAt #-}
 
 
--- | Byte-swap groups within each element (big-endian bodies).
-swapPattern :: PrimType a -> [Int]
-swapPattern = \case
-  PInt8 -> []
-  PUInt8 -> []
-  PIntervalDayTime -> [4, 4]
-  PIntervalMonthDayNano -> [4, 4, 8]
-  t -> [primWidth t]
-
-
-{- | Copy @n@ elements of @w@ bytes, reversing the byte order of each
-group of the pattern within every element (big-endian input only).
--}
-swapCopy :: [Int] -> Int -> Int -> ByteString -> ByteString
-swapCopy pat w n src = I.createAligned (n * w) $ \dst -> I.withBytesPtr src $ \s ->
-  let elemLoop !e
-        | e >= n = pure ()
-        | otherwise = groups (e * w) pat >> elemLoop (e + 1)
-      groups !_ [] = pure ()
-      groups !base (g : gs) = swapGroup (s `plusPtr` base) (dst `plusPtr` base) g >> groups (base + g) gs
-  in elemLoop 0
-
-
-swapGroup :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
-swapGroup s d g = go 0
-  where
-    go !k
-      | k >= g = pure ()
-      | otherwise = do
-          b <- peekByteOff s (g - 1 - k) :: IO Word8
-          pokeByteOff d k b
-          go (k + 1)
-
-
 -- ============================================================
 -- Leaf arrays
 -- ============================================================
@@ -581,7 +557,7 @@ swapGroup s d g = go 0
 prim :: Ctx -> PrimType a -> FieldNode -> Int -> Int -> Either String ColumnArray
 prim ctx t fn len bi = withPrim t $ do
   v <- validityAt ctx (I.primTypeName t) len fn bi
-  xs <- storableAt ctx (I.primTypeName t) (swapPattern t) len (bi + 1)
+  xs <- storableAt ctx (I.primTypeName t) (I.swapPattern t) len (bi + 1)
   Right (I.ColPrim t v xs)
 
 
@@ -627,13 +603,12 @@ column's variadic data buffers (their count is the next
 -}
 views :: Ctx -> Bool -> FieldNode -> Int -> Cur -> Either String Out
 views ctx utf8 fn len cur = do
-  let !rb = ctxRb ctx
-      !bi = curBuf cur
+  let !bi = curBuf cur
       !what = if utf8 then "utf8 view" else "binary view"
-  nVar <- case rbVariadicBufferCounts rb V.!? curVar cur of
+  nVar <- case ctxVariadicBufferCounts ctx V.!? curVar cur of
     Nothing -> Left "Arrow.Read.Columns: view column has no variadicBufferCounts entry"
     Just c
-      | c < 0 || c > fromIntegral (VS.length (rbBuffers rb)) ->
+      | c < 0 || c > fromIntegral (VS.length (ctxBuffers ctx)) ->
           Left ("Arrow.Read.Columns: invalid variadic buffer count " ++ show c)
       | otherwise -> Right (fromIntegral c :: Int)
   v <- validityAt ctx what len fn bi
@@ -642,7 +617,8 @@ views ctx utf8 fn len cur = do
     then Left ("Arrow.Read.Columns: " ++ what ++ " buffer too small")
     else Right ()
   dataBufs <- V.generateM nVar (\k -> bufferAt ctx (bi + 2 + k))
-  let !viewBytes = BSU.unsafeTake (len * 16) vs
+  let !rawViews = BSU.unsafeTake (len * 16) vs
+      !viewBytes = if ctxSwap ctx then I.swapViewCopy True rawViews else rawViews
   I.validateViews what utf8 len v viewBytes dataBufs
   let !col = if utf8 then I.ColUtf8View v viewBytes dataBufs else I.ColBinaryView v viewBytes dataBufs
       Cur n b x u = cur
@@ -767,13 +743,21 @@ mapCol ctx f fn len cur = do
     _ -> Left "Arrow.Read.Columns: map entries must be a struct of exactly (key, value) without nulls"
 
 
-{- | Unions carry no validity. Wire type ids become child positions
+{- | V4 unions have a validity slot before the type ids. Like Arrow C++,
+we accept the slot for a union with no top-level nulls, and reject
+top-level nulls because our union representation uses child validity.
+V5 unions have no validity slot. Wire type ids become child positions
 through the declared @typeIds@ (aliased as is when they are
 positional, the common case; otherwise one table-lookup pass).
 -}
-union :: Ctx -> UnionMode -> V.Vector Int32 -> Field -> Int -> Cur -> Either String Out
-union ctx mode declared f len cur = do
-  let !bi = curBuf cur
+union :: Ctx -> UnionMode -> V.Vector Int32 -> Field -> FieldNode -> Int -> Cur -> Either String Out
+union ctx mode declared f fn len cur = do
+  validitySlots <- case ctxLegacyUnionValidity ctx of
+    False -> Right 0
+    True
+      | fnNullCount fn /= 0 -> Left "Arrow.Read.Columns: V4 union has top-level nulls"
+      | otherwise -> 1 <$ bufferAt ctx (curBuf cur)
+  let !bi = curBuf cur + validitySlots
       !k = V.length (fieldChildren f)
       !what = "union"
   table <- unionChildTable k declared
@@ -784,12 +768,12 @@ union ctx mode declared f len cur = do
   case mode of
     Dense -> do
       offs <- storableAt @Int32 ctx "dense union offsets" [4] len (bi + 1)
-      Outs children cur' <- fieldsN ctx (fieldChildren f) (adv 1 2 cur)
+      Outs children cur' <- fieldsN ctx (fieldChildren f) (adv 1 (validitySlots + 2) cur)
       let !lens = VS.generate k (\j -> fromIntegral (columnLength (V.unsafeIndex children j))) :: VS.Vector Int64
       I.validateDenseUnion what types offs lens
       Right (Out (I.ColDenseUnion types offs children) cur')
     Sparse -> do
-      Outs children cur' <- fieldsN ctx (fieldChildren f) (adv 1 1 cur)
+      Outs children cur' <- fieldsN ctx (fieldChildren f) (adv 1 (validitySlots + 1) cur)
       checkChildLengths "sparse union" len children
       I.validateSparseUnionTypes what types k
       Right (Out (I.ColSparseUnion types children) cur')
@@ -1014,8 +998,7 @@ leInt64 bs = go 7 0
 
 
 {- | Decompress a payload that must expand to exactly @rawLen@ bytes
-('decompressBufferEnvelope' has already bounded @rawLen@). Neither
-backend may allocate more than @rawLen + 1@ output bytes.
+('decompressBufferEnvelope' has already bounded @rawLen@).
 -}
 decompressBuffer :: BodyCompressionCodec -> Int -> ByteString -> Either String ByteString
 #if defined(HAVE_ZSTD) || defined(HAVE_LZ4)
@@ -1044,16 +1027,7 @@ decompressBuffer codec _ _ = case codec of
   BodyZstd -> Left "Arrow.Read.Columns: ZSTD body compression requires building wireform-arrow with -fzstd"
 #endif
 #ifdef HAVE_LZ4
-  LZ4Frame ->
-    -- lz4-hs's decompress is lazy and throws on malformed input; take at
-    -- most one byte past the expected size (so an overlong frame is
-    -- detected without being fully inflated) and catch the exception to
-    -- keep the Either-shaped contract.
-    case unsafeDupablePerformIO $
-      Exc.try @Exc.SomeException
-        (Exc.evaluate (BL.toStrict (BL.take (fromIntegral rawLen + 1) (Lz4.decompress (BL.fromStrict comp))))) of
-      Right out -> Right out
-      Left e -> Left ("Arrow.Read.Columns: LZ4_FRAME decompress: " ++ show e)
+  LZ4Frame -> Lz4.decompressFrame rawLen comp
 #else
   LZ4Frame -> Left "Arrow.Read.Columns: LZ4 body compression requires building wireform-arrow with -flz4"
 #endif

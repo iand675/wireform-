@@ -116,16 +116,17 @@ library
     Network.HTTP.Types.Version
   other-modules:
     Network.HTTP.Internal.Convert
+    Network.HTTP.Internal.RetryAfter
     Network.HTTP.Internal.Validation
   build-depends:
     base                 >= 4.20 && < 5,
     aeson                >= 2.1  && < 2.4,
     base16-bytestring    >= 1.0  && < 1.1,
     base64-bytestring    >= 1.2  && < 1.3,
-    crypton              >= 1.0  && < 1.2,
-    memory               >= 0.18 && < 0.19,
+    crypton              >= 2.2.6 && < 2.3,
+    ram               >= 0.20.1 && < 0.23,
     brotli               >= 0.0.0.3 && < 0.0.1,
-    bytestring           >= 0.11 && < 0.13,
+    bytestring           >= 0.11.2 && < 0.13,
     case-insensitive     >= 1.2  && < 1.3,
     containers           >= 0.6  && < 0.9,
     deepseq              >= 1.4  && < 1.6,
@@ -208,6 +209,7 @@ test-suite wireform-http-test
     sydtest-hedgehog,
     temporary        >= 1.3  && < 1.4,
     text,
+    time             >= 1.11 && < 1.16,
     wireform-http,
     wireform-http1,
     wireform-http2,

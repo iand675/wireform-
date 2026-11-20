@@ -13,10 +13,18 @@ module Protovalidate.Rules (
   RuleKind (..),
   FieldRules (..),
   MessageRules (..),
+  MessageOneof (..),
+  makeMessageOneof,
+  NestedMessage (..),
+  withNestedMessage,
+  ProtoSchema,
+  ProtoFieldShape (..),
+  namedMessageShape,
   emptyFieldRules,
   fieldRules,
   messageRules,
   standardConstraints,
+  scalarDefaultValue,
 
   -- * Rule-value builders
   constV,
@@ -52,7 +60,11 @@ module Protovalidate.Rules (
   predefined,
 ) where
 
-import CEL.Value (Value (..))
+import CEL.Value (Duration (..), Timestamp (..), Value (..), celMapFromList)
+import Data.Int (Int32)
+import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -90,8 +102,10 @@ data RuleKind
 data FieldRules = FieldRules
   { frRequired :: !Bool
   -- ^ The field must be present (set / non-default).
+  , frImplicitDefault :: !(Maybe Value)
+  -- ^ Default of a protobuf field without presence tracking.
   , frIgnoreEmpty :: !Bool
-  -- ^ Skip the standard constraints when the value is the type's zero value.
+  -- ^ Skip field validation when the value is the type's zero value.
   , frKind :: !(Maybe RuleKind)
   -- ^ Which standard-constraint family applies (if any).
   , frRules :: ![(Text, Value)]
@@ -110,6 +124,8 @@ data FieldRules = FieldRules
   -}
   , frMessage :: !(Maybe MessageRules)
   -- ^ Rules applied to a (possibly repeated) message-typed field, recursively.
+  , frMessageReference :: !(Maybe Text)
+  -- ^ Qualified name of an enclosing message plan to reuse on a recursive field.
   }
   deriving stock (Show)
 
@@ -120,8 +136,73 @@ custom CEL (@(buf.validate.message).cel@).
 data MessageRules = MessageRules
   { mrFields :: ![(Text, FieldRules)]
   , mrCustom :: ![Constraint]
+  , mrMessageOneofs :: ![MessageOneof]
+  , mrProtoSchema :: !(Maybe (Text, ProtoSchema))
   }
   deriving stock (Show)
+
+
+data MessageOneof = MessageOneof
+  { messageOneofFields :: ![Text]
+  , messageOneofRequired :: !Bool
+  }
+  deriving stock (Show)
+
+
+makeMessageOneof :: Text -> Set Text -> [Text] -> Bool -> Either Text MessageOneof
+makeMessageOneof name known fields required
+  | null fields = failure "requires at least one field"
+  | Set.size unique /= length fields = failure "contains duplicate fields"
+  | Just unknown <- Set.lookupMin (Set.difference unique known) = failure ("has no field named " <> unknown)
+  | otherwise = Right (MessageOneof fields required)
+  where
+    unique = Set.fromList fields
+    failure reason = Left ("buf.validate message.oneof for " <> name <> " " <> reason)
+
+
+-- | Keep rule extraction finite while retaining edges to enclosing types.
+data NestedMessage
+  = InlineMessage !MessageRules
+  | RecursiveMessage !Text
+
+
+withNestedMessage :: Maybe NestedMessage -> FieldRules -> FieldRules
+withNestedMessage Nothing rules = rules
+withNestedMessage (Just (InlineMessage nested)) rules = rules {frMessage = Just nested}
+withNestedMessage (Just (RecursiveMessage name)) rules = rules {frMessageReference = Just name}
+
+
+-- | The fields of each message in a schema, indexed by qualified type name.
+-- Message references use names so recursive types need only one definition.
+type ProtoSchema = Map.Map Text (Map.Map Text ProtoFieldShape)
+
+
+data ProtoFieldShape
+  = ExplicitDefault !Value
+  | ImplicitDefault !Value
+  | MessageShape !Text
+  | ListShape !ProtoFieldShape
+  | MapShape !ProtoFieldShape
+  deriving stock (Show)
+
+
+namedMessageShape :: Text -> ProtoFieldShape
+namedMessageShape name = case name of
+  "google.protobuf.Timestamp" -> ExplicitDefault (VTimestamp (Timestamp 0 0))
+  "google.protobuf.Duration" -> ExplicitDefault (VDuration (Duration 0 0))
+  "google.protobuf.Struct" -> ExplicitDefault (VMap (celMapFromList []))
+  "google.protobuf.ListValue" -> ExplicitDefault (VList V.empty)
+  "google.protobuf.Value" -> ExplicitDefault VNull
+  "google.protobuf.BoolValue" -> ExplicitDefault VNull
+  "google.protobuf.BytesValue" -> ExplicitDefault VNull
+  "google.protobuf.DoubleValue" -> ExplicitDefault VNull
+  "google.protobuf.FloatValue" -> ExplicitDefault VNull
+  "google.protobuf.Int32Value" -> ExplicitDefault VNull
+  "google.protobuf.Int64Value" -> ExplicitDefault VNull
+  "google.protobuf.StringValue" -> ExplicitDefault VNull
+  "google.protobuf.UInt32Value" -> ExplicitDefault VNull
+  "google.protobuf.UInt64Value" -> ExplicitDefault VNull
+  _ -> MessageShape name
 
 
 -- | Field rules with everything empty/disabled.
@@ -129,6 +210,7 @@ emptyFieldRules :: FieldRules
 emptyFieldRules =
   FieldRules
     { frRequired = False
+    , frImplicitDefault = Nothing
     , frIgnoreEmpty = False
     , frKind = Nothing
     , frRules = []
@@ -138,7 +220,31 @@ emptyFieldRules =
     , frMapValues = Nothing
     , frPredefined = []
     , frMessage = Nothing
+    , frMessageReference = Nothing
     }
+
+
+-- | The implicit default of a scalar, indexed by FieldDescriptorProto.Type.
+-- Enum defaults are resolved from the defining enum where available.
+scalarDefaultValue :: Int32 -> Maybe Value
+scalarDefaultValue = \case
+  1 -> Just (VDouble 0)
+  2 -> Just (VDouble 0)
+  3 -> Just (VInt 0)
+  4 -> Just (VUInt 0)
+  5 -> Just (VInt 0)
+  6 -> Just (VUInt 0)
+  7 -> Just (VUInt 0)
+  8 -> Just (VBool False)
+  9 -> Just (VString "")
+  12 -> Just (VBytes "")
+  13 -> Just (VUInt 0)
+  14 -> Just (VInt 0)
+  15 -> Just (VInt 0)
+  16 -> Just (VInt 0)
+  17 -> Just (VInt 0)
+  18 -> Just (VInt 0)
+  _ -> Nothing
 
 
 -- | Build field rules of a given kind from a list of set rule values.
@@ -148,7 +254,7 @@ fieldRules k rs = emptyFieldRules {frKind = Just k, frRules = rs}
 
 -- | Build message rules.
 messageRules :: [(Text, FieldRules)] -> [Constraint] -> MessageRules
-messageRules = MessageRules
+messageRules fields customs = MessageRules fields customs [] Nothing
 
 
 ----------------------------------------------------------------------
@@ -224,13 +330,14 @@ oneofRequired name fields =
   unsafeConstraint
     name
     ("at least one field of oneof " <> name <> " must be set")
-    (T.intercalate " || " (map (\f -> "has(this." <> f <> ")") fields))
+    (case fields of
+      [] -> "false"
+      _ -> T.intercalate " || " (map (\f -> "has(this." <> f <> ")") fields))
 
 
 {- | @string.well_known_regex@: @kind@ is 1 (@HEADER_NAME@) or 2
-(@HEADER_VALUE@); @strict@ is accepted for API compatibility. The pattern is
-a raw CEL string (so regex backslashes are not consumed by CEL) and uses
-RE2/POSIX-compatible syntax.
+(@HEADER_VALUE@). Loose validation forbids NUL, LF and CR. Header names
+must be nonempty in either mode.
 -}
 wellKnownRegex :: Int -> Bool -> Constraint
 wellKnownRegex kind strict =
@@ -239,10 +346,11 @@ wellKnownRegex kind strict =
     "value must match the well-known regex"
     ("this.matches(r\"" <> regex <> "\")")
   where
-    _ = strict
-    regex = case kind of
-      1 -> "^:?[0-9a-zA-Z!#$%&'*+.^_|~`-]+$" -- HTTP header name
-      _ -> "^[[:print:][:blank:]]*$" -- HTTP header value (printable)
+    regex
+      | kind == 1 && strict = "^:?[0-9a-zA-Z!#$%&'*+.^_|~`-]+$"
+      | kind == 1 = "^[^\\x00\\x0a\\x0d]+$"
+      | strict = "^[^\\x00-\\x08\\x0a-\\x1f\\x7f]*$"
+      | otherwise = "^[^\\x00\\x0a\\x0d]*$"
 
 
 -- | Apply rules to each key of a map field.

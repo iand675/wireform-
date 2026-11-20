@@ -24,14 +24,13 @@ module Network.HTTP.Headers.AccessControlAllowOrigin (
   renderAccessControlAllowOrigin,
 ) where
 
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Data.Word (Word16)
+import Network.HTTP.Grammar.Authority (SerializedOrigin (..), renderSerializedOrigin, serializedOriginParser)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAccessControlAllowOrigin)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
 -- | Value of the @Access-Control-Allow-Origin@ header.
@@ -55,11 +54,7 @@ instance KnownHeader AccessControlAllowOrigin where
   type Direction AccessControlAllowOrigin = 'Response
 
 
-  parseFromHeaders _ headers = case runParser accessControlAllowOriginParser (NE.head headers) of
-    OK v "" -> Right v
-    OK _ rest -> Left $ "Unconsumed input after parsing Access-Control-Allow-Origin header: " <> show rest
-    Fail -> Left "Failed to parse Access-Control-Allow-Origin header"
-    Err e -> Left e
+  parseFromHeaders _ = parseSingleFieldLine "Access-Control-Allow-Origin" accessControlAllowOriginParser
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccessControlAllowOrigin
@@ -74,19 +69,12 @@ accessControlAllowOriginParser = wildcard <|> specificOrigin <|> nullOrigin
     wildcard = AllowOriginWildcard <$ $(char '*')
     nullOrigin = AllowOriginNull <$ $(string "null")
     specificOrigin = do
-      scheme <- rfc9110Token
-      $(string "://")
-      host <- rfc9110Token
-      port <- optional ($(char ':') *> anyAsciiDecimalWord)
-      pure $ AllowOrigin scheme host (fromIntegral <$> port)
+      SerializedOrigin scheme host port <- serializedOriginParser
+      pure (AllowOrigin scheme host port)
 
 
 renderAccessControlAllowOrigin :: AccessControlAllowOrigin -> M.Builder
 renderAccessControlAllowOrigin = \case
   AllowOriginWildcard -> "*"
   AllowOriginNull -> "null"
-  AllowOrigin scheme host mPort ->
-    shortText scheme
-      <> "://"
-      <> shortText host
-      <> maybe mempty (\p -> M.char7 ':' <> M.word16Dec p) mPort
+  AllowOrigin scheme host port -> renderSerializedOrigin (SerializedOrigin scheme host port)
