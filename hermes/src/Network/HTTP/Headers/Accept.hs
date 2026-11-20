@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 {- |
 @Accept@ — a request header by which a client lists the media types
 (MIME types) it is willing to receive in the response, each with an
@@ -13,12 +15,21 @@ See also: "Network.HTTP.Headers.AcceptCharset", "Network.HTTP.Headers.AcceptEnco
 -}
 module Network.HTTP.Headers.Accept (
   Accept (..),
+  acceptedContentQuality,
+  preferredContentType,
   acceptParser,
   renderAccept,
 ) where
 
+import Data.Bits ((.|.))
+import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Maybe (listToMaybe)
+import qualified Data.Text.Short as ST
 import Network.HTTP.ContentNegotiation
 import Network.HTTP.Headers
+import Network.HTTP.Headers.ContentType (ContentType (..))
 import Network.HTTP.Headers.HeaderFieldName (hAccept)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -26,6 +37,105 @@ import Network.HTTP.Headers.Parsing.Util
 
 newtype Accept = Accept {accept :: [WeightedMediaRange]}
   deriving stock (Eq, Show)
+
+
+{- | The effective quality of a concrete representation under RFC 9110
+section 12.5.1. An exact type takes precedence over a subtype wildcard,
+which takes precedence over a fully wildcarded type. Among ranges with
+the same type specificity, more matching parameter names take precedence.
+The first field entry wins when specificity is equal. Parameter names
+and charset values compare case-insensitively. Other values compare by
+their decoded spelling. The first occurrence supplies a representation
+parameter's value. Repeated requirements for a parameter count once.
+
+An absent field gives every representation quality one. An empty field
+or an unmatched type gives it zero. Authored weights are clamped to
+@[0,1]@, with NaN treated as zero.
+-}
+acceptedContentQuality :: Maybe Accept -> ContentType -> Double
+acceptedContentQuality Nothing _ = 1
+acceptedContentQuality (Just (Accept ranges)) candidate = contentQuality ranges candidate
+{-# INLINE acceptedContentQuality #-}
+
+
+-- | Select the available content type with the highest positive effective
+-- quality. Order the available list by server preference to break ties.
+preferredContentType :: Maybe Accept -> [ContentType] -> Maybe ContentType
+preferredContentType Nothing = listToMaybe
+preferredContentType (Just (Accept ranges)) = chooseContentType ranges
+{-# INLINE preferredContentType #-}
+
+
+chooseContentType :: [WeightedMediaRange] -> [ContentType] -> Maybe ContentType
+chooseContentType ranges = preferredByQuality (contentQuality ranges)
+
+
+contentQuality :: [WeightedMediaRange] -> ContentType -> Double
+contentQuality [] _ = 0
+contentQuality ranges (ContentType actualType) =
+  selectQuality actualType [] 0 ranges
+contentQuality ranges (ParameterizedContentType actualType (first :| rest)) =
+  selectQuality actualType (first : rest) (1 + length rest) ranges
+
+
+selectQuality :: MediaType -> [(ST.ShortText, ST.ShortText)] -> Int -> [WeightedMediaRange] -> Double
+selectQuality actualType actualParams !maxParams = select (-1) 0 0
+  where
+    select :: Int -> Int -> Double -> [WeightedMediaRange] -> Double
+    select !bestType !bestParams !bestWeight (WeightedMediaRange range weight : rest)
+      | rank >= 0 && rank >= bestType
+      , matched >= 0
+      , rank > bestType || matched > bestParams =
+          if rank == 2 && matched == maxParams
+            then normalizedQuality weight
+            else select rank matched weight rest
+      | otherwise = select bestType bestParams bestWeight rest
+      where
+        rank = typeSpecificity (mediaType range) actualType
+        matched = matchingParameters actualParams (mediaParams range)
+    select _ _ bestWeight [] = normalizedQuality bestWeight
+
+
+typeSpecificity :: MediaType -> MediaType -> Int
+typeSpecificity (MediaType base sub) (MediaType actualBase actualSub)
+  | ST.null base && ST.null sub = 0
+  | not (sameMediaName base actualBase) = -1
+  | ST.null sub = 1
+  | sameMediaName sub actualSub = 2
+  | otherwise = -1
+{-# INLINE typeSpecificity #-}
+
+
+matchingParameters :: [(ST.ShortText, ST.ShortText)] -> [(ST.ShortText, ST.ShortText)] -> Int
+matchingParameters available = count 0
+  where
+    count !total [] = total
+    count !total ((name, value) : rest)
+      | matchValue name value available =
+          if any (sameMediaName name . fst) rest then count total rest else count (total + 1) rest
+      | otherwise = -1
+
+    matchValue name value ((key, actual) : rest)
+      | sameMediaName name key =
+          if sameMediaName name "charset" then sameMediaName value actual else value == actual
+      | otherwise = matchValue name value rest
+    matchValue _ _ [] = False
+
+
+sameMediaName :: ST.ShortText -> ST.ShortText -> Bool
+sameMediaName a b = a == b || (SBS.length right == size && loop 0)
+  where
+    left = ST.toShortByteString a
+    right = ST.toShortByteString b
+    size = SBS.length left
+    loop i
+      | i == size = True
+      | lower (SBSI.unsafeIndex left i) == lower (SBSI.unsafeIndex right i) = loop (i + 1)
+      | otherwise = False
+    lower byte
+      | 65 <= byte && byte <= 90 = byte .|. 32
+      | otherwise = byte
+{-# INLINE sameMediaName #-}
 
 
 instance KnownHeader Accept where

@@ -8,11 +8,13 @@ module Network.HTTP.Headers.Signature.Internal (
 ) where
 
 import Control.Monad (unless, when)
+import qualified Data.ByteString.Short as SBS
 import qualified Data.CharSet as CS
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text.Short (ShortText)
+import qualified Data.Text.Short as ST
 import Network.HTTP.Grammar.Parser
 import qualified Network.HTTP.Grammar.Rendering as R
 import qualified Network.HTTP.Headers.Mason as M
@@ -59,10 +61,18 @@ signatureInputDictionary validTimestamp label name parameters component entry =
   where
     parseComponent = do
       $(char '"')
-      text <- shortASCIIFromParser_ (optional_ $(char '@') *> skipSome (skipSatisfyAscii (`CS.member` lowerTokenChars)))
+      text <- shortASCIIFromParser_ $
+        branch $(char '@')
+          (skipSome (skipSatisfyAscii derivedComponentChar))
+          (skipSome (skipSatisfyAscii (`CS.member` lowerTokenChars)))
       $(char '"')
       when (text == "@signature-params") (err "Reserved signature component identifier @signature-params")
-      component (RFC8941String text) . structuredFieldParameterPairs <$> structuredFieldParameters
+      params <- structuredFieldParameters
+      case params of
+        [] | text /= "@query-param" -> pure (component (RFC8941String text) [])
+        _ -> do
+          checkComponentParameters text params
+          pure (component (RFC8941String text) (structuredFieldParameterPairs params))
 
     checkSmall [] = pure ()
     checkSmall (covered : rest)
@@ -99,6 +109,41 @@ signatureInputDictionary validTimestamp label name parameters component entry =
     isString (String _) = True
     isString _ = False
 {-# INLINE signatureInputDictionary #-}
+
+
+-- Validate rules that can be checked from the component identifier alone.
+-- Extension parameters are kept for the application that understands them.
+checkComponentParameters :: ShortText -> [StructuredFieldParameter] -> ParserT st String ()
+checkComponentParameters name params = do
+  when (name == "@query-param" && not (any isQueryName params)) $
+    err "@query-param requires a String name parameter"
+  mapM_ check params
+  where
+    derived = SBS.index (ST.toShortByteString name) 0 == 0x40
+    isQueryName (StructuredFieldParameter "name" (String _)) = True
+    isQueryName _ = False
+    selectsStructured (StructuredFieldParameter key _) = key == "sf" || key == "key"
+    check (StructuredFieldParameter key value) =
+      unless (valid key value) (err ("Invalid signature component parameter " <> show key))
+    valid "req" (Boolean _) = True
+    valid "req" _ = False
+    valid "tr" value = fieldFlag value
+    valid "sf" value = fieldFlag value
+    valid "bs" value = fieldFlag value && not (any selectsStructured params)
+    valid "key" (String (RFC8941String key)) =
+      not derived && case runParser (scanStructuredFieldKey <* eof) (ST.toByteString key) of
+        OK () _ -> True
+        _ -> False
+    valid "key" _ = False
+    valid _ _ = True
+    fieldFlag (Boolean _) = not derived
+    fieldFlag _ = False
+{-# NOINLINE checkComponentParameters #-}
+
+
+derivedComponentChar :: Char -> Bool
+derivedComponentChar c = ('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '-'
+{-# INLINE derivedComponentChar #-}
 
 
 -- A bounded scan avoids allocating a map for the usual short component lists.

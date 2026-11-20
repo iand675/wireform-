@@ -21,6 +21,7 @@ import Network.HTTP.Client.BodyStream (emptyStream, popperBytes, popperFromStric
 import Network.HTTP.Client.Cache qualified as Cache
 import Network.HTTP.Client.Compression qualified as Compression
 import Network.HTTP.Client.Conditional qualified as Conditional
+import Network.HTTP.Client.Cookies qualified as Cookies
 import Network.HTTP.Client.Protocol qualified as Protocol
 import Network.HTTP.Client.Range qualified as Range
 import Network.HTTP.Client.Redirect qualified as Redirect
@@ -38,7 +39,12 @@ import Network.Socket qualified as NS
 
 
 main :: IO ()
-main =
+main = do
+  cookieBenchmarks <- sequence
+    [ receiveCookieBenchmark "session" "session=abc; Path=/; Secure"
+    , receiveCookieBenchmark "Max-Age" "session=abc; Path=/; Secure; Max-Age=3600"
+    , receiveCookieBenchmark "Expires" "session=abc; Path=/; Secure; Expires=Fri, 31 Dec 9999 00:00:00 GMT"
+    ]
   defaultMain
     [ bgroup
         "HTTP/1.x"
@@ -89,7 +95,19 @@ main =
           ]
     , env (Compression.compressBytes @Compression.Gzip "cached representation") $ \gzip ->
         bgroup "Cache body metadata" [bench "revalidate decoded body" $ nfIO (revalidationScore gzip)]
+    , bgroup "Cookie receipt" cookieBenchmarks
     ]
+
+
+receiveCookieBenchmark :: String -> BS.ByteString -> IO Benchmark
+receiveCookieBenchmark name field = do
+  jar <- Cookies.newCookieJar
+  let request = Request.request mGet (URI.staticURI "https://example.com/account") emptyStream
+      response = Raw.RawResponse S.status200 [(H.hSetCookie, field)] (pure "") Protocol.HTTP1_1
+      client = Cookies.withCookies jar (Transport.Transport (const (pure response)))
+      receive = () <$ Transport.sendRaw client request
+  receive
+  pure (bench name (nfIO receive))
 
 
 sseBatch :: BS.ByteString -> BS.ByteString

@@ -11,7 +11,7 @@ module Test.Cookies (tests) where
 import Data.ByteString qualified as BS
 import Data.Text (Text)
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime (..))
+import Data.Time.Clock (UTCTime (..), addUTCTime, getCurrentTime)
 import Network.HTTP.Client.BodyStream (BodyStream, emptyStream)
 import Network.HTTP.Client.Cookies
 import Network.HTTP.Client.Protocol (ProtocolInfo (HTTP1_1))
@@ -129,8 +129,7 @@ tests =
                   other -> error (show other)
             ]
       , it "stores, scopes, sends and expires cookies through middleware" $ withJarThat $ \jar -> do
-          let requestAt url = Req.request mGet (staticURI url) emptyStream
-              respond fields = Resp.RawResponse status200 fields (pure "") HTTP1_1
+          let respond fields = Resp.RawResponse status200 fields (pure "") HTTP1_1
               receive fields url =
                 sendRaw (withCookies jar (Transport (\_ -> pure (respond fields)))) (requestAt url)
               echo url = do
@@ -241,6 +240,38 @@ tests =
           echoCookiesAt jar plain `shouldReturn` ["session=wide"]
           receiveCookies jar cookieRequest ["session=updated; Path=/account; Secure"]
           echoCookies jar `shouldReturn` ["session=updated; session=wide"]
+          let expired = UTCTime (fromGregorian 1994 11 6) 0
+          insertCookie jar baseCookie{cookieName = "archive", cookiePath = "/account", cookieExpires = Just expired}
+          receiveCookies jar plain ["archive=fresh; Path=/account"]
+          echoCookiesAt jar plain `shouldReturn` ["archive=fresh; session=wide"]
+      , it "limits both wire lifetime attributes to 400 days" $ withJarThat $ \jar -> do
+          earliest <- getCurrentTime
+          receiveCookies jar cookieRequest
+            [ "age=long; Max-Age=99999999999999999999"
+            , "date=long; Expires=Fri, 31 Dec 9999 00:00:00 GMT"
+            ]
+          latest <- getCurrentTime
+          cookies <- getCookies jar
+          case map cookieExpires cookies of
+            [Just age, Just date] -> do
+              age `shouldBe` date
+              let limit = 400 * 86400
+              (age >= addUTCTime limit earliest && age <= addUTCTime limit latest) `shouldBe` True
+            expiries -> expectationFailure ("Expected two persistent cookies, got " <> show expiries)
+      , it "keeps shorter lifetimes, session cookies and Max-Age precedence" $ withJarThat $ \jar -> do
+          earliest <- getCurrentTime
+          receiveCookies jar cookieRequest
+            [ "age=short; Max-Age=60; Expires=Sun, 06 Nov 1994 08:49:37 GMT"
+            , "gone=empty; Max-Age=-1; Expires=Fri, 31 Dec 9999 00:00:00 GMT"
+            , "session=present"
+            ]
+          latest <- getCurrentTime
+          cookies <- getCookies jar
+          map cookieName cookies `shouldBe` ["age", "session"]
+          case map cookieExpires cookies of
+            [Just age, Nothing] ->
+              (age >= addUTCTime 60 earliest && age <= addUTCTime 60 latest) `shouldBe` True
+            expiries -> expectationFailure ("Expected one persistent and one session cookie, got " <> show expiries)
       ]
 
 

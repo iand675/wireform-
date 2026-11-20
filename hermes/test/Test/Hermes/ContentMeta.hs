@@ -8,6 +8,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.Text as T
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
@@ -16,7 +17,7 @@ import Network.HTTP.ContentCoding (ContentCoding (..))
 import Network.HTTP.ContentNegotiation (MediaType (..))
 import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), decodeExtendedValue, parseExtendedValue, renderExtendedValue)
 import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, setHeader)
-import Network.HTTP.Headers.ContentDisposition (ContentDisposition (..), contentDispositionFilename)
+import Network.HTTP.Headers.ContentDisposition (ContentDisposition (..), ContentDispositionFilenameError (..), contentDispositionFilename, mkContentDispositionFilename)
 import Network.HTTP.Headers.ContentEncoding (ContentEncoding (..), contentCodings)
 import qualified Network.HTTP.Headers.ContentLanguage as CL
 import qualified Network.HTTP.Headers.ContentLocation as CLoc
@@ -263,6 +264,37 @@ representationHeaders = do
       lookupHeader @ContentEncoding (headerMapFromList [("content-encoding", "GZIP-Extension")]) `shouldBe` Right (Just (ContentEncoding (Custom "GZIP-Extension")))
       lookupHeader @ContentEncoding (headerMapFromList [("content-encoding", "ZsTd")]) `shouldBe` Right (Just (ContentEncoding ZStd))
   describe "Content-Disposition" $ do
+    it "authors plain and UTF-8 filenames through typed setHeader" $ do
+      let authored dtype name fallback = do
+            value <- mkContentDispositionFilename dtype name fallback
+            let fields = setHeader value (headerMapFromList [])
+            pure (headerMapToList fields, fmap (>>= contentDispositionFilename) (lookupHeader @ContentDisposition fields))
+      authored "attachment" "report; \"draft\".txt" Nothing
+        `shouldBe` Right ([("content-disposition", "attachment;filename=\"report; \\\"draft\\\".txt\"")], Right (Just "report; \"draft\".txt"))
+      authored "inline" "résumé 科学.txt" (Just "resume.txt")
+        `shouldBe` Right ([("content-disposition", "inline;filename=resume.txt;filename*=UTF-8''r%C3%A9sum%C3%A9%20%E7%A7%91%E5%AD%A6.txt")], Right (Just "résumé 科学.txt"))
+      authored "attachment" "100%.txt" Nothing
+        `shouldBe` Right ([("content-disposition", "attachment;filename=100%.txt")], Right (Just "100%.txt"))
+      authored "attachment" "note%20draft.txt" Nothing
+        `shouldBe` Right ([("content-disposition", "attachment;filename*=UTF-8''note%2520draft.txt")], Right (Just "note%20draft.txt"))
+      authored "attachment" "one\\two.txt" Nothing
+        `shouldBe` Right ([("content-disposition", "attachment;filename*=UTF-8''one%5Ctwo.txt")], Right (Just "one\\two.txt"))
+    it "rejects invalid disposition tokens and unsuitable fallback text" $ do
+      forM_ ["", "bad token", "inline;name", "año"] $ \dtype ->
+        mkContentDispositionFilename dtype "file.txt" Nothing `shouldBe` Left InvalidDispositionType
+      forM_ ["new\nline", "new\rline", "tab\tname", "name\x7f", "name\x85"] $ \filename ->
+        mkContentDispositionFilename "attachment" filename Nothing `shouldBe` Left InvalidFilenameCharacters
+      forM_ ["caf\xe9.txt", "note%20draft", "note\\draft", "tab\tname"] $ \fallback ->
+        mkContentDispositionFilename "attachment" "résumé.txt" (Just fallback) `shouldBe` Left InvalidFilenameFallback
+    it "round-trips authored advisory filename text" $
+      property $ do
+        name <- forAll (T.pack <$> Gen.list (Range.linear 0 45) (Gen.element ("fileA1 %2a;\"\\éド📄\x0301" :: String)))
+        fallback <- forAll (Gen.element [Nothing, Just "file.txt"])
+        case mkContentDispositionFilename "attachment" name fallback of
+          Left failure -> error (show failure)
+          Right value ->
+            fmap (>>= contentDispositionFilename) (lookupHeader @ContentDisposition (setHeader value (headerMapFromList [])))
+              === Right (Just name)
     it "round-trips an escaped filename and keeps filename* on the wire" $ do
       let value = ContentDisposition "attachment" [("filename", "one, two\".txt"), ("filename*", "UTF-8''caf%C3%A9.txt")]
           fields = setHeader value (headerMapFromList [])
@@ -311,3 +343,14 @@ representationHeaders = do
       parseExtendedValue wire `shouldBe` Right value
       decodeExtendedValue value `shouldBe` Just "\x20ac a+b'*"
       M.toStrictByteString (renderExtendedValue value) `shouldBe` "UTF-8'en-GB'%E2%82%AC%20a+b%27%2A"
+    it "renders all extended parameter octets with canonical percent escapes" $ do
+      let octets = BS.concat (replicate 18 (BS.pack [0 .. 255]))
+          value = ExtendedValue "UTF-8" Nothing octets
+          wire = M.toStrictByteString (renderExtendedValue value)
+          attr = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&+-.^_" <> BS.pack [96] <> "|~"
+          hex = BS.index "0123456789ABCDEF" . fromIntegral
+          encode byte
+            | BS.elem byte attr = BS.singleton byte
+            | otherwise = let (hi, lo) = quotRem byte 16 in BS.pack [37, hex hi, hex lo]
+      wire `shouldBe` ("UTF-8''" <> BS.concatMap encode octets)
+      parseExtendedValue wire `shouldBe` Right value

@@ -21,7 +21,8 @@ wants on a response, and a server may request signatures on subsequent
 requests.
 
 The @created@ and @expires@ parameters are Boolean flags requesting
-that the signer generate timestamps.
+that the signer generate timestamps. Component identifiers use the
+same name grammar and parameter types as @Signature-Input@.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9421.html#name-the-accept-signature-field>
 

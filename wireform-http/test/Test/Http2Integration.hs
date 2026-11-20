@@ -30,6 +30,8 @@ import Network.HTTP.Client.Response qualified as Raw
 import Network.HTTP.Connection
 import Network.HTTP.Headers qualified as Typed
 import Network.HTTP.Headers.ContentDigest (ContentDigest)
+import Network.HTTP.Headers.Signature qualified as Signature
+import Network.HTTP.Headers.SignatureInput qualified as SignatureInput
 import Network.HTTP.Server
 import Network.HTTP.Types.Status qualified as S
 import Network.HTTP.Types.Version qualified as V
@@ -53,6 +55,7 @@ tests =
       , connectAuthorityTarget
       , ordinaryAuthority
       , bodyDerivedTrailers
+      , splitSignatureFields
       , fixedRequestTrailers
       , trailerActionFailure
       , invalidRequestTrailers
@@ -334,6 +337,36 @@ digestTrailers =
 
 helloDigest :: BS.ByteString
 helloDigest = "sha-256=:LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=:"
+
+
+splitSignatureFields :: Spec
+splitSignatureFields = it "pairs signature headers and trailers over HTTP/1.1 and HTTP/2" $
+  forM_ [(http1Only, V.HTTP1_1), (http2Only, V.HTTP2)] $ \(range, version) ->
+    withTestServer range (handler version) $ \port ->
+      runClient range port $ \connection -> do
+        let acceptTrailers = if version == V.HTTP1_1 then [("TE", "trailers"), ("Connection", "TE")] else []
+            request = (mkRequest "GET" "/" port BodyEmpty acceptTrailers) {requestVersion = version}
+        response <- sendOn connection request
+        drainBody (responseBody response) `shouldReturn` "hello"
+        trailers <- responseTrailers response
+        let fields = Typed.headerMapFromList (responseHeaders response)
+        case Signature.lookupMessageSignaturesWithTrailers fields (Typed.headerMapFromList trailers) of
+          Right (Just (Signature.MessageSignature input bytes :| [])) -> do
+            SignatureInput.signatureLabel input `shouldBe` "sig1"
+            bytes `shouldBe` "fixture"
+          other -> expectationFailure (show other)
+  where
+    handler version _ = do
+      next <- newIORef (Just "hello")
+      pure (resp200 "")
+        { responseVersion = version
+        , responseHeaders =
+            [ ("Trailer", "Content-Digest, Signature")
+            , ("Signature-Input", "sig1=(\"content-digest\";tr)")
+            ]
+        , responseBody = BodyStream (atomicModifyIORef' next (\chunk -> (Nothing, chunk)))
+        , responseTrailers = pure [("Content-Digest", helloDigest), ("Signature", "sig1=:Zml4dHVyZQ==:")]
+        }
 
 
 checkDigestTrailers :: Headers -> Headers -> IO ()

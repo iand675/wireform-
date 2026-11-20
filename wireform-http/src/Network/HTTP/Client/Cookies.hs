@@ -6,6 +6,8 @@
 
 Implements RFC 6265 scheme, host, path and expiry matching. The
 request field orders cookies by descending path length, then by creation.
+Persistent cookies received from HTTP responses have a maximum lifetime
+of 400 days.
 The jar stores @SameSite@ and @HttpOnly@ as metadata. Request matching
 has no top-level navigation or non-HTTP context.
 
@@ -50,7 +52,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Text.Encoding qualified as TE
 import Data.Text.Short qualified as ST
-import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
+import Data.Time.Calendar (addDays)
+import Data.Time.Clock (UTCTime (..), addUTCTime, getCurrentTime)
 import Data.Word (Word64)
 import Network.HTTP.Client.Request
 import Network.HTTP.Client.Response
@@ -304,9 +307,8 @@ validateCookie jar c = do
     else Right ()
 
 
-{- | RFC 6265bis: the @__Secure-@ prefix requires @Secure@; the
-@__Host-@ prefix additionally requires no @Domain@ and
-@Path=\/@.
+{- | RFC 6265bis requires @Secure@ for the @__Secure-@ prefix.
+The @__Host-@ prefix also requires host-only scope and @Path=\/@.
 -}
 validatePrefixes :: Bool -> Cookie -> Either CookieError ()
 validatePrefixes rootPathSupplied c
@@ -508,19 +510,15 @@ fromHermesSetCookie isPublicSuffix now ctx sc = case Hermes.setCookieDomain sc o
     hostCookie = newCookie host False
     stBytes = ST.toByteString
     pathBytes = case stBytes <$> Hermes.setCookiePath sc of
-        Just path | "/" `BS.isPrefixOf` path -> path
-        _ -> defaultPath (uriPath ctx)
-    -- RFC 6265 §5.2.2 gives Max-Age precedence over Expires.
-    expires = case Hermes.setCookieMaxAge sc of
-        Just s -> Just (addUTCTime (fromIntegral s :: NominalDiffTime) now)
-        Nothing -> Hermes.setCookieExpires sc
+      Just path | "/" `BS.isPrefixOf` path -> path
+      _ -> defaultPath (uriPath ctx)
     newCookie domain hasDomain = Cookie
        { cookieName = stBytes (Hermes.setCookieName sc)
        , cookieValue = stBytes (Hermes.setCookieValue sc)
        , cookieDomain = domain
        , cookieDomainExplicit = hasDomain
        , cookiePath = pathBytes
-       , cookieExpires = expires
+       , cookieExpires = responseCookieExpiry now sc
        , cookieSecure = Hermes.setCookieSecure sc
        , cookieHttpOnly = Hermes.setCookieHttpOnly sc
        , cookieSameSite = case Hermes.setCookieSameSite sc of
@@ -529,6 +527,25 @@ fromHermesSetCookie isPublicSuffix now ctx sc = case Hermes.setCookieDomain sc o
            Just Hermes.SameSiteNone -> SameSiteNone
            Nothing -> SameSiteLax
        }
+
+
+-- HTTPbis cookie draft §§5.5–5.6 and §5.7.
+responseCookieExpiry :: UTCTime -> Hermes.SetCookie -> Maybe UTCTime
+responseCookieExpiry now cookie = case Hermes.setCookieMaxAge cookie of
+  Just age
+    | age <= 0 -> Just now
+    | age > fromInteger (maxAgeDays * 86400) -> Just $! expiryLimit
+    | otherwise -> Just (addUTCTime (fromIntegral age) now)
+  Nothing -> case Hermes.setCookieExpires cookie of
+    Just timestamp -> Just $! min timestamp expiryLimit
+    Nothing -> Nothing
+  where
+    maxAgeDays = 400
+    -- The receipt clock is in UTC. A whole-day cap keeps its time of day.
+    expiryLimit = case now of
+      UTCTime day time -> UTCTime (addDays maxAgeDays day) time
+-- Keep the deadline calculation inside the branches that use it.
+{-# NOINLINE responseCookieExpiry #-}
 
 
 defaultPath :: ByteString -> ByteString

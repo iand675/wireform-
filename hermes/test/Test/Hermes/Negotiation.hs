@@ -5,11 +5,13 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.ContentCoding (ContentCoding (..))
 import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType (..), WeightedMediaRange (..))
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Accept (Accept (..))
+import Network.HTTP.Headers.Accept (Accept (..), acceptedContentQuality, preferredContentType)
 import Network.HTTP.Headers.AcceptCharset (AcceptCharset (..), WeightedCharset (..))
 import Network.HTTP.Headers.AcceptEncoding (AcceptEncoding (..), EncodingTag (..), WeightedEncoding (..))
-import Network.HTTP.Headers.AcceptLanguage (AcceptLanguage (..), WeightedLanguage (..))
+import Network.HTTP.Headers.AcceptLanguage (AcceptLanguage (..), WeightedLanguage (..), acceptedLanguageQuality, preferredLanguage)
 import Network.HTTP.Headers.CacheControl (CacheControl (..), CacheControlDirective (..))
+import Network.HTTP.Headers.ContentLanguage (LanguageTag (..))
+import Network.HTTP.Headers.ContentType (ContentType (..))
 import Network.HTTP.Headers.HeaderFieldName (
   cachedHeaderFieldName,
   hCacheControl,
@@ -103,3 +105,82 @@ tests = do
     it "renders quality weights as decimals with at most three fractional digits" $ do
       let value = AcceptLanguage [WeightedLanguage "en" 0.12349, WeightedLanguage "fr" 0.009, WeightedLanguage "de" 0.05]
       renderToHeaders defaultHeaderSettings value `shouldBe` "en;q=0.123, fr;q=0.009, de;q=0.05"
+    it "assigns media qualities using the RFC 9110 precedence example" $ do
+      let fields = headerMapFromList
+            [ ("Accept", "text/*;q=0.3, text/plain;q=0.7, text/plain;format=flowed")
+            , ("accept", "text/plain;format=fixed;q=0.4, */*;q=0.5")
+            ]
+          plain = MediaType "text" "plain"
+          flowed = ParameterizedContentType plain (("format", "flowed") :| [])
+          fixed = ParameterizedContentType plain (("format", "fixed") :| [])
+          available = [ContentType plain, ContentType (MediaType "text" "html"), ContentType (MediaType "image" "jpeg"), fixed, flowed]
+      preferences <- either expectationFailure pure (lookupHeader @Accept fields)
+      map (acceptedContentQuality preferences) available `shouldBe` [0.7, 0.3, 0.5, 0.4, 1]
+      preferredContentType preferences available `shouldBe` Just flowed
+    it "lets a specific exclusion override a wildcard across repeated lines" $ do
+      let fields = headerMapFromList
+            [ ("Accept", "*/*;q=0.8, text/*;q=0.9")
+            , ("accept", "TEXT/PLAIN;CHARSET=\"UTF-8\";q=0, text/plain;q=0.4")
+            ]
+          utf8 = ParameterizedContentType (MediaType "text" "PLAIN") (("Charset", "utf-8") :| [("level", "2")])
+          plain = ContentType (MediaType "text" "plain")
+          json = ContentType (MediaType "application" "json")
+      preferences <- either expectationFailure pure (lookupHeader @Accept fields)
+      acceptedContentQuality preferences utf8 `shouldBe` 0
+      acceptedContentQuality preferences plain `shouldBe` 0.4
+      preferredContentType preferences [utf8, plain, json] `shouldBe` Just json
+      preferredContentType preferences [utf8] `shouldBe` Nothing
+    it "matches decoded parameters by name and keeps specificity ties in wire order" $ do
+      let fields = headerMapFromList [("Accept",
+            "TEXT/plain;profile=\"Case\";q=0.9, text/plain;PROFILE=Case;profile=Case;q=0, text/plain;profile=case;q=0.3, text/plain;level=1;profile=Case;q=0.7")]
+          plain = MediaType "text" "plain"
+          exact = ParameterizedContentType plain (("PROFILE", "Case") :| [])
+          other = ParameterizedContentType plain (("profile", "case") :| [])
+          narrowed = ParameterizedContentType plain (("profile", "Case") :| [("Level", "1")])
+      preferences <- either expectationFailure pure (lookupHeader @Accept fields)
+      map (acceptedContentQuality preferences) [exact, other, narrowed] `shouldBe` [0.9, 0.3, 0.7]
+    it "handles absent and empty fields, equal qualities and authored weights" $ do
+      let plain = ContentType (MediaType "text" "plain")
+          html = ContentType (MediaType "text" "html")
+          noMatch = Just (Accept [WeightedMediaRange (MediaRange (MediaType "image" "") []) 1])
+          wildcard q = Just (Accept [WeightedMediaRange (MediaRange (MediaType "" "") []) q])
+      preferredContentType Nothing [plain, html] `shouldBe` Just plain
+      preferredContentType Nothing [] `shouldBe` Nothing
+      preferredContentType (Just (Accept [])) [plain] `shouldBe` Nothing
+      preferredContentType noMatch [plain, html] `shouldBe` Nothing
+      preferredContentType (wildcard 0.5) [html, plain] `shouldBe` Just html
+      map (\q -> acceptedContentQuality (wildcard q) plain) [-2, 2, 0 / 0] `shouldBe` [0, 1, 0]
+  describe "Accept-Language selection" $ do
+    it "matches case-insensitively at subtag boundaries" $ do
+      let fields = headerMapFromList [("Accept-Language", "dE-De;q=0.8")]
+          tags = map LanguageTag ["de-DE-1996", "de-Deva", "de-Latn-DE", "de", "DE-de"]
+      preferences <- either expectationFailure pure (lookupHeader @AcceptLanguage fields)
+      map (acceptedLanguageQuality preferences) tags `shouldBe` [0.8, 0, 0, 0, 0.8]
+      preferredLanguage preferences tags `shouldBe` Just (LanguageTag "de-DE-1996")
+    it "uses the longest range before weight, including an explicit exclusion" $ do
+      let fields = headerMapFromList
+            [ ("Accept-Language", "*;q=0.9, zh;q=0.2, en;q=0.7")
+            , ("accept-language", "ZH-hant;q=0.6, zh-HANT-TW;q=0, en-US;q=0")
+            ]
+          tags = map LanguageTag ["zh-Hans-CN", "zh-Hant-HK", "zh-Hant-TW", "en-US", "en-GB", "fr"]
+      preferences <- either expectationFailure pure (lookupHeader @AcceptLanguage fields)
+      map (acceptedLanguageQuality preferences) tags `shouldBe` [0.2, 0.6, 0, 0, 0.7, 0.9]
+      preferredLanguage preferences (map LanguageTag ["en-US", "zh-Hant-TW"]) `shouldBe` Nothing
+      preferredLanguage preferences tags `shouldBe` Just (LanguageTag "fr")
+    it "keeps wire order for repeated ranges and server order for equally rated tags" $ do
+      let fields = headerMapFromList [("Accept-Language", "EN;q=0.4, fr;q=0.4"), ("accept-language", "en;q=1, *;q=0")]
+          english = LanguageTag "en-GB"
+          french = LanguageTag "fr-FR"
+      preferences <- either expectationFailure pure (lookupHeader @AcceptLanguage fields)
+      acceptedLanguageQuality preferences english `shouldBe` 0.4
+      preferredLanguage preferences [french, english] `shouldBe` Just french
+    it "distinguishes absent, empty, and wildcard-only preferences" $ do
+      let offered = [LanguageTag "es-419", LanguageTag "en"]
+          emptyFields = headerMapFromList [("Accept-Language", " , ")]
+          wildcard q = Just (AcceptLanguage [WeightedLanguage "*" q])
+      empty <- either expectationFailure pure (lookupHeader @AcceptLanguage emptyFields)
+      empty `shouldBe` Just (AcceptLanguage [])
+      preferredLanguage empty offered `shouldBe` Nothing
+      preferredLanguage Nothing offered `shouldBe` Just (LanguageTag "es-419")
+      preferredLanguage (wildcard 0) offered `shouldBe` Nothing
+      preferredLanguage (wildcard 1) offered `shouldBe` Just (LanguageTag "es-419")

@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE BangPatterns #-}
 
 -- | Extended HTTP parameter values (RFC 8187).
 module Network.HTTP.Grammar.ExtendedValue (
@@ -12,19 +13,25 @@ module Network.HTTP.Grammar.ExtendedValue (
 import Data.Bits (shiftR, (.&.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
 import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Unsafe as BSU
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Data.Word (Word8)
+import Foreign.Ptr (plusPtr)
+import Foreign.Storable (pokeByteOff)
 import Network.HTTP.Grammar.Authority (pctEncoded)
 import Network.HTTP.Grammar.LanguageTag (languageTagBytes)
 import Network.HTTP.Grammar.Parser
 import Network.HTTP.Grammar.Rendering (shortText)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.URL.Decode (urlDecodeMaybe)
+import qualified Wireform.Builder as B
 
 
 -- | The charset, optional language tag and decoded octets of a parameter.
@@ -85,9 +92,25 @@ decodeExtendedValue value = case BC.map toLower (ST.toByteString (extendedCharse
 -- | Render an extended parameter with uppercase percent escapes.
 renderExtendedValue :: ExtendedValue -> M.Builder
 renderExtendedValue (ExtendedValue encoding lang octets) =
-  shortText encoding <> "'" <> foldMap shortText lang <> "'" <> BS.foldr renderByte mempty octets
+  shortText encoding <> "'" <> foldMap shortText lang <> "'" <> renderOctets
   where
-    renderByte byte rest
-      | attrChar byte = M.word8 byte <> rest
-      | otherwise = "%" <> hex (byte `shiftR` 4) <> hex (byte .&. 15) <> rest
-    hex digit = M.word8 (if digit < 10 then 48 + digit else 55 + digit)
+    renderOctets
+      | BS.all attrChar octets = M.byteString octets
+      | otherwise = B.primBounded (Prim.boundedPrim bound write) octets
+    len = BS.length octets
+    add = BSI.checkedAdd "RFC 8187 encoded value"
+    bound = add len (add len len)
+    write input ptr = go 0 0
+      where
+        go !source !dest
+          | source == len = pure (ptr `plusPtr` dest)
+          | otherwise =
+              let byte = BSU.unsafeIndex input source
+              in if attrChar byte
+                   then pokeByteOff ptr dest byte *> go (source + 1) (dest + 1)
+                   else do
+                     pokeByteOff ptr dest (37 :: Word8)
+                     pokeByteOff ptr (dest + 1) (hex (byte `shiftR` 4))
+                     pokeByteOff ptr (dest + 2) (hex (byte .&. 15))
+                     go (source + 1) (dest + 3)
+    hex digit = if digit < 10 then 48 + digit else 55 + digit

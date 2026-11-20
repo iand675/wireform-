@@ -15,7 +15,7 @@ import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
 import qualified Network.HTTP.Headers.AcceptSignature as AS
-import Network.HTTP.Headers.HeaderFieldName (hAcceptSignature)
+import Network.HTTP.Headers.HeaderFieldName (hAcceptSignature, hSignature, hSignatureInput)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (ItemValue (..), RFC8941String (..), Result (..), runParser)
 import qualified Network.HTTP.Headers.Signature as Sig
@@ -300,6 +300,60 @@ tests =
       , unit_siginput_render
       , unit_acceptsig_parse
       , unit_acceptsig_render
+      , it "pairs according to input labels in header and trailer order" $ do
+          let headers =
+                headerMapFromList
+                  [ ("Signature-Input", "first=(\"@status\");created=1")
+                  , ("Signature-Input", "second=(\"date\")")
+                  , ("Signature", "last=:bA==:, second=:cw==:")
+                  ]
+              trailers =
+                headerMapFromList
+                  [ ("Signature-Input", "last=(\"content-digest\";tr)")
+                  , ("Signature", "first=:Zg==:")
+                  ]
+              pairs = fmap (fmap (\match ->
+                (SI.signatureLabel (Sig.messageSignatureInput match), Sig.messageSignatureBytes match)))
+          pairs <$> Sig.lookupMessageSignaturesWithTrailers headers trailers
+            `shouldBe` Right (Just (("first", "f") :| [("second", "s"), ("last", "l")]))
+          case Sig.lookupMessageSignaturesWithTrailers headers trailers of
+            Right (Just (Sig.MessageSignature input _ :| _)) ->
+              SI.signatureParameters input `shouldBe` [("created", Just (Integer 1))]
+            other -> expectationFailure (show other)
+          let unsigned = headerMapFromList []
+              single = headerMapFromList [("Signature-Input", "one=()"), ("Signature", "one=:YQ==:")]
+          Sig.lookupMessageSignatures unsigned `shouldBe` Right Nothing
+          pairs <$> Sig.lookupMessageSignatures single `shouldBe` Right (Just (("one", "a") :| []))
+          Sig.lookupMessageSignaturesWithTrailers unsigned single `shouldBe` Sig.lookupMessageSignatures single
+      , it "reports a label missing from either signature field" $ do
+          let onlyInput = headerMapFromList [("Signature-Input", "a=()")]
+              onlyValue = headerMapFromList [("Signature", "b=:Yg==:")]
+              excessValue = headerMapFromList [("Signature-Input", "a=()"), ("Signature", "a=:YQ==:, b=:Yg==:")]
+              excessInput = headerMapFromList [("Signature-Input", "a=(), b=()"), ("Signature", "a=:YQ==:")]
+          Sig.lookupMessageSignatures onlyInput `shouldBe` Left (Sig.MissingMessageSignatureLabel hSignature "a")
+          Sig.lookupMessageSignatures onlyValue `shouldBe` Left (Sig.MissingMessageSignatureLabel hSignatureInput "b")
+          Sig.lookupMessageSignaturesWithTrailers onlyInput onlyValue
+            `shouldBe` Left (Sig.MissingMessageSignatureLabel hSignature "a")
+          Sig.lookupMessageSignatures excessValue `shouldBe` Left (Sig.MissingMessageSignatureLabel hSignatureInput "b")
+          Sig.lookupMessageSignatures excessInput `shouldBe` Left (Sig.MissingMessageSignatureLabel hSignature "b")
+      , it "keeps signature field sections independent and rejects labels repeated across them" $ do
+          let inputs = headerMapFromList [("Signature-Input", "a=()")]
+              values = headerMapFromList [("Signature", "a=:YQ==:")]
+              broken = headerMapFromList [("Signature", "a")]
+              left = headerMapFromList [("Signature-Input", "a=(\"date\";x=\"left")]
+              right = headerMapFromList [("Signature-Input", "right\")")]
+          Sig.lookupMessageSignaturesWithTrailers inputs inputs
+            `shouldBe` Left (Sig.DuplicateMessageSignatureLabel hSignatureInput "a")
+          Sig.lookupMessageSignaturesWithTrailers values values
+            `shouldBe` Left (Sig.DuplicateMessageSignatureLabel hSignature "a")
+          case Sig.lookupMessageSignaturesWithTrailers inputs broken of
+            Left (Sig.MalformedMessageSignatureField Sig.SignatureTrailerSection field _) ->
+              field `shouldBe` hSignature
+            other -> expectationFailure (show other)
+          case Sig.lookupMessageSignaturesWithTrailers left right of
+            Left (Sig.MalformedMessageSignatureField Sig.SignatureHeaderSection field _) ->
+              field `shouldBe` hSignatureInput
+            other -> expectationFailure (show other)
       , it "combines signed field lines in order and rejects duplicate labels" $ do
           let signatures = headerMapFromList [("Signature", "a=:YQ:;ext"), ("Signature", "b=:Yg==:")]
               inputs = headerMapFromList [("Signature-Input", "a=();created=1"), ("Signature-Input", "b=(\"@status\")")]
@@ -313,8 +367,8 @@ tests =
             `shouldSatisfy` isLeft
           parseAS "a=(), a=(\"@method\")" `shouldSatisfy` isLeft
       , it "uses inner-list whitespace and String rules for both fields" $ do
-          let wire = "s=(  \"@method\"   \"example\";key=\"escaped\\\"value\"  )"
-              canonical = "s=(\"@method\" \"example\";key=\"escaped\\\"value\")"
+          let wire = "s=(  \"@method\"   \"example\";extension=\"escaped\\\"value\"  )"
+              canonical = "s=(\"@method\" \"example\";extension=\"escaped\\\"value\")"
           fmap renderSI (parseSI wire) `shouldBe` Right canonical
           fmap renderAS (parseAS wire) `shouldBe` Right canonical
           mapM_
@@ -332,6 +386,36 @@ tests =
           parseSI ("s=(" <> manyComponents <> " \"date\";b;a)") `shouldSatisfy` isLeft
           fmap renderSI (parseSI ("s=(" <> manyComponents <> " \"date\";b)")) `shouldBe` Right ("s=(" <> manyComponents <> " \"date\";b)")
           parseSig "a=::, b=::, c=::, a=::" `shouldSatisfy` isLeft
+      , it "validates registered component identifiers and parameter types in both fields" $ do
+          let inputs bytes = headerMapFromList [("Signature-Input", bytes)]
+              requests bytes = headerMapFromList [("Accept-Signature", bytes)]
+              valid = "s=(\"@query-param\";name=\"page\";req \"content-digest\";key=\"sha-256\";tr \"date\";bs \"@extension-1\";x-note=@2)"
+              duplicate = "s=(\"@query-param\";name=4;name=\"page\")"
+              canonical = "s=(\"@query-param\";name=\"page\")"
+          fmap (fmap renderSI) (lookupHeader @SI.SignatureInput (inputs valid)) `shouldBe` Right (Just valid)
+          fmap (fmap renderAS) (lookupHeader @AS.AcceptSignature (requests valid)) `shouldBe` Right (Just valid)
+          fmap renderSI (parseSI duplicate) `shouldBe` Right canonical
+          fmap renderAS (parseAS duplicate) `shouldBe` Right canonical
+          mapM_
+            ( \invalid -> do
+                lookupHeader @SI.SignatureInput (inputs invalid) `shouldSatisfy` isLeft
+                lookupHeader @AS.AcceptSignature (requests invalid) `shouldSatisfy` isLeft
+            )
+            [ "s=(\"@extension_name\")"
+            , "s=(\"@query-param\")"
+            , "s=(\"@query-param\";name=token)"
+            , "s=(\"@query-param\";name=\"page\";name=1)"
+            , "s=(\"date\";sf=1)"
+            , "s=(\"date\";bs=\"binary\")"
+            , "s=(\"date\";tr=token)"
+            , "s=(\"@method\";req=1)"
+            , "s=(\"content-digest\";key)"
+            , "s=(\"content-digest\";key=\"SHA-256\")"
+            , "s=(\"@method\";tr)"
+            , "s=(\"@path\";sf)"
+            , "s=(\"date\";bs;sf)"
+            , "s=(\"content-digest\";key=\"sha-256\";bs)"
+            ]
       , it "distinguishes signature timestamps from negotiation flags" $ do
           parseSI "s=();created" `shouldSatisfy` isLeft
           parseAS "s=();created=1" `shouldSatisfy` isLeft

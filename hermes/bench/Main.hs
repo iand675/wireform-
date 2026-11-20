@@ -21,6 +21,7 @@ import Network.HTTP.ContentCoding (ContentCoding (..), contentCodingParser)
 import qualified Network.HTTP.Headers.AcceptEncoding as AcceptEncoding
 import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType (..), WeightedMediaRange (..))
 import qualified Network.HTTP.Grammar.ExtensionDeclaration as Extension
+import qualified Network.HTTP.Grammar.ExtendedValue as Extended
 import qualified Network.HTTP.Grammar.LegacyProtocol as Legacy
 import qualified Network.HTTP.Grammar.PEP as PepGrammar
 import qualified Network.HTTP.Grammar.PICS as Pics
@@ -41,11 +42,11 @@ import qualified Network.HTTP.Headers.Expect as Expect
 import qualified Network.HTTP.Headers.AIM as AIM
 import qualified Network.HTTP.Headers.ALPN as ALPN
 import qualified Network.HTTP.Headers.AMPCacheTransform as AMP
-import Network.HTTP.Headers.Accept (Accept (..))
+import Network.HTTP.Headers.Accept (Accept (..), preferredContentType)
 import qualified Network.HTTP.Headers.AcceptCH as AcceptCH
 import qualified Network.HTTP.Headers.AcceptAdditions as Additions
 import qualified Network.HTTP.Headers.AcceptFeatures as AcceptFeatures
-import Network.HTTP.Headers.AcceptLanguage (AcceptLanguage (..), WeightedLanguage (..))
+import Network.HTTP.Headers.AcceptLanguage (AcceptLanguage (..), WeightedLanguage (..), preferredLanguage)
 import qualified Network.HTTP.Headers.AcceptSignature as AcceptSignature
 import qualified Network.HTTP.Headers.AccessControlAllowCredentials as CorsCredentials
 import qualified Network.HTTP.Headers.AccessControlAllowHeaders as CorsAllowHeaders
@@ -73,7 +74,7 @@ import qualified Network.HTTP.Headers.ContentBase as ContentBase
 import qualified Network.HTTP.Headers.ContentDigest as Digest
 import qualified Network.HTTP.Headers.Digest as LegacyDigest
 import qualified Network.HTTP.Headers.WantDigest as WantDigest
-import Network.HTTP.Headers.ContentDisposition (ContentDisposition (..), contentDispositionFilename)
+import Network.HTTP.Headers.ContentDisposition (ContentDisposition (..), contentDispositionFilename, mkContentDispositionFilename)
 import Network.HTTP.Headers.ContentEncoding (ContentEncoding, contentCodings)
 import qualified Network.HTTP.Headers.ContentID as ContentID
 import Network.HTTP.Headers.ContentLanguage (ContentLanguage (..), LanguageTag (..), contentLanguageTagList)
@@ -333,6 +334,12 @@ main =
         , bench "render" $ nf (renderToHeaders defaultHeaderSettings) browserAccept
         , bench "render-content-type" $ nf (renderToHeaders defaultHeaderSettings) multipartContentType
         , bench "language-parse" $ nf languageScore "en-US, zh-Hant-TW;q=0.9, es-419;q=0.8, *;q=0.1"
+        , bench "choose-absent" $ whnf (preferredContentType Nothing) offeredContentTypes
+        , bench "choose-exact" $ whnf (preferredContentType exactContentPreference) offeredContentTypes
+        , bench "choose-parameters" $ whnf (preferredContentType parameterContentPreference) offeredContentTypes
+        , bench "choose-language-absent" $ whnf (preferredLanguage Nothing) offeredLanguages
+        , bench "choose-language-exact" $ whnf (preferredLanguage exactLanguagePreference) offeredLanguages
+        , bench "choose-language-prefix" $ whnf (preferredLanguage prefixLanguagePreference) offeredLanguages
         ]
     , bgroup
         "content-encoding"
@@ -347,6 +354,11 @@ main =
         , bench "disposition-parse-extended" $ nf dispositionScore "attachment;filename=report.txt;filename*=UTF-8'en-GB'%E2%82%AC+report.txt"
         , bench "disposition-filename" $ nf dispositionFilenameScore exampleDisposition
         , bench "disposition-render" $ nf (renderToHeaders defaultHeaderSettings) exampleDisposition
+        , bench "disposition-author-ascii" $ nf (authoredDisposition Nothing) "report 2026.txt"
+        , bench "disposition-author-utf8" $ nf (authoredDisposition Nothing) "résumé 科学.txt"
+        , bench "disposition-author-fallback" $ nf (authoredDisposition (Just "resume.txt")) "résumé 科学.txt"
+        , bench "extended-value-render" $
+            nf (Mason.toStrictByteString . Extended.renderExtendedValue) extendedValueFixture
         , bench "language-parse" $ nf contentLanguageScore "en-US, es-419, zh-Hant-TW"
         ]
     , bgroup
@@ -410,6 +422,10 @@ main =
         , bench "signature-input" $ nf signatureInputScore signatureInputFixture
         , bench "signature-input-render" $ nf (renderToHeaders defaultHeaderSettings) signatureInputRenderFixture
         , bench "accept-signature" $ nf acceptSignatureScore acceptSignatureFixture
+        , bench "message-unsigned" $ nf (messageSignatureScore . Signature.lookupMessageSignatures) unsignedMessageHeaders
+        , bench "message-pair" $ nf (messageSignatureScore . Signature.lookupMessageSignatures) signedMessageHeaders
+        , bench "message-with-trailers" $
+            nf (messageSignatureScore . Signature.lookupMessageSignaturesWithTrailers signedMessageHeaders) signatureTrailerFields
         , bench "reporting-endpoints" $ nf reportingScore reportingFixture
         , bench "reporting-endpoints-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Reporting.ReportingEndpoints reportingFixture)
         , bench "nel" $ whnf (shortBytes . NEL.nelPolicy . parseBenchmarkHeader) nelFixture
@@ -1285,6 +1301,25 @@ acceptSignatureFixture = "sig1=(\"@method\" \"@target-uri\" \"@authority\" \"con
 reportingFixture = "default=\"https://reports.example/default\", backup=\"https://reports.example/backup\"" :| []
 
 
+unsignedMessageHeaders, signedMessageHeaders, signatureTrailerFields :: HeaderMap
+unsignedMessageHeaders = headerMapFromList [("Content-Type", "text/plain"), ("Server", "wireform")]
+signedMessageHeaders = headerMapFromList
+  [ ("Signature-Input", NE.head signatureInputFixture)
+  , ("Signature", NE.head signatureFixture)
+  ]
+signatureTrailerFields = headerMapFromList
+  [ ("Signature-Input", "sig2=(\"content-digest\";tr)")
+  , ("Signature", "sig2=:YWJj:")
+  ]
+
+
+messageSignatureScore :: Either Signature.MessageSignatureError (Maybe (NonEmpty Signature.MessageSignature)) -> Int
+messageSignatureScore = either (error . show) (maybe 0 (foldl' count 0))
+  where
+    count total (Signature.MessageSignature input bytes) =
+      total + length (SignatureInput.signatureComponents input) + BS.length bytes
+
+
 nelFixture :: NonEmpty ByteString
 nelFixture = "{\"report_to\":\"default\",\"max_age\":86400,\"include_subdomains\":true}" :| []
 
@@ -1733,6 +1768,31 @@ scoreCacheDirectives = foldl' count 0
     count n _ = n + 1
 
 
+offeredContentTypes :: [ContentType]
+offeredContentTypes =
+  [ ContentType (MediaType "application" "json")
+  , ContentType (MediaType "text" "html")
+  , ContentType (MediaType "text" "plain")
+  , ParameterizedContentType (MediaType "text" "plain") (("format", "flowed") :| [])
+  ]
+
+
+exactContentPreference, parameterContentPreference :: Maybe Accept
+exactContentPreference = Just $ parseBenchmarkHeader ("application/json, text/html;q=0.8, */*;q=0.1" :| [])
+parameterContentPreference = Just $ parseBenchmarkHeader
+  ("text/*;q=0.3, text/plain;q=0.7, text/plain;format=flowed, text/plain;format=fixed;q=0.4, */*;q=0.5" :| [])
+
+
+offeredLanguages :: [LanguageTag]
+offeredLanguages = map LanguageTag ["en-GB", "en-US", "zh-Hant-HK", "fr"]
+
+
+exactLanguagePreference, prefixLanguagePreference :: Maybe AcceptLanguage
+exactLanguagePreference = Just $ parseBenchmarkHeader ("en-GB, fr;q=0.8, *;q=0.2" :| [])
+prefixLanguagePreference = Just $ parseBenchmarkHeader
+  ("*;q=0.1, en;q=0.6, en-US;q=0, ZH-hant;q=0.8, zh;q=0.3" :| [])
+
+
 acceptScore :: ByteString -> Double
 acceptScore value = case parseFromHeaders defaultHeaderSettings (value :| []) of
   Right (Accept ranges) -> foldl' (\n entry -> n + mediaWeight entry) 0 ranges
@@ -1762,6 +1822,16 @@ dispositionScore value = case parseFromHeaders defaultHeaderSettings (value :| [
 
 dispositionFilenameScore :: ContentDisposition -> Int
 dispositionFilenameScore = maybe 0 Text.length . contentDispositionFilename
+
+
+authoredDisposition :: Maybe Text.Text -> Text.Text -> ByteString
+authoredDisposition fallback =
+  either (error . show) (renderToHeaders defaultHeaderSettings)
+    . (\name -> mkContentDispositionFilename "attachment" name fallback)
+
+
+extendedValueFixture :: Extended.ExtendedValue
+extendedValueFixture = Extended.ExtendedValue "UTF-8" (Just "en-GB") (BS.pack [0xe2, 0x82, 0xac] <> " report.txt")
 
 
 exampleDisposition :: ContentDisposition

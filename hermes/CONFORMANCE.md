@@ -82,7 +82,7 @@ The source inventory now finds 241 instances with a direct import in Hermes
 tests. Direct imports do not establish the depth of the wire cases or
 interoperability. Downstream and aggregate coverage still need inspection.
 
-The latest GHC 9.10.3 suite passed all 1,093 Hermes tests. The earlier
+The latest GHC 9.10.3 suite passed all 1,122 Hermes tests. The earlier
 748-test suite passed 100 of 100 threaded runs with two or four
 capabilities after switching map keys to byte equality and hashing.
 Before the switch, the suite intermittently
@@ -5843,3 +5843,246 @@ before decoding. Core confirms the delimiter search calls `memchr`.
 | Ordinary scoped cookie | 176 ns / 1,232 B | 186 ns / 1,264 B |
 | 8 KiB cookie value | 4.74 µs / 8,600 B | 4.79 µs / 352 B |
 | 8 KiB Path value | 4.88 µs / 9,176 B | 4.40 µs / 1,160 B |
+
+## Cookie storage scope and lifetime
+
+The jar stores host-only and domain cookies independently, including
+when their name, effective domain and path match. Updates and deletions
+affect only the matching scope. The public-suffix hook accepts an
+exact-host response cookie as host-only and rejects a broader domain
+scope. Checked manual inserts accept host-only cookies on public
+suffixes. HTTP response updates preserve overlapping, unexpired Secure
+cookies. The overlap check and storage change share one STM update.
+[HTTPbis cookie draft §5.7](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-22#section-5.7).
+
+For response cookies, the jar caps both Max-Age and Expires at 400 days
+from receipt. Max-Age takes precedence, including zero and negative
+values that expire a cookie immediately. Session cookies and shorter
+lifetimes retain their normal behavior. Hermes' typed codec preserves
+the decoded wire values for callers that need to inspect or render a
+field. The cap applies to response ingestion.
+[HTTPbis cookie draft §5.5](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-22#section-5.5)
+and [§§5.6.1–5.6.2](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-22#section-5.6.1).
+
+The scope regressions failed on the jar before the storage change.
+Commit `638867df` passed 21 cookie and 468 aggregate HTTP tests. The
+400-day regression reproduced independently on that commit. It uses
+both a large Max-Age and a distant absolute expiry in the same response
+and checks that they are capped against the same receipt clock.
+
+GHC 9.10.3 passed 23 cookie, 470 aggregate HTTP, 1,106 Hermes, 137
+Connect, 18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. Aggregate HTTP and
+Connect passed under both schedules. TLS and minimal gRPC passed.
+Full gRPC passed 91 tests with one existing pending case.
+
+The Cookie receipt Criterion group measures HTTPS response ingestion
+into a warm jar with a local transport stub. Optimized Core returns
+the shared empty result for session cookies and calculates the
+deadline only for a persistent cookie that needs it. The ordinary
+Max-Age comparison uses unboxed seconds. The capped path adds whole
+days to the UTC date and preserves the receipt time of day.
+
+| Response fixture | Before | After |
+| --- | ---: | ---: |
+| Session | 422–434 ns / 3,840 B | 423–433 ns / 3,808 B |
+| Max-Age of 3,600 seconds | 823–884 ns / 5,555 B | 828–893 ns / 5,523 B |
+| Expires in year 9999 | 561–583 ns / 4,840 B | 573–606 ns / 4,864 B |
+
+Timing ranges span the point estimates of two sequential passes with
+the baseline and candidate run in reverse order on the second pass.
+
+## HTTP signature component parameters
+
+Signature-Input and Accept-Signature share the same component parser.
+It distinguishes lower-case HTTP field names from derived names, which
+use lower-case ASCII letters, digits and hyphens after the at sign.
+It checks Boolean flag types, restricts field selectors to HTTP field
+components, and requires a String name for `@query-param`. A `key`
+selector must name a Structured Fields dictionary key. Binary wrapping
+cannot be combined with strict Structured Fields serialization or
+dictionary member selection on a single component.
+
+Validation uses the final value of a repeated parameter and keeps its
+original position. Extension parameters and syntactically valid extension
+component names remain available to callers.
+[RFC 9421 §§2.1–2.5](https://www.rfc-editor.org/rfc/rfc9421.html#section-2.1)
+and [§6.4.1](https://www.rfc-editor.org/rfc/rfc9421.html#section-6.4.1).
+
+The regression failed on the baseline. A separate model checked 30,000
+inputs across the two fields, comparing acceptance and canonical bytes.
+The cases cover field and derived names, parameter types and conflicts,
+and duplicate parameters whose final value changes the outcome.
+
+The empty-parameter path returns the component directly after checking
+its name. Optimized Core keeps the parameter validator out of that path
+and scans the name with an unboxed cursor. The checked-in Criterion
+fixtures and the matching Go httpsfv v1.1.2 Dictionary and projection
+fixtures produced these measurements on the same host.
+
+| Fixture | Before | After | Go |
+| --- | ---: | ---: | ---: |
+| Signature-Input parse | 460–490 ns / 1,992 B | 446 ns / 1,992 B | 908–921 ns / 1,960 B |
+| Accept-Signature parse | 424–445 ns / 1,888 B | 417 ns / 1,888 B | 893–906 ns / 1,904 B |
+
+GHC 9.10.3 passed 1,107 Hermes, 470 aggregate HTTP, 137 Connect, 18
+WAI, 95 HTTP/1, and 125 HTTP/2 tests. Aggregate HTTP and Connect passed
+under both schedules. TLS and minimal gRPC passed. Full gRPC passed 91
+tests with one existing pending case.
+
+## Pairing message signature fields
+
+`lookupMessageSignatures` and `lookupMessageSignaturesWithTrailers`
+pair each decoded `Signature` value with its `Signature-Input` entry
+by label. Results follow the metadata order, with initial field entries
+before trailer entries. Each section is parsed independently. A label
+missing from either dictionary or repeated across sections is an error.
+Parse errors identify the field and section. An unsigned message yields
+an absent result.
+[RFC 9421 §4](https://www.rfc-editor.org/rfc/rfc9421.html#section-4)
+and [RFC 9110 §6.5.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-6.5.1).
+
+An independent model agreed on 4,096 placements for three labels,
+including absence, a header, a trailer, or both for each label in
+each field. The loopback test pairs metadata from the response headers
+with signature bytes from the trailers after reading the response body
+over HTTP/1.1 and HTTP/2.
+
+Optimized Core compares the labels of a single pair directly. An index
+is built for multiple signatures. The Criterion fixtures use prebuilt
+header maps. The Go 1.26.10 fixtures use prebuilt `http.Header` maps,
+the httpsfv Dictionary parser, and a label join over both sections.
+
+| Message fixture | Hermes | Go |
+| --- | ---: | ---: |
+| Unsigned | 15.9 ns / 32 B | 34.8–35.1 ns / 0 B |
+| One signature pair in headers | 546 ns / 2,696 B | 1.18–1.20 µs / 2,552 B |
+| One pair in each section | 847 ns / 4,647 B | 1.81–1.83 µs / 4,080 B |
+
+GHC 9.10.3 passed 1,110 Hermes, 471 aggregate HTTP, 137 Connect, 18
+WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and Connect passed under
+both schedules. TLS and minimal gRPC passed. Full gRPC passed 91 tests
+with one existing pending case.
+
+## Authoring Content-Disposition filenames
+
+`mkContentDispositionFilename` accepts the preferred filename as
+Unicode text. Ordinary printable ASCII uses `filename`. Unicode,
+backslashes, and percent-looking escapes use a UTF-8 `filename*`
+parameter so the preferred spelling survives typed lookup. A supplied
+printable ASCII fallback goes first. The constructor checks the
+disposition token and rejects control characters and unsuitable
+fallbacks.
+[RFC 6266 Appendix D](https://www.rfc-editor.org/rfc/rfc6266.html#appendix-D)
+and [RFC 8187 §3.2.1](https://www.rfc-editor.org/rfc/rfc8187.html#section-3.2.1).
+
+Quoted media parameters now use the shared compact-byte writer. The
+preferred-filename lookup compares parameter names directly in compact
+storage. The extended-value renderer copies an all-literal value as a
+span and uses a bounded writer for percent escapes. Optimized Core
+threads unboxed input and output offsets through the writer.
+
+An independent model matched 10,906 authoring and parameter-rendering
+cases. The tests exercise typed field insertion and lookup, fallback
+ordering, and every encoded octet across a builder buffer boundary.
+GHC 9.10.3 passed 1,114 Hermes, 471 aggregate HTTP, 137 Connect, 18
+WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and Connect passed under
+both schedules. TLS and minimal gRPC passed, and full gRPC passed 91
+tests with one existing pending case.
+
+| Criterion fixture | Before | After |
+| --- | ---: | ---: |
+| Quoted Content-Type render | 70 ns / 712 B | 58 ns / 568 B |
+| Content-Disposition render | 122 ns / 1,040 B | 110 ns / 896 B |
+| Preferred extended filename lookup | 199 ns / 1,328 B | 186 ns / 1,184 B |
+| Mixed extended-value render | 54 ns / 280 B | 49 ns / 280 B |
+| Ordinary Content-Disposition parse | 73 ns / 552 B | 79 ns / 552 B |
+| Extended Content-Disposition parse | 185 ns / 1,072 B | 176 ns / 1,088 B |
+
+Authoring and rendering together took 202 ns and 1,960 B for the ASCII
+fixture, 220 ns and 1,784 B for UTF-8, and 321 ns and 2,768 B for UTF-8
+with an ASCII fallback. Go 1.26.10 `mime.FormatMediaType` with a prebuilt
+parameter map took 160–163 ns and 192 B for the ASCII fixture and
+251–263 ns and 320 B for the UTF-8 fixture. A separate sequential
+benchmark of the extended-value writer reduced a 4 KiB literal value
+from 3.31 to 2.58 µs and a 4 KiB all-escaped value from 22.1 to 11.2 µs.
+
+## Selecting a representation with Accept
+
+`acceptedContentQuality` rates a concrete `ContentType` against a
+typed `Accept` field. Exact types outrank subtype wildcards and fully
+wildcarded types. Matching parameter names break ties within the type
+rank, so a more specific exclusion wins over a wildcard with positive
+quality. Type, subtype, parameter names, and charset values compare
+case-insensitively. Other values compare by their decoded spelling.
+Repeated names count once toward specificity. The first field entry
+supplies the quality when ranges are equally specific.
+
+`preferredContentType` selects the highest positive effective quality
+and keeps server order on ties. An absent field accepts any offered
+type. An empty field leaves no type acceptable.
+[RFC 9110 §§8.3.1–8.3.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.3.1)
+and [§§12.4.2–12.5.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.4.2).
+
+An independent model agreed on 5,523 requests and 49,707 effective media
+qualities, including repeated field lines, exclusions, wildcards,
+parameter matching, and client and server ordering. The typed
+lookup tests exercise the RFC precedence example and the distinction
+between absent and empty fields.
+
+GHC 9.10.3 passed 1,118 Hermes, 471 aggregate HTTP, 137 Connect, 18
+WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and Connect passed under
+both schedules. TLS and minimal gRPC passed. Full gRPC passed 91 tests
+with one existing pending case.
+
+Criterion measured selection from parsed preferences and prebuilt
+offers. The Go 1.26.10 reference uses the same ranking rules with
+prebuilt structs and returns a pointer to the winning offer. Optimized
+GHC Core keeps the type rank, parameter count, and weight unboxed
+through the scan. An exact match with every offered parameter can
+finish rating the offer immediately.
+
+| Selection fixture | Hermes | Go |
+| --- | ---: | ---: |
+| Absent field | 3.10 ns / 48 B | 1.66–1.69 ns / 0 B |
+| First offered type matches exactly | 12.9 ns / 48 B | 9.96–10.15 ns / 0 B |
+| Wildcards and parameterized types | 103 ns / 96 B | 71.5–72.4 ns / 0 B |
+
+## Selecting a language with Accept-Language
+
+`acceptedLanguageQuality` rates a typed `LanguageTag` with Basic
+Filtering. A range matches the whole tag or a prefix ending at a subtag
+boundary, ignoring ASCII case. The longest matching range supplies the
+quality, including zero. A wildcard applies when no specific range
+matches. The first field entry wins ties between matching ranges of the
+same length.
+
+`preferredLanguage` shares the media selector's highest-positive-quality
+scan and breaks ties in offered order. An absent field accepts any
+offered tag. An empty field leaves no tag acceptable.
+[RFC 4647 §3.3.1](https://www.rfc-editor.org/rfc/rfc4647.html#section-3.3.1),
+[RFC 9110 §12.5.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.4),
+and [RFC 2616 §14.4](https://www.rfc-editor.org/rfc/rfc2616.html#section-14.4).
+
+An independent model agreed on 7,102 requests and 99,428 language
+qualities. The cases cover mixed-case subtags, repeated field lines,
+exact and prefix matches, private use, grandfathered tags, wildcards,
+and zero-quality exclusions. GHC 9.10.3 passed 1,122 Hermes, 471
+aggregate HTTP, 137 Connect, 18 WAI, 95 HTTP/1, and 125 HTTP/2 tests.
+HTTP and Connect passed under both schedules. TLS and minimal gRPC
+passed. Full gRPC passed 91 tests with one existing pending case.
+
+Criterion rates prebuilt offers against parsed fields. The Go 1.26.10
+reference uses the same longest-prefix and tie rules and returns a
+pointer to the selected tag. Optimized GHC Core uses a compact-byte
+comparison and unboxed length and weight accumulators. The language
+fixtures allocate the same amount as the absent-field selection.
+
+| Selection fixture | Hermes | Go |
+| --- | ---: | ---: |
+| Absent field | 3.36 ns / 48 B | 1.67–1.70 ns / 0 B |
+| First offered tag matches exactly | 9.05 ns / 48 B | 5.50–5.64 ns / 0 B |
+| Prefixes, wildcard and exclusion | 57.9 ns / 48 B | 39.2–39.8 ns / 0 B |
+
+The shared selection scan retained the media fixtures' allocation
+counts. In the repeat run, media selection took 14.2 ns for the first
+exact offer and 104 ns for the parameterized offers.

@@ -22,7 +22,8 @@ parameters as the generic RFC 8941 @(key, Maybe value)@ pairs, so the full
 set of parameters can be represented. Component and parameter order is
 preserved in the canonical wire value. Signature labels and covered
 component identifiers must be unique. The @created@ and @expires@
-metadata parameters are integer timestamps.
+metadata parameters are integer timestamps. Component identifiers use
+the name grammar and parameter types defined by RFC 9421.
 
 Spec: <https://www.rfc-editor.org/rfc/rfc9421.html#name-the-signature-input-http-fi>
 

@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 module Network.HTTP.ContentNegotiation (
@@ -15,6 +16,8 @@ module Network.HTTP.ContentNegotiation (
   weightedMediaRangesParser,
   negotiationList,
   parseNegotiationHeaders,
+  preferredByQuality,
+  normalizedQuality,
   renderMediaType,
   renderMediaRange,
   renderMediaParameterValue,
@@ -180,6 +183,38 @@ parseNegotiationHeaders = parseListFieldLines
 {-# INLINE parseNegotiationHeaders #-}
 
 
+-- | Select the highest positive quality, keeping offer order on ties.
+-- Qualities at or above one are equally preferred.
+preferredByQuality :: (a -> Double) -> [a] -> Maybe a
+preferredByQuality rate = firstMatch
+  where
+    firstMatch [] = Nothing
+    firstMatch (candidate : rest)
+      | quality >= 1 = Just candidate
+      | quality > 0 = bestMatch candidate quality rest
+      | otherwise = firstMatch rest
+      where
+        quality = rate candidate
+
+    bestMatch best !bestQuality (candidate : rest)
+      | quality >= 1 = Just candidate
+      | quality > bestQuality = bestMatch candidate quality rest
+      | otherwise = bestMatch best bestQuality rest
+      where
+        quality = rate candidate
+    bestMatch best _ [] = Just best
+{-# INLINE preferredByQuality #-}
+
+
+-- | Clamp an authored quality to @[0,1]@. NaN has quality zero.
+normalizedQuality :: Double -> Double
+normalizedQuality value
+  | value >= 1 = 1
+  | value > 0 = value
+  | otherwise = 0
+{-# INLINE normalizedQuality #-}
+
+
 renderMediaType :: MediaType -> M.Builder
 renderMediaType (MediaType base sub)
   | ST.null base && ST.null sub = "*/*"
@@ -195,7 +230,7 @@ renderMediaRange (MediaRange mt mp) =
 
 -- | A media parameter with a one-to-one Latin-1 mapping for opaque bytes.
 renderMediaParameterValue :: ST.ShortText -> M.Builder
-renderMediaParameterValue = renderParameterWith (renderHttpQuotedString . ST.toText)
+renderMediaParameterValue = renderParameterWith renderHttpQuotedShortText
 
 
 renderParameterValue :: ST.ShortText -> M.Builder

@@ -13,21 +13,28 @@ See also: "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.ContentEncod
 -}
 module Network.HTTP.Headers.ContentDisposition (
   ContentDisposition (..),
+  ContentDispositionFilenameError (..),
+  mkContentDispositionFilename,
   contentDispositionFilename,
   contentDispositionParser,
   renderContentDisposition,
 ) where
 
+import Data.Bits ((.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Short as SBS
-import Data.Char (toLower)
+import qualified Data.ByteString.Short.Internal as SBSI
+import Data.Char (isControl, isHexDigit, toLower)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
+import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.ContentNegotiation (renderMediaParameterValue)
-import Network.HTTP.Grammar.ExtendedValue (decodeExtendedValue, extendedValueBytes, parseExtendedValue)
+import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), decodeExtendedValue, extendedValueBytes, parseExtendedValue, renderExtendedValue)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentDisposition)
 import qualified Network.HTTP.Headers.Mason as M
@@ -41,6 +48,68 @@ data ContentDisposition = ContentDisposition
   , dispositionParams :: ![(ST.ShortText, ST.ShortText)]
   }
   deriving stock (Eq, Show)
+
+
+-- | An invalid disposition or filename supplied for authoring.
+data ContentDispositionFilenameError
+  = InvalidDispositionType
+  | InvalidFilenameCharacters
+  | InvalidFilenameFallback
+  deriving stock (Eq, Show)
+
+
+{- | Author a disposition with an advisory filename. An ordinary printable
+ASCII filename uses @filename@. A name that needs UTF-8, contains a backslash,
+or resembles a percent escape uses @filename*@. An explicitly supplied
+fallback goes first as @filename@ and must be printable ASCII without
+backslashes or percent escapes. The primary name must be free of control
+characters.
+-}
+mkContentDispositionFilename
+  :: ST.ShortText -- ^ Disposition type, such as @attachment@ or @inline@.
+  -> Text -- ^ Preferred filename.
+  -> Maybe Text -- ^ Legacy ASCII fallback.
+  -> Either ContentDispositionFilenameError ContentDisposition
+mkContentDispositionFilename disposition filename fallback
+  | ST.null disposition || not (ST.all isTokenChar disposition) = Left InvalidDispositionType
+  | style == InvalidFilename = Left InvalidFilenameCharacters
+  | otherwise = case fallback of
+      Just ascii
+        | filenameStyle ascii == PlainFilename -> Right (ContentDisposition disposition [plain ascii, extended])
+        | otherwise -> Left InvalidFilenameFallback
+      Nothing
+        | style == PlainFilename -> Right (ContentDisposition disposition [plain filename])
+        | otherwise -> Right (ContentDisposition disposition [extended])
+  where
+    style = filenameStyle filename
+    plain name = ("filename", ST.fromText name)
+    extended =
+      ("filename*", STU.fromByteStringUnsafe (M.toStrictByteString (renderExtendedValue value)))
+    value = ExtendedValue "UTF-8" Nothing (TE.encodeUtf8 filename)
+
+
+data FilenameStyle = PlainFilename | ExtendedFilename | InvalidFilename
+  deriving stock (Eq)
+
+
+filenameStyle :: Text -> FilenameStyle
+filenameStyle name = case T.uncons (T.dropWhile plainChar name) of
+  Nothing -> PlainFilename
+  Just ('%', rest)
+    | startsWithHexPair rest -> extendedStyle rest
+    | otherwise -> filenameStyle rest
+  Just (c, rest)
+    | isControl c -> InvalidFilename
+    | otherwise -> extendedStyle rest
+  where
+    plainChar c = ' ' <= c && c <= '~' && c /= '%' && c /= '\\'
+    startsWithHexPair value
+      | Just (hi, rest) <- T.uncons value
+      , Just (lo, _) <- T.uncons rest = isHexDigit hi && isHexDigit lo
+      | otherwise = False
+    extendedStyle rest
+      | T.any isControl rest = InvalidFilename
+      | otherwise = ExtendedFilename
 
 
 instance KnownHeader ContentDisposition where
@@ -92,8 +161,22 @@ contentDispositionFilename (ContentDisposition _ params) = case extended of
 
     findParam _ [] = Nothing
     findParam expected ((name, value) : rest)
-      | foldedName name == expected = Just value
+      | matchesName expected (ST.toShortByteString name) = Just value
       | otherwise = findParam expected rest
+
+
+-- The expected filename parameter name is ASCII lowercase.
+matchesName :: SBS.ShortByteString -> SBS.ShortByteString -> Bool
+matchesName expected name = SBS.length name == len && go 0
+  where
+    len = SBS.length expected
+    go i
+      | i == len = True
+      | otherwise =
+          let byte = SBSI.unsafeIndex name i
+              lower = if 65 <= byte && byte <= 90 then byte .|. 32 else byte
+          in lower == SBSI.unsafeIndex expected i && go (i + 1)
+{-# INLINE matchesName #-}
 
 
 foldedName :: ST.ShortText -> ByteString
