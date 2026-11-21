@@ -34,6 +34,9 @@ tests =
           decodeDecimal (encodeDecimal 123456) `shouldBe` Right 123456
           decodeDecimal (encodeDecimal (-123456)) `shouldBe` Right (-123456)
           decodeDecimal (encodeDecimal (10 ^ (30 :: Int))) `shouldBe` Right (10 ^ (30 :: Int))
+          encodeDecimal 128 `shouldBe` BS.pack [0x00, 0x80]
+          encodeDecimal (-128) `shouldBe` BS.singleton 0x80
+          encodeDecimal (-129) `shouldBe` BS.pack [0xff, 0x7f]
       , it "compareSingleValueBy on ints" $ do
           let a = encodeInt32 5
               b = encodeInt32 10

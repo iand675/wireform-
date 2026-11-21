@@ -98,66 +98,15 @@ big-endian byte string. Iceberg writers and Parquet decimals follow this
 representation.
 -}
 encodeDecimal :: Integer -> ByteString
-encodeDecimal n
-  | n == 0 = BS.singleton 0
-  | n > 0 =
-      let bs = unrollPositive n
-          bsTrim = stripPositive bs
-      in if BS.null bsTrim then BS.singleton 0 else bsTrim
-  | otherwise =
-      -- Compute two's-complement: take the negative as bytes, pad to enough
-      -- width, then bit-flip and add 1.
-      let m = -n
-          width = neededWidth m
-          unsigned = padTo width (unrollPositive m)
-          inverted = BS.map complement unsigned
-          incremented = addOne inverted
-          finalBs = ensureNegativeSign incremented
-      in finalBs
+encodeDecimal = BS.pack . go []
   where
-    unrollPositive :: Integer -> ByteString
-    unrollPositive = BS.pack . go []
+    -- Stop once the remaining bits equal the sign extension of this byte.
+    go acc value
+      | (rest == 0 && byte < 0x80) || (rest == -1 && byte >= 0x80) = byte : acc
+      | otherwise = go (byte : acc) rest
       where
-        go acc 0 = acc
-        go acc x = go (fromIntegral (x .&. 0xFF) : acc) (x `shiftR` 8)
-
-    stripPositive bs =
-      case BS.uncons bs of
-        Just (b, rest)
-          | b == 0 && not (BS.null rest) && BS.head rest < 0x80 ->
-              stripPositive rest
-        _ -> bs
-
-    neededWidth :: Integer -> Int
-    neededWidth x =
-      let raw = BS.length (unrollPositive x)
-          msb = if raw == 0 then 0 else BS.head (unrollPositive x)
-      in if msb >= 0x80 then raw + 1 else raw
-
-    padTo :: Int -> ByteString -> ByteString
-    padTo w bs
-      | BS.length bs >= w = bs
-      | otherwise = BS.replicate (w - BS.length bs) 0 <> bs
-
-    addOne :: ByteString -> ByteString
-    addOne bs =
-      let (carried, bytes) = goCarry (1 :: Int) (BS.unpack (BS.reverse bs))
-          packed = BS.pack (reverse bytes)
-      in if carried then BS.cons 1 packed else packed
-      where
-        goCarry c [] = (c == 1, [])
-        goCarry 0 xs = (False, xs)
-        goCarry _ (x : xs) =
-          let s = fromIntegral x + (1 :: Int)
-              !c = if s >= 256 then 1 else 0
-              !v = fromIntegral (s `mod` 256)
-              (rest, ys) = goCarry c xs
-          in (rest, v : ys)
-
-    ensureNegativeSign :: ByteString -> ByteString
-    ensureNegativeSign bs = case BS.uncons bs of
-      Just (h, _) | h < 0x80 -> BS.cons 0xFF bs
-      _ -> bs
+        byte = fromIntegral value
+        rest = value `shiftR` 8
 
 
 -- ============================================================

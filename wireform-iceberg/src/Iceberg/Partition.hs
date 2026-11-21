@@ -79,16 +79,39 @@ partition pruning.
 Schema is needed to look up source-field types.
 -}
 inclusiveProject :: Schema -> PartitionSpec -> E.Expression -> E.Expression
-inclusiveProject schema spec = go
+inclusiveProject schema spec = go False
   where
-    go E.ETrue = E.ETrue
-    go E.EFalse = E.EFalse
-    go (E.EAnd a b) = E.and_ (go a) (go b)
-    go (E.EOr a b) = E.or_ (go a) (go b)
-    go (E.ENot e) = E.not_ (go e)
-    go (E.EPredicate p) = case projectPredicate schema spec p of
-      Just expr -> expr
-      Nothing -> E.ETrue
+    -- Push negation through to the row predicate first. Negating a
+    -- projected predicate would negate a condition that may be weaker.
+    go negated = \case
+      E.ETrue -> if negated then E.EFalse else E.ETrue
+      E.EFalse -> if negated then E.ETrue else E.EFalse
+      E.EAnd a b -> combine (if negated then E.or_ else E.and_) a b
+      E.EOr a b -> combine (if negated then E.and_ else E.or_) a b
+      E.ENot e -> go (not negated) e
+      E.EPredicate p ->
+        let predicate = if negated then p {E.predOp = negateOp (E.predOp p)} else p
+        in maybe E.ETrue id (projectPredicate schema spec predicate)
+      where
+        combine f a b = f (go negated a) (go negated b)
+
+
+negateOp :: E.Operation -> E.Operation
+negateOp = \case
+  E.OpEq -> E.OpNotEq
+  E.OpNotEq -> E.OpEq
+  E.OpLt -> E.OpGtEq
+  E.OpLtEq -> E.OpGt
+  E.OpGt -> E.OpLtEq
+  E.OpGtEq -> E.OpLt
+  E.OpIsNull -> E.OpNotNull
+  E.OpNotNull -> E.OpIsNull
+  E.OpIsNan -> E.OpNotNan
+  E.OpNotNan -> E.OpIsNan
+  E.OpIn -> E.OpNotIn
+  E.OpNotIn -> E.OpIn
+  E.OpStartsWith -> E.OpNotStartsWith
+  E.OpNotStartsWith -> E.OpStartsWith
 
 
 projectPredicate :: Schema -> PartitionSpec -> E.Predicate -> Maybe E.Expression
@@ -113,7 +136,10 @@ lookupFieldId schema name =
 
 projectField :: IcebergType -> E.Predicate -> PartitionField -> Maybe E.Expression
 projectField srcTy p pf = case (E.predOp p, pfTransform pf) of
+  (_, Void) -> Nothing
+  (_, UnknownTransform _) -> Nothing
   (E.OpEq, Identity) -> projectIdentity p pf
+  (E.OpNotEq, Identity) -> projectIdentityCmp p pf
   (E.OpEq, Truncate w) -> projectTruncEq srcTy p pf w
   (E.OpEq, Bucket n) -> projectBucketEq srcTy p pf n
   (E.OpLt, Identity) -> projectIdentityCmp p pf
@@ -163,6 +189,7 @@ truncLiteral _ _ _ = Nothing
 bucketLiteral :: IcebergType -> Int -> E.Literal -> Maybe Int
 bucketLiteral TInt n (E.LInt v) = Just (M.bucketLong n (fromIntegral v))
 bucketLiteral TDate n (E.LInt v) = Just (M.bucketLong n (fromIntegral v))
+bucketLiteral TTime n (E.LLong v) = Just (M.bucketLong n v)
 bucketLiteral TLong n (E.LLong v) = Just (M.bucketLong n v)
 bucketLiteral TTimestamp n (E.LLong v) = Just (M.bucketLong n v)
 bucketLiteral TTimestampTz n (E.LLong v) = Just (M.bucketLong n v)

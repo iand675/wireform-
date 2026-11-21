@@ -175,10 +175,12 @@ cppIncludeP = do
 namespaceP :: Parser ()
 namespaceP = do
   reserved "namespace"
-  _ <- identifier
-  _ <- identifier <|> stringLiteral
-  optional (parens (many annotationPairP))
-  pure ()
+  void (symbol "*" *> identifier) <|> namedScope
+  where
+    namedScope = do
+      _ <- identifier
+      _ <- identifier <|> stringLiteral
+      void annotationsP
 
 
 annotationPairP :: Parser (Text, Text)
@@ -273,7 +275,13 @@ requirednessP = (Required <$ reserved "required") <|> (Optional <$ reserved "opt
 
 
 typeP :: Parser ThriftType
-typeP =
+typeP = (annotatableTypeP <* annotationsP) <|> (TStruct <$> identifier)
+
+
+-- Type annotations configure the reference generators. Consume them in
+-- their own position without treating them as annotations on the field.
+annotatableTypeP :: Parser ThriftType
+annotatableTypeP =
   choice
     [ TBool <$ reserved "bool"
     , TByte <$ (reserved "byte" <|> reserved "i8")
@@ -287,7 +295,6 @@ typeP =
     , listTypeP
     , setTypeP
     , mapTypeP
-    , TStruct <$> identifier
     ]
 
 

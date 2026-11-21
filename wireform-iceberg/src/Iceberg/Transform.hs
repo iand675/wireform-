@@ -42,6 +42,7 @@ import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Iceberg.Murmur3 (bucketBytes, bucketInt, bucketLong, bucketString)
+import Iceberg.SingleValue qualified as SV
 import Iceberg.Types
 
 
@@ -109,6 +110,7 @@ applyTransform (UnknownTransform n) _ _ = Left (TEUnknownTransform n)
 applyTransform (Bucket n) src v = case src of
   TInt -> withInt v $ \x -> AV.Int (fromIntegral (bucketInt n x))
   TDate -> withInt v $ \x -> AV.Int (fromIntegral (bucketInt n x))
+  TTime -> withLong v $ \x -> AV.Int (fromIntegral (bucketLong n x))
   TLong -> withLong v $ \x -> AV.Int (fromIntegral (bucketLong n x))
   TTimestamp -> withLong v $ \x -> AV.Int (fromIntegral (bucketLong n x))
   TTimestampTz -> withLong v $ \x -> AV.Int (fromIntegral (bucketLong n x))
@@ -126,7 +128,17 @@ applyTransform (Truncate w) src v = case src of
   TString -> withText v $ \t -> AV.String (T.take w t)
   TBinary -> withBytes v $ \bs -> AV.Bytes (BS.take w bs)
   TFixed _ -> withBytes v $ \bs -> AV.Bytes (BS.take w bs)
+  TDecimal _ _ -> case v of
+    AV.Bytes bytes -> truncateDecimal bytes
+    AV.Fixed bytes -> truncateDecimal bytes
+    AV.Null -> Left TENullValue
+    _ -> Left (TEUnsupported "truncate" src)
   other -> Left (TEUnsupported "truncate" other)
+  where
+    truncateDecimal bytes
+      | w > 0, Right value <- SV.decodeDecimal bytes =
+          Right (AV.Bytes (SV.encodeDecimal (value - value `mod` toInteger w)))
+      | otherwise = Left (TEUnsupported "truncate" src)
 applyTransform Year src v = case src of
   TDate -> withInt v $ \d -> AV.Int (dateToYears d)
   TTimestamp -> withLong v $ \t -> AV.Int (microsToYears t)

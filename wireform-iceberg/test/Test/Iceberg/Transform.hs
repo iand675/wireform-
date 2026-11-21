@@ -1,6 +1,7 @@
 module Test.Iceberg.Transform (tests) where
 
 import Avro.Value qualified as AV
+import Data.ByteString qualified as BS
 import Iceberg.Transform
 import Iceberg.Types
 import Test.Syd
@@ -22,6 +23,11 @@ tests =
           applyTransform (Truncate 10) TInt (AV.Int (-1)) `shouldBe` Right (AV.Int (-10))
       , it "Truncate string \"iceberg\" by 3 = \"ice\"" $
           applyTransform (Truncate 3) TString (AV.String "iceberg") `shouldBe` Right (AV.String "ice")
+      , it "truncates signed decimals at the column scale" $ do
+          let truncateDecimal width octets = applyTransform (Truncate width) (TDecimal 9 2) (AV.Bytes (BS.pack octets))
+          truncateDecimal 50 [0x04, 0x29] `shouldBe` Right (AV.Bytes (BS.pack [0x04, 0x1a])) -- 10.65 -> 10.50
+          truncateDecimal 50 [0xfb, 0xd7] `shouldBe` Right (AV.Bytes (BS.pack [0xfb, 0xb4])) -- -10.65 -> -11.00
+          truncateDecimal 10 [0x00, 0x87] `shouldBe` Right (AV.Bytes (BS.pack [0x00, 0x82])) -- 1.35 -> 1.30
       , it "Year of date 0 (1970-01-01) is 0" $
           applyTransform Year TDate (AV.Int 0) `shouldBe` Right (AV.Int 0)
       , it "Year of date 365 (1971-01-01) is 1" $

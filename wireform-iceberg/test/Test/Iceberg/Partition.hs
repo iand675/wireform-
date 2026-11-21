@@ -91,6 +91,26 @@ tests =
             E.EAnd _ (E.EPredicate p) -> E.predField p `shouldBe` "id_bucket"
             E.EPredicate p -> E.predField p `shouldBe` "id_bucket"
             other -> expectationFailure ("expected bucket predicate, got: " ++ show other)
+      , it "keeps possible matches for negated equality with no identity partition" $ do
+          let expr = E.not_ (E.equal "id" (E.LLong 42))
+          inclusiveProject schema (PartitionSpec 0 V.empty) expr `shouldBe` E.true
+          inclusiveProject schema specBucket8 expr `shouldBe` E.true
+      , it "pushes negation through conjunctions and disjunctions before projection" $ do
+          let idIsNull = E.isNull "id"
+              nameIsNull = E.isNull "name"
+          inclusiveProject schema specIdentity (E.not_ (E.and_ idIsNull nameIsNull)) `shouldBe` E.true
+          inclusiveProject schema specIdentity (E.not_ (E.or_ idIsNull nameIsNull)) `shouldBe` E.notNull "id_part"
+          inclusiveProject schema specIdentity (E.ENot (E.ENot idIsNull)) `shouldBe` E.isNull "id_part"
+      , it "does not constrain source nullability through void or unknown transforms" $ do
+          let specWith transform = specIdentity {psFields = V.map (\pf -> pf {pfTransform = transform}) (psFields specIdentity)}
+          inclusiveProject schema (specWith Void) (E.notNull "id") `shouldBe` E.true
+          inclusiveProject schema (specWith (UnknownTransform "future")) (E.isNull "id") `shouldBe` E.true
+      , it "computes and projects a bucket partition on time" $ do
+          let clockSchema = schema {schemaFields = V.singleton (mkSF 1 "clock" TTime)}
+              bucket = V.map (\pf -> pf {pfTransform = Bucket 16}) (psFields specBucket8)
+              spec = specBucket8 {psFields = bucket}
+          buildPartition spec clockSchema (const (Just (AV.Long 34))) `shouldBe` Right (PartitionTuple (V.singleton (Just (AV.Int 3))))
+          inclusiveProject clockSchema spec (E.equal "clock" (E.LLong 34)) `shouldBe` E.equal "id_bucket" (E.LInt 3)
       , -- V3 multi-arg transforms: a partition field with two source columns.
         it "V3: PartitionField round-trips through JSON with source-ids" $ do
           let pf =

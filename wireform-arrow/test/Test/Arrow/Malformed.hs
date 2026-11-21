@@ -161,6 +161,7 @@ tests = do
       , ("buffer descriptor validation bounds", prop_bufferValidator)
       , ("dense union offsets cannot decrease within a child", prop_denseUnionOffsets)
       , ("compressed buffer length claims", prop_decompressionClaims)
+      , ("ZSTD buffers can omit frame content size", prop_zstdOptionalContentSize)
       , ("LZ4 buffers require one complete frame", prop_lz4FrameCompletion)
       , ("decode budgets bound rows, values, unbacked rows and decompression", prop_readerBudgets)
       , ("map keys and entries cannot contain nulls", prop_mapNulls)
@@ -1161,6 +1162,25 @@ prop_decompressionClaims = withTests 1 . property $ do
   mapM_
     (\codec -> fmap snd (decodeArrowStream defaultReadOptions (compressedClaim codec 64)) === Right [V.singleton (primColumn PInt64 (VS.replicate 8 0x0707070707070707))])
     availableCodecs
+
+
+prop_zstdOptionalContentSize :: Property
+prop_zstdOptionalContentSize = withTests 1 . property $ do
+  -- zstd --no-check --no-content-size, on 64 bytes of ASCII 'A'.
+  let frame = BS.pack [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x58, 0x45, 0x00, 0x00, 0x10, 0x41, 0x41, 0x01, 0x00, 0x93, 0x00, 0x16]
+      expected = [V.singleton (primColumn PInt64 (VS.replicate 8 0x4141414141414141))]
+      tightBudget = defaultReadOptions {roMaxDecompressedBytes = 63}
+      check enc decode = do
+        let fixture claim = compressedBuffer enc BodyZstd claim frame
+        if bodyCompressionAvailable BodyZstd
+          then do
+            fmap snd (decode defaultReadOptions (fixture 64)) === Right expected
+            assert (isLeft (decode tightBudget (fixture 64)))
+            assert (isLeft (decode defaultReadOptions (fixture 63)))
+            assert (isLeft (decode defaultReadOptions (fixture 65)))
+          else assert (isLeft (decode defaultReadOptions (fixture 64)))
+  check StreamEnc decodeArrowStream
+  check FileEnc decodeArrowFile
 
 
 prop_lz4FrameCompletion :: Property

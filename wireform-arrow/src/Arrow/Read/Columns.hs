@@ -84,6 +84,9 @@ import Wireform.FFI (validateArrowBuffers)
 
 #ifdef HAVE_ZSTD
 import qualified Codec.Compression.Zstd as Zstd
+import Codec.Compression.Zstd.Base qualified as ZstdBase
+import Data.ByteString.Internal qualified as BSI
+import Foreign.ForeignPtr (withForeignPtr)
 #endif
 
 #ifdef HAVE_LZ4
@@ -1027,6 +1030,7 @@ decompressBuffer codec _ _ = case codec of
           Zstd.Decompress out -> Right out
           Zstd.Skip -> Left "Arrow.Read.Columns: ZSTD decompress: skipped frame"
           Zstd.Error msg -> Left ("Arrow.Read.Columns: ZSTD decompress: " ++ msg)
+      Nothing -> decompressZstdWithEnvelopeSize rawLen comp
       other ->
         Left
           ( "Arrow.Read.Columns: ZSTD frame content size "
@@ -1041,4 +1045,21 @@ decompressBuffer codec _ _ = case codec of
   LZ4Frame -> Lz4.decompressFrame rawLen comp
 #else
   LZ4Frame -> Left "Arrow.Read.Columns: LZ4 body compression requires building wireform-arrow with -flz4"
+#endif
+
+
+#ifdef HAVE_ZSTD
+-- A Zstandard frame may omit its content size. The IPC envelope already
+-- supplies a size checked against the per-buffer ratio and batch budget.
+decompressZstdWithEnvelopeSize :: Int -> ByteString -> Either String ByteString
+decompressZstdWithEnvelopeSize rawLen comp = unsafeDupablePerformIO $ do
+  output <- BSI.mallocByteString (max 1 rawLen)
+  result <- withForeignPtr output $ \dst ->
+    BSU.unsafeUseAsCStringLen comp $ \(src, len) ->
+      ZstdBase.decompress dst rawLen src len
+  pure $ case result of
+    Left msg -> Left ("Arrow.Read.Columns: ZSTD decompress: " ++ msg)
+    Right written
+      | written == rawLen -> Right (BSI.fromForeignPtr output 0 rawLen)
+      | otherwise -> Left "Arrow.Read.Columns: ZSTD output length differs from the IPC envelope"
 #endif
