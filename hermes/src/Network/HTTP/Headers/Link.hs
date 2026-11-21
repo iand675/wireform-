@@ -40,6 +40,8 @@ module Network.HTTP.Headers.Link (
   linkRelations,
   linkAnchor,
   linkTitle,
+  linkLanguages,
+  linkMediaType,
 
   -- * Parsing
   linkParser,
@@ -53,24 +55,29 @@ module Network.HTTP.Headers.Link (
 import qualified Control.Applicative as A
 import Control.Monad (foldM)
 import qualified Control.Monad.Combinators.NonEmpty as NE
+import Data.Bits (setBit, testBit)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder.Prim.Internal as Prim
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
 import qualified Data.ByteString.Short.Internal as SBSI
-import qualified Data.CaseInsensitive as CI
+import Data.Either (isRight)
 import Data.Foldable (find)
 import Data.Functor.Identity (Identity (..))
 import Data.List.NonEmpty (NonEmpty)
 import Data.Text (Text)
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
 import Data.Word (Word8)
 import Foreign.Ptr (Ptr, plusPtr)
-import Network.HTTP.Grammar.ExtendedValue (decodeExtendedValue, parseExtendedValue)
+import Network.HTTP.ContentNegotiation (MediaType, restrictedMediaTypeParser, sameNegotiationToken)
+import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), decodeExtendedValueText, parseExtendedValue)
+import Network.HTTP.Grammar.LanguageTag (isLanguageTag)
 import Network.HTTP.Grammar.Rendering (foldHttpQuotedShortBytes)
-import Network.HTTP.Grammar.URIReference (uriReference, uriWithFragment)
+import Network.HTTP.Grammar.URIReference (outboundAbsoluteURIWithFragmentBytes, outboundURIReferenceBytes, uriReference, uriWithFragment, validURIText)
 import Network.HTTP.Headers
+import Network.HTTP.Headers.ContentLanguage (LanguageTag (..))
 import Network.HTTP.Headers.HeaderFieldName (hLink)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -86,8 +93,9 @@ import Wireform.Encode.Direct (dWord8, directEncode)
 data LinkParamValue
   = -- | @token@ value, e.g. @rel=next@.
     LinkParamToken !ST.ShortText
-  | -- | @quoted-string@ value, e.g. @title=\"Next chapter\"@. The
-    -- contained text maps the unescaped wire bytes one-for-one via Latin-1.
+  | {- | @quoted-string@ value, e.g. @title=\"Next chapter\"@. The
+    contained text maps the unescaped wire bytes one-for-one via Latin-1.
+    -}
     LinkParamQuoted !ST.ShortText
   deriving stock (Eq, Show)
 
@@ -123,8 +131,8 @@ data LinkRelation
 
 
 instance Eq LinkRelation where
-  RegisteredRelation a == RegisteredRelation b = sameAsciiText a b
-  ExtensionRelation a == ExtensionRelation b = sameAsciiText a b
+  RegisteredRelation a == RegisteredRelation b = sameNegotiationToken a b
+  ExtensionRelation a == ExtensionRelation b = sameNegotiationToken a b
   _ == _ = False
 
 
@@ -138,6 +146,11 @@ instance KnownHeader Link where
 
 
   renderToHeaders _ = pure . encodeLink . linkValues
+
+
+  renderToHeadersChecked settings value@(Link values)
+    | all validLink values = Just (renderToHeaders settings value)
+    | otherwise = Nothing
 
 
   headerName _ = hLink
@@ -178,11 +191,8 @@ linkValue = do
 
 -- | Find the first parameter with the given ASCII case-insensitive name.
 lookupLinkParam :: ST.ShortText -> LinkValue -> Maybe LinkParam
-lookupLinkParam name = find (sameAsciiText name . linkParamName) . linkParams
-
-
-sameAsciiText :: ST.ShortText -> ST.ShortText -> Bool
-sameAsciiText a b = a == b || CI.foldCase (ST.toByteString a) == CI.foldCase (ST.toByteString b)
+lookupLinkParam name = find (sameNegotiationToken name . linkParamName) . linkParams
+{-# INLINE lookupLinkParam #-}
 
 
 -- | Validate the first @rel@ value and return its relation types in order.
@@ -191,12 +201,18 @@ linkRelations value = do
   rel <- maybe (Left "Link requires a rel value") Right (lookupLinkParam "rel" value >>= parameterText)
   parseFieldLine "Link rel" (relation `NE.sepBy1` skipSome $(char ' ')) (ST.toByteString rel)
   where
-    relation = (RegisteredRelation <$> registered) <|> (ExtensionRelation <$> uriWithFragment)
-    registered =
-      shortASCIIFromParser_ (skipSatisfyAscii isLowerAscii *> skipMany (skipSatisfyAscii registeredChar))
-        <* lookahead ($(char ' ') <|> eof)
+    relation = (RegisteredRelation <$> shortASCIIFromParser_ registeredRelationBytes) <|> (ExtensionRelation <$> uriWithFragment)
+
+
+registeredRelationBytes :: ParserT st String ()
+registeredRelationBytes =
+  skipSatisfyAscii isLowerAscii
+    *> skipMany (skipSatisfyAscii registeredChar)
+    <* lookahead ($(char ' ') <|> eof)
+  where
     isLowerAscii c = c >= 'a' && c <= 'z'
     registeredChar c = isLowerAscii c || isDigit c || c == '.' || c == '-'
+{-# INLINE registeredRelationBytes #-}
 
 
 -- | Validate the first @anchor@ value when the field supplies one.
@@ -204,7 +220,7 @@ linkAnchor :: LinkValue -> Either String (Maybe ST.ShortText)
 linkAnchor = traverse parseAnchor . lookupLinkParam "anchor"
   where
     parseAnchor param = do
-      value <- maybe (Left "Link anchor requires a value") Right (parameterText param)
+      value <- requireParameterText "anchor" param
       parseFieldLine "Link anchor" uriReference (ST.toByteString value)
 
 
@@ -214,8 +230,35 @@ linkTitle value = extended A.<|> (ST.toText <$> (lookupLinkParam "title" value >
   where
     extended = do
       spelling <- lookupLinkParam "title*" value >>= parameterText
-      value' <- either (const Nothing) Just (parseExtendedValue (ST.toByteString spelling))
-      decodeExtendedValue value'
+      decodeExtendedValueText (ST.toByteString spelling)
+
+
+-- | Validate every @hreflang@ hint in wire order.
+linkLanguages :: LinkValue -> Either String [LanguageTag]
+linkLanguages = collect . linkParams
+  where
+    collect [] = Right []
+    collect (param : rest)
+      | sameNegotiationToken "hreflang" (linkParamName param) = do
+          tag <- requireParameterText "hreflang" param
+          if isLanguageTag (ST.toByteString tag)
+            then (LanguageTag tag :) <$> collect rest
+            else Left "Invalid Link hreflang language tag"
+      | otherwise = collect rest
+
+
+-- | Validate the first @type@ hint when the field supplies one.
+linkMediaType :: LinkValue -> Either String (Maybe MediaType)
+linkMediaType = traverse parseType . lookupLinkParam "type"
+  where
+    parseType param = do
+      value <- requireParameterText "type" param
+      parseFieldLine "Link type" restrictedMediaTypeParser (ST.toByteString value)
+
+
+requireParameterText :: String -> LinkParam -> Either String ST.ShortText
+requireParameterText name =
+  maybe (Left ("Link " <> name <> " requires a value")) Right . parameterText
 
 
 parameterText :: LinkParam -> Maybe ST.ShortText
@@ -228,6 +271,50 @@ parameterText param = case linkParamValue param of
 -- ---------------------------------------------------------------------------
 -- Renderer
 -- ---------------------------------------------------------------------------
+
+validLink :: LinkValue -> Bool
+validLink (LinkValue target params) =
+  validURIText outboundURIReferenceBytes target && validateParams 0 params
+
+
+validateParams :: Word8 -> [LinkParam] -> Bool
+validateParams seen [] = testBit seen 0
+validateParams seen (param@(LinkParam name payload) : rest) =
+  isHttpTokenText name && maybe True validPayload payload && validateParameter
+  where
+    validateParameter
+      | named "rel" = once 0 (required validRelations)
+      | named "anchor" = required (validURIText outboundURIReferenceBytes) && next
+      | named "hreflang" = required (isLanguageTag . ST.toByteString) && next
+      | named "type" = once 1 (required (isRight . parseFieldLine "Link type" restrictedMediaTypeParser . ST.toByteString))
+      | named "title" = once 2 (required (const True))
+      | named "title*" = once 3 (validExtendedTitle payload)
+      | named "media" = once 4 (required (const True))
+      | named "rev" = required validRelations && next
+      | otherwise = next
+    named key = sameNegotiationToken key name
+    required predicate = maybe False predicate (parameterText param)
+    next = validateParams seen rest
+    once bit valid = not (testBit seen bit) && valid && validateParams (setBit seen bit) rest
+    validPayload (LinkParamToken token) = isHttpTokenText token
+    validPayload (LinkParamQuoted text) = SBS.all allowed (ST.toShortByteString text)
+    allowed byte = byte == 9 || byte >= 32 && byte /= 127
+
+
+validRelations :: ST.ShortText -> Bool
+validRelations = validURIText (relation *> skipMany (skipSome $(char ' ') *> relation))
+  where
+    relation = registeredRelationBytes <|> outboundAbsoluteURIWithFragmentBytes
+
+
+validExtendedTitle :: Maybe LinkParamValue -> Bool
+validExtendedTitle (Just (LinkParamToken spelling)) =
+  case parseExtendedValue (ST.toByteString spelling) of
+    Right value ->
+      sameNegotiationToken "UTF-8" (extendedCharset value) && isRight (TE.decodeUtf8' (extendedOctets value))
+    Left _ -> False
+validExtendedTitle _ = False
+
 
 -- | Render a whole @Link@ value.
 renderLink :: Link -> M.Builder

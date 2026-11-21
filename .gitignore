@@ -74,3 +74,4 @@ traffic.html
 /interop/arrow-map-rs/target/
 
 /interop/edifact-rs/target/
+/interop/parquet-alp/target/

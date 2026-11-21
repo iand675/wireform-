@@ -12,7 +12,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader)
 import Network.HTTP.Headers.DAV
 import Network.HTTP.Headers.Depth
 import Network.HTTP.Headers.Destination
@@ -361,6 +361,13 @@ typedFields = describe "typed field lines" $ do
     mapM_
       (\wire -> readTimeout [timeout wire] `shouldSatisfy` isLeft)
       ["", ",,", "Second-4294967296", "Second-18446744073709551616", "Second- 1", "Second-+1", "InfiniteX"]
+  it "rejects malformed authored Timeout values above the WebDAV bound" $ do
+    let original = headerMapFromList [("Timeout", "Infinite"), ("Timeout", "Second-100")]
+        valid = Timeout (TimeInfinite :| [TimeSeconds 4_294_967_295, TimeSeconds 0])
+        invalid = Timeout (TimeInfinite :| [TimeSeconds 4_294_967_296])
+    renderHeaderLines defaultHeaderSettings valid `shouldBe` Just ("Infinite, Second-4294967295, Second-0" :| [])
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid original `shouldBe` original
 
   it "accepts case-insensitive Depth and Overwrite literals with singleton cardinality" $ do
     let depth wire = ("Depth", wire)

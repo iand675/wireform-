@@ -30,7 +30,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hServer)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (renderProductSequence, renderProductToken)
+import Network.HTTP.Grammar.Rendering (encodeProductSequenceChecked, renderProductSequence, renderProductToken)
 
 
 data Server = Server
@@ -57,6 +57,10 @@ instance KnownHeader Server where
 
 
   renderToHeaders _ = M.toStrictByteString . renderServer
+
+
+  renderToHeadersChecked _ (Server first rest) =
+    encodeProductSequenceChecked productName productVersion first rest
 
 
   headerName _ = hServer

@@ -3,6 +3,7 @@
 
 module Test.Hermes.Framing (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -17,6 +18,7 @@ import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.Headers
+import Network.HTTP.Headers.AltUsed (AltUsed (..))
 import qualified Network.HTTP.Headers.Close as Close
 import qualified Network.HTTP.Headers.Connection as Connection
 import Network.HTTP.Headers.ContentLength (ContentLength (..))
@@ -267,6 +269,57 @@ unit_transfer_coding_parameters = it "retains quoted transfer parameter bytes an
 
 -- Trailer -----------------------------------------------------------------
 
+unit_transfer_checked_write :: Spec
+unit_transfer_checked_write = it "rejects invalid authored transfer codings before replacing field lines" $ do
+  let fields = headerMapFromList [("Transfer-Encoding", "gzip"), ("Transfer-Encoding", "chunked")]
+      plain names = Transfer.TransferEncoding ("chunked" :| names)
+      param name key value =
+        Transfer.ParameterizedTransferEncoding
+          (Transfer.TransferCoding name [Transfer.TransferParameter key value] :| [Transfer.TransferCoding "chunked" []])
+      token = Transfer.TransferToken
+  forM_
+    [ plain ["CHUNKED"]
+    , plain [""]
+    , plain ["gzip, example"]
+    , param "GZip" "level" (token "2")
+    , param "CHUNKED" "level" (token "2")
+    , param "ext" "bad name" (token "2")
+    , param "ext" "level" (token "")
+    , param "ext" "level" (token "one;two")
+    , param "ext" "label" (Transfer.TransferQuoted "a\DELb")
+    ]
+    $ \value -> do
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields
+  let response = Transfer.TransferEncoding ("chunked" :| ["gzip"])
+  renderHeaderLines defaultHeaderSettings response `shouldBe` Just ("chunked, gzip" :| [])
+  renderHeaderLines defaultHeaderSettings Transfer.TransferEncodingEmpty `shouldBe` Just ("" :| [])
+
+
+unit_te_checked_write :: Spec
+unit_te_checked_write = it "rejects invalid authored TE members while preserving optional weight syntax" $ do
+  let fields = headerMapFromList [("TE", "trailers"), ("TE", "gzip;q=0.5")]
+      te member = TE.TE (TE.TECoding "trailers" Nothing :| [member])
+      param name key value =
+        TE.TEParameterizedCoding name (Just 0.5) (Transfer.TransferParameter key value :| [])
+      token = Transfer.TransferToken
+  forM_
+    [ TE.TECoding "CHUNKED" Nothing
+    , TE.TECoding "TRAILERS" (Just 1)
+    , TE.TECoding "gzip, example" Nothing
+    , param "Trailers" "foo" (token "bar")
+    , param "X-GZIP" "foo" (token "bar")
+    , param "example" "Q" (token "1")
+    , param "example" "note" (Transfer.TransferQuoted "a\DELb")
+    ]
+    $ \member -> do
+      let value = te member
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields
+  renderHeaderLines defaultHeaderSettings (te (TE.TECoding "GZip" (Just 1))) `shouldBe` Just ("trailers, GZip;q=1" :| [])
+  renderHeaderLines defaultHeaderSettings TE.TEEmpty `shouldBe` Just ("" :| [])
+
+
 unit_trailer_parse :: Spec
 unit_trailer_parse = it "parses a field-name list" $
   case parseTrailer "Expires, Content-MD5" of
@@ -440,6 +493,18 @@ unit_maxforwards_bounds = it "checks the supported hop-count range through typed
     [wireOf (toInteger (maxBound :: Int) + 1), "18446744073709551616", "-1", "23x", ""]
 
 
+unit_maxforwards_invalid_write :: Spec
+unit_maxforwards_invalid_write = it "rejects malformed authored Max-Forwards hop counts" $ do
+  let original = headerMapFromList [("Max-Forwards", "1"), ("Max-Forwards", "2")]
+  mapM_
+    ( \value -> do
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value original `shouldBe` original
+    )
+    [MaxForwards.MaxForwards (-1), MaxForwards.MaxForwards minBound]
+  renderHeaderLines defaultHeaderSettings (MaxForwards.MaxForwards 0) `shouldBe` Just ("0" :| [])
+
+
 -- Close -------------------------------------------------------------------
 
 unit_close_parse :: Spec
@@ -471,6 +536,42 @@ unit_close_connection = it "reads and writes close as a Connection option" $ do
 
 -- Suite -------------------------------------------------------------------
 
+checkedAuthorityWrites :: Spec
+checkedAuthorityWrites = describe "rejects invalid authored authorities" $ do
+  it "Host" $ do
+    let previous = headerMapFromList [("Host", "one.example"), ("Host", "two.example")]
+    mapM_
+      ( \value -> do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      [Host "" (Just 443), Host "one.example:443" Nothing, Host "user@one.example" Nothing, Host "[bad]" Nothing]
+    renderHeaderLines defaultHeaderSettings (Host "" Nothing) `shouldBe` Just ("" :| [])
+  it "Alt-Used" $ do
+    let previous = headerMapFromList [("Alt-Used", "one.example"), ("Alt-Used", "two.example")]
+    mapM_
+      ( \value -> do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      [AltUsed "" Nothing, AltUsed "one.example:443" Nothing, AltUsed "[bad]" Nothing]
+  it "Via" $ do
+    let previous = headerMapFromList [("Via", "1.1 one"), ("Via", "2 two")]
+        protocol = Via.ReceivedProtocol Nothing "1.1"
+    mapM_
+      ( \entry -> do
+          let value = Via.Via (Via.ViaEntry protocol "one" Nothing :| [entry])
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      [ Via.ViaEntry (Via.ReceivedProtocol (Just "HTTP/2") "1.1") "two" Nothing
+      , Via.ViaEntry (Via.ReceivedProtocol Nothing "two versions") "two" Nothing
+      , Via.ViaEntry protocol "two, 1.1 three" Nothing
+      , Via.ViaEntry protocol "[bad]" Nothing
+      , Via.ViaEntry protocol "two" (Just "bad\DEL")
+      ]
+
+
 tests :: Spec
 tests =
   describe "Framing" $
@@ -484,6 +585,8 @@ tests =
       , it "TE round-trip" (roundtrip genTE parseTE TE.renderTE)
       , unit_transfer_coding_order
       , unit_transfer_coding_parameters
+      , unit_transfer_checked_write
+      , unit_te_checked_write
       , unit_trailer_parse
       , unit_trailer_render
       , it "Trailer round-trip" (roundtrip genTrailer parseTrailer Trailer.renderTrailer)
@@ -497,10 +600,12 @@ tests =
       , unit_content_length
       , unit_host_authority
       , unit_via_authority
+      , checkedAuthorityWrites
       , unit_maxforwards_parse
       , unit_maxforwards_render
       , it "Max-Forwards round-trip" (roundtrip genMaxForwards parseMaxForwards MaxForwards.renderMaxForwards)
       , unit_maxforwards_bounds
+      , unit_maxforwards_invalid_write
       , unit_close_parse
       , unit_close_render
       , unit_close_connection

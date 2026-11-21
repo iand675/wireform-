@@ -1,3 +1,5 @@
+{-# LANGUAGE MagicHash #-}
+
 {- |
 @X-Forwarded-For@ — de-facto request header inserted by proxies, load
 balancers, and caches to record the chain of client and intermediary node
@@ -33,10 +35,12 @@ module Network.HTTP.Headers.XForwardedFor (
 ) where
 
 import Data.Bits (complement, xor, (.&.), (.|.))
+import qualified Data.ByteString.Short.Internal as SBS
 import qualified Data.CharSet as CS
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
-import Data.Word (Word64)
+import GHC.Exts (Int (I#), indexWord8ArrayAsWord64#)
+import GHC.Word (Word64 (W64#))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXForwardedFor)
 import qualified Network.HTTP.Headers.Mason as M
@@ -63,6 +67,11 @@ instance KnownHeader XForwardedFor where
 
 
   renderToHeaders _ (XForwardedFor nodes) = encodeCommaSeparatedText nodes
+
+
+  renderToHeadersChecked _ (XForwardedFor nodes)
+    | all validNode nodes = Just (encodeCommaSeparatedText nodes)
+    | otherwise = Nothing
 
 
   headerName _ = hXForwardedFor
@@ -101,6 +110,17 @@ visibleNodeWord bytes =
     biased = bytes .|. high
     commas = bytes `xor` 0x2c2c_2c2c_2c2c_2c2c
 {-# INLINE visibleNodeWord #-}
+
+
+validNode :: ST.ShortText -> Bool
+validNode value = case ST.toShortByteString value of
+  bytes@(SBS.SBS array) ->
+    let size = SBS.length bytes
+        scan offset@(I# index)
+          | offset <= size - 8 =
+              visibleNodeWord (W64# (indexWord8ArrayAsWord64# array index)) && scan (offset + 8)
+          | otherwise = scanCompactBytes (\byte -> byte >= 33 && byte <= 126 && byte /= 44) bytes offset
+    in size > 0 && scan 0
 
 
 renderXForwardedFor :: XForwardedFor -> M.Builder

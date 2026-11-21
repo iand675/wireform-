@@ -26,6 +26,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Unsafe as BSU
 import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Grammar.Parser
+import Network.HTTP.Grammar.Rendering (encodeDecimalVersion)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hMIMEVersion)
 import qualified Network.HTTP.Headers.Mason as M
@@ -57,6 +58,13 @@ instance KnownHeader MIMEVersion where
 
   renderToHeaders _ (MIMEVersion 1 0) = "1.0"
   renderToHeaders _ value = M.toStrictByteString (renderMIMEVersion value)
+
+
+  renderToHeadersChecked _ (MIMEVersion 1 0) = Just "1.0"
+  renderToHeadersChecked _ (MIMEVersion major minor)
+    | major >= 0 && minor >= 0 = Just (encodeDecimalVersion 0 (fromIntegral major) (fromIntegral minor))
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
 
 
   headerName _ = hMIMEVersion

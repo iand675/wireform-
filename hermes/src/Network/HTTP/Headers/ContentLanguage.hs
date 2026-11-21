@@ -24,15 +24,16 @@ module Network.HTTP.Headers.ContentLanguage (
   renderContentLanguage,
 ) where
 
+import Data.Coerce (coerce)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
-import Network.HTTP.Grammar.LanguageTag (languageTagBytes)
+import Network.HTTP.Grammar.LanguageTag (isLanguageTag, languageTagBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentLanguage)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (sepByCommas1, shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedText, sepByCommas1, shortText)
 
 
 -- | A single RFC 5646 language tag in its on-the-wire (token) form.
@@ -63,6 +64,12 @@ instance KnownHeader ContentLanguage where
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderContentLanguage
+
+
+  renderToHeadersChecked _ ContentLanguageEmpty = Just [""]
+  renderToHeadersChecked _ (ContentLanguage tags)
+    | all (isLanguageTag . ST.toByteString . unLanguageTag) tags = Just [encodeCommaSeparatedText (coerce tags)]
+    | otherwise = Nothing
 
 
   headerName _ = hContentLanguage

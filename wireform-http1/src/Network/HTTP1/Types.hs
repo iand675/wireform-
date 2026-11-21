@@ -71,15 +71,13 @@ type RawTarget = ByteString
 --                        @Content-Length: n@.
 --   ['BodyStream']       A producer @IO (Maybe ByteString)@ that
 --                        yields chunks until it returns 'Nothing'.
---                        The encoder emits @Transfer-Encoding: chunked@
---                        on HTTP\/1.1 and closes the connection on
---                        HTTP\/1.0 (the only legal way to delimit an
---                        unknown-length body there).
---   ['BodyPreEncoded']   Marker that the /whole/ response (head + body)
---                        already exists as wire-ready bytes in the
---                        wrapped 'PreEncoded'. The server's send path
---                        skips the encoder entirely and emits the bytes
---                        verbatim in one @send()@. Construct via
+--                        A fixed-length response checks the supplied
+--                        @Content-Length@. An unknown-length response
+--                        uses chunked framing on HTTP\/1.1 or closes
+--                        the connection on HTTP\/1.0.
+--   ['BodyPreEncoded']   Wire-ready response bytes. The server sends the
+--                        cached head and data in one operation and writes
+--                        any deferred trailer block afterwards. Construct via
 --                        'Network.HTTP1.Encode.precomputeResponse'.
 --   ['BodyFile']         File-backed body. The server opens the file
 --                        (or accepts a caller-opened 'Fd') and
@@ -123,7 +121,7 @@ streamBody = BodyStream
 -- PreEncoded
 ------------------------------------------------------------------------
 
--- | Wire-ready bytes of a fully-encoded HTTP\/1.x response.
+-- | Wire-ready HTTP\/1.x response bytes.
 --
 -- 'peBytes' holds the head (status line + headers + CRLFCRLF)
 -- concatenated with the body. 'peHeadLen' is the byte offset of the
@@ -134,14 +132,23 @@ streamBody = BodyStream
 -- Construct via 'Network.HTTP1.Encode.precomputeResponse'. The slice
 -- for HEAD is zero-copy (it shares 'peBytes'\' 'ForeignPtr').
 --
+-- 'PreEncoded' holds a complete message. 'PreEncodedWithTrailers'
+-- holds a head and optional data chunk. The server appends the
+-- terminator and obtains its fields from 'responseTrailers'.
+--
 -- Keep-alive decisions use the surrounding 'Response' record's
 -- 'responseHeaders'. The server can add a per-connection option before
 -- the final CRLF of the encoded head. Keep the baked-in headers and the
 -- record in sync when constructing these values directly.
-data PreEncoded = PreEncoded
-  { peBytes :: !ByteString
-  , peHeadLen :: !Int
-  }
+data PreEncoded
+  = PreEncoded
+      { peBytes :: !ByteString
+      , peHeadLen :: !Int
+      }
+  | PreEncodedWithTrailers
+      { peBytes :: !ByteString
+      , peHeadLen :: !Int
+      }
   deriving stock (Eq, Show, Generic)
 
 instance NFData PreEncoded
@@ -150,7 +157,7 @@ instance NFData PreEncoded
 -- server to serve HEAD from a GET-shaped precomputed response.
 {-# INLINE preEncodedHead #-}
 preEncodedHead :: PreEncoded -> ByteString
-preEncodedHead (PreEncoded bs n) = BSU.unsafeTake n bs
+preEncodedHead pe = BSU.unsafeTake (peHeadLen pe) (peBytes pe)
 
 ------------------------------------------------------------------------
 -- FileBody
@@ -158,10 +165,8 @@ preEncodedHead (PreEncoded bs n) = BSU.unsafeTake n bs
 
 -- | A file-backed response body.
 --
--- The server resolves 'fbSource' to a file descriptor, optionally
--- seeks to 'fbOffset', emits a @Content-Length: fbLength@ header
--- (unless the caller already supplied one), then pushes the bytes
--- with @sendfile(2)@.
+-- The server sends the extent starting at 'fbOffset'. On plain TCP it
+-- uses @sendfile(2)@. A declared trailer selects chunked HTTP/1.1 framing.
 data FileBody = FileBody
   { fbSource :: !FileSource
   , fbOffset :: !Word64
@@ -307,8 +312,9 @@ data Response = Response
     --
     -- /Outbound:/ servers that want to emit trailers populate this
     -- with a (possibly @IO@-deferred) field list. On a chunked response
-    -- the action runs after the body producer finishes. Declare the
-    -- anticipated fields in @Trailer@.
+    -- the action runs after the body finishes. For an HTTP\/1.1 response,
+    -- a nonempty @Trailer@ declaration or an explicit @Transfer-Encoding@
+    -- selects chunked framing for an empty, buffered, streaming, or file body.
   }
 
 instance Show Response where

@@ -12,6 +12,7 @@ module Network.HTTP.Headers.Ext (
   renderExt,
 ) where
 
+import qualified Data.ByteString.Char8 as BSC
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Network.HTTP.Grammar.Parser
@@ -43,6 +44,14 @@ instance KnownHeader Ext where
 
 
   renderToHeaders _ = ST.toByteString . rawExt
+
+
+  renderToHeadersChecked _ (Ext text)
+    | BSC.all isOWS wire = Just wire
+    | otherwise = Nothing
+    where
+      wire = ST.toByteString text
+  {-# INLINE renderToHeadersChecked #-}
 
 
   headerName _ = hExt

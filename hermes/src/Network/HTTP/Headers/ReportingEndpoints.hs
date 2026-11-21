@@ -26,8 +26,10 @@ module Network.HTTP.Headers.ReportingEndpoints (
   ReportingEndpoint (..),
   reportingEndpointsParser,
   renderReportingEndpoints,
+  renderReportingEndpointsChecked,
 ) where
 
+import Data.Either (isRight)
 import Data.Maybe (mapMaybe)
 import Data.Text.Short (ShortText)
 import qualified Data.Text.Short as ST
@@ -62,7 +64,10 @@ instance KnownHeader ReportingEndpoints where
   parseFromHeaders _ = parseStructuredFieldLines "Reporting-Endpoints" reportingEndpointsParser
 
 
-  renderToHeaders _ = M.toStrictByteString . renderReportingEndpoints
+  renderToHeaders settings = maybe "" id . renderToHeadersChecked settings
+
+
+  renderToHeadersChecked _ = either (const Nothing) (Just . M.toStrictByteString) . renderReportingEndpointsChecked
 
 
   omitHeaderValue = null . reportingEndpoints
@@ -75,16 +80,28 @@ instance KnownHeader ReportingEndpoints where
 reportingEndpointsParser :: ParserT st String ReportingEndpoints
 reportingEndpointsParser = ReportingEndpoints . mapMaybe endpoint <$> structuredFieldDictionary
   where
-    endpoint (StructuredFieldDictionaryEntry name (StructuredItem (StructuredFieldItem (String url) _))) =
-      case parseByteString (uriReferenceBytes <* eof) (ST.toByteString (unsafeToRFC8941String url)) of
-        Right () -> Just (ReportingEndpoint name url)
-        _ -> Nothing
+    endpoint (StructuredFieldDictionaryEntry name (StructuredItem (StructuredFieldItem (String url) _)))
+      | validEndpointURI url = Just (ReportingEndpoint name url)
     endpoint _ = Nothing
 
 
+validEndpointURI :: RFC8941String -> Bool
+validEndpointURI (RFC8941String url) = isRight (parseByteString (uriReferenceBytes <* eof) (ST.toByteString url))
+
+
+-- | Render the field value. An invalid endpoint produces no bytes.
 renderReportingEndpoints :: ReportingEndpoints -> M.Builder
-renderReportingEndpoints (ReportingEndpoints members) =
-  R.renderSeparated ", " renderMember (orderedFieldEntries reportingEndpointName members)
+renderReportingEndpoints = either (const mempty) id . renderReportingEndpointsChecked
+
+
+-- | Require valid dictionary keys and RFC 3986 references for emission.
+renderReportingEndpointsChecked :: ReportingEndpoints -> Either String M.Builder
+renderReportingEndpointsChecked (ReportingEndpoints members)
+  | all validEndpoint normalized = Right (R.renderSeparated ", " renderMember normalized)
+  | otherwise = Left "Invalid Reporting-Endpoints name or URI reference"
   where
-    renderMember (ReportingEndpoint name url) =
-      R.shortText name <> M.char7 '=' <> R.rfc8941String url
+    normalized = orderedFieldEntries reportingEndpointName members
+    validEndpoint (ReportingEndpoint name url) = isStructuredFieldKey name && validEndpointURI url
+    -- A valid URI reference contains neither a literal quote nor a backslash.
+    renderMember (ReportingEndpoint name (RFC8941String url)) =
+      R.shortText name <> "=\"" <> R.shortText url <> "\""

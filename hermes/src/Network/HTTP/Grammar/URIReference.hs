@@ -4,28 +4,45 @@
 module Network.HTTP.Grammar.URIReference (
   uriReference,
   uriReferenceBytes,
+  outboundURIReferenceBytes,
   iriReference,
+  iriReferenceBytes,
   fragmentlessReference,
+  outboundFragmentlessReferenceBytes,
   absoluteURI,
   absoluteURIBytes,
+  outboundAbsoluteURIBytes,
+  outboundAbsoluteURIWithFragmentBytes,
   uriWithFragment,
   absolutePathReference,
+  absolutePathReferenceBytes,
   uriPathSuffixBytes,
   nonEmptyPathSegment,
+  nonEmptyPathSegmentBytes,
   codedURL,
   referrerReference,
+  outboundReferrerReferenceBytes,
   browserURLBytes,
+  checkedURIField,
+  checkedBrowserURLField,
+  validURIText,
 ) where
 
 import Data.Bits ((.&.))
+import Data.ByteString (ByteString)
 import Data.Char (ord)
 import Data.CharSet (CharSet)
 import qualified Data.CharSet as CS
+import Data.Either (isRight)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Short (ShortText)
 import qualified Data.Text.Short as ST
 import Network.HTTP.Grammar.Authority (pctEncoded, uriHostBytes, uriSchemeBytes)
 import Network.HTTP.Grammar.Parser
 import Network.IPAddress (skipIPLiteralParser, skipIPv6Parser)
+import Wireform.Parser.Driver (parseByteString)
+import Wireform.Parser.Switch (switchAsciiCI)
 
 
 -- | RFC 3986 URI-reference, preserving the original spelling.
@@ -38,6 +55,12 @@ uriReference = shortASCIIFromParser_ uriReferenceBytes
 uriReferenceBytes :: ParserT st String ()
 uriReferenceBytes = reference uriAuthority *> uriFragment
 {-# INLINE uriReferenceBytes #-}
+
+
+-- | Validate an outbound URI-reference, including any explicit HTTP scheme.
+outboundURIReferenceBytes :: ParserT st String ()
+outboundURIReferenceBytes = outboundReference (reference uriAuthority) *> uriFragment
+{-# INLINE outboundURIReferenceBytes #-}
 
 
 -- | RFC 3987 IRI-reference, retaining the original UTF-8 and percent escapes.
@@ -87,6 +110,12 @@ fragmentlessReference = shortASCIIFromParser_ (reference uriAuthority)
 {-# INLINE fragmentlessReference #-}
 
 
+-- | Outbound absolute-URI or partial-URI, without a fragment.
+outboundFragmentlessReferenceBytes :: ParserT st String ()
+outboundFragmentlessReferenceBytes = outboundReference (reference uriAuthority)
+{-# INLINE outboundFragmentlessReferenceBytes #-}
+
+
 -- | RFC 3986 absolute-URI, with a required scheme and no fragment.
 absoluteURI :: ParserT st String ShortText
 absoluteURI = shortASCIIFromParser_ absoluteURIBytes
@@ -97,6 +126,17 @@ absoluteURI = shortASCIIFromParser_ absoluteURIBytes
 absoluteURIBytes :: ParserT st String ()
 absoluteURIBytes = uriSchemeBytes *> $(char ':') *> absolutePart uriAuthority
 {-# INLINE absoluteURIBytes #-}
+
+
+-- | Outbound absolute URI, with a scheme and without a fragment.
+outboundAbsoluteURIBytes :: ParserT st String ()
+outboundAbsoluteURIBytes = outboundReference absoluteURIBytes
+{-# INLINE outboundAbsoluteURIBytes #-}
+
+
+-- | Validate an outbound absolute URI with an optional fragment.
+outboundAbsoluteURIWithFragmentBytes :: ParserT st String ()
+outboundAbsoluteURIWithFragmentBytes = outboundAbsoluteURIBytes *> uriFragment
 
 
 -- | RFC 3986 URI with a required scheme and an optional fragment.
@@ -112,9 +152,14 @@ uriFragment = branch $(char '#') (uriChars queryChars) (pure ())
 
 -- | RFC 3986 path-absolute with an optional query, as in WebDAV Simple-ref.
 absolutePathReference :: ParserT st String ShortText
-absolutePathReference =
-  shortASCIIFromParser_ ($(char '/') *> notFollowedBy $(char '/') *> uriChars pathChars *> uriQuery)
+absolutePathReference = shortASCIIFromParser_ absolutePathReferenceBytes
 {-# INLINE absolutePathReference #-}
+
+
+-- | Validate a path-absolute reference without retaining its spelling.
+absolutePathReferenceBytes :: ParserT st String ()
+absolutePathReferenceBytes = $(char '/') *> notFollowedBy $(char '/') *> uriChars pathChars *> uriQuery
+{-# INLINE absolutePathReferenceBytes #-}
 
 
 -- | A slash-led URI path with its optional query and fragment.
@@ -125,11 +170,17 @@ uriPathSuffixBytes = $(char '/') *> uriChars pathChars *> uriQuery *> uriFragmen
 
 -- | A single nonempty path segment, preserving percent escapes.
 nonEmptyPathSegment :: ParserT st String ShortText
-nonEmptyPathSegment = shortASCIIFromParser_ $ case segmentChars of
+nonEmptyPathSegment = shortASCIIFromParser_ nonEmptyPathSegmentBytes
+{-# INLINE nonEmptyPathSegment #-}
+
+
+-- | Validate a nonempty path segment without retaining its bytes.
+nonEmptyPathSegmentBytes :: ParserT st String ()
+nonEmptyPathSegmentBytes = case segmentChars of
   AsciiSet low high ->
     (skipSome (skipSatisfyAscii (asciiMember low high)) <|> (pctEncoded *> charRun segmentChars))
       *> skipMany (pctEncoded *> charRun segmentChars)
-{-# INLINE nonEmptyPathSegment #-}
+{-# INLINE nonEmptyPathSegmentBytes #-}
 
 
 -- | RFC 4918 Coded-URL, retaining the URI without its enclosing brackets.
@@ -142,6 +193,48 @@ codedURL = $(char '<') *> absoluteURI <* $(char '>')
 referrerReference :: ParserT st String ShortText
 referrerReference = shortASCIIFromParser_ (reference uriHostPort)
 {-# INLINE referrerReference #-}
+
+
+-- | Outbound Referer, with neither a fragment nor userinfo.
+outboundReferrerReferenceBytes :: ParserT st String ()
+outboundReferrerReferenceBytes = outboundReference (reference uriHostPort)
+{-# INLINE outboundReferrerReferenceBytes #-}
+
+
+-- An explicit HTTP or HTTPS scheme commits to an authority with a
+-- nonempty host and no userinfo, per RFC 9110 sections 4.2.1–4.2.4.
+outboundReference :: ParserT st String () -> ParserT st String ()
+outboundReference other = branch httpScheme httpPart other
+  where
+    httpScheme = $(switchAsciiCI [|case _ of "http:" -> pure (); "https:" -> pure ()|])
+    httpPart =
+      $(string "//")
+        *> referenceHostPort uriHostBytes
+        *> branch $(char '/') (uriChars pathChars) (pure ())
+        *> uriQuery
+{-# INLINE outboundReference #-}
+
+
+-- | Validate a complete URI field while retaining the original field bytes.
+checkedURIField :: ParserT st String () -> ByteString -> Maybe ByteString
+checkedURIField syntax wire =
+  either (const Nothing) (const (Just wire)) $
+    parseByteString (ows *> syntax <* ows <* eof) wire
+{-# INLINE checkedURIField #-}
+
+
+-- | Check an authored URI component within a structured field.
+validURIText :: ParserT st String () -> ShortText -> Bool
+validURIText syntax = isRight . parseByteString (syntax <* eof) . ST.toByteString
+{-# INLINE validURIText #-}
+
+
+{- | Validate a String-backed serialized browser URL without narrowing a
+non-ASCII character to its low byte.
+-}
+checkedBrowserURLField :: String -> Maybe ByteString
+checkedBrowserURLField =
+  checkedURIField browserURLBytes . TextEncoding.encodeUtf8 . Text.pack
 
 
 reference :: ParserT st String () -> ParserT st String ()

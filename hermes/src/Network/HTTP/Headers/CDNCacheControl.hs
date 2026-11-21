@@ -24,14 +24,12 @@ module Network.HTTP.Headers.CDNCacheControl (
 
 import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
-import qualified Data.Text.Short as ST
 import qualified Network.HTTP.Grammar.Rendering as R
 import Network.HTTP.Headers
 import Network.HTTP.Headers.CacheControl (CacheControlDirective (..), cacheDirectiveFieldNames)
 import Network.HTTP.Headers.HeaderFieldName (hCDNCacheControl)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Wireform.Parser.Driver (parseByteString)
 
 
 {- | A targeted cache policy. Use 'cdnCacheControlDirectiveList' to read
@@ -84,7 +82,11 @@ cdnCacheControlDictionary :: CDNCacheControl -> Either String [StructuredFieldDi
 cdnCacheControlDictionary CDNCacheControlEmpty = Right []
 cdnCacheControlDictionary (CDNCacheControlStructured entries _) = Right entries
 cdnCacheControlDictionary (CDNCacheControl ds) =
-  orderedFieldEntries structuredDictionaryKey <$> traverse fromDirective (NE.toList ds)
+  traverse directiveEntry (orderedFieldEntries directiveKey (candidates (NE.toList ds)))
+  where
+    candidates [] = []
+    candidates (directive : rest) = case fromDirective directive of
+      candidate@DirectiveCandidate {} -> candidate : candidates rest
 
 
 renderCDNCacheControl :: CDNCacheControl -> M.Builder
@@ -148,35 +150,47 @@ toDirective (StructuredFieldDictionaryEntry key member) =
       _ -> invalid
 
 
-fromDirective :: CacheControlDirective -> Either String StructuredFieldDictionaryEntry
+-- Delay validation of each value until dictionary replacement has selected it.
+data DirectiveCandidate = DirectiveCandidate
+  { directiveKey :: !ShortText
+  , directiveEntry :: Either String StructuredFieldDictionaryEntry
+  }
+
+
+fromDirective :: CacheControlDirective -> DirectiveCandidate
 fromDirective directive = case directive of
   Public -> flag "public"
   Private val -> qualifiedNames "private" val
   NoCache val -> qualifiedNames "no-cache" val
   NoStore -> flag "no-store"
   MaxAge n -> delay "max-age" n
+  MaxStale _ -> requestOnly "max-stale"
+  MinFresh _ -> requestOnly "min-fresh"
   SMaxAge n -> delay "s-maxage" n
   MustRevalidate -> flag "must-revalidate"
   MustUnderstand -> flag "must-understand"
   ProxyRevalidate -> flag "proxy-revalidate"
   NoTransform -> flag "no-transform"
+  OnlyIfCached -> requestOnly "only-if-cached"
   Immutable -> flag "immutable"
   StaleWhileRevalidate n -> delay "stale-while-revalidate" n
   StaleIfError n -> delay "stale-if-error" n
-  Unknown key val -> do
-    case parseByteString (structuredFieldKey <* eof) (ST.toByteString key) of
-      Left _ -> Left ("Invalid CDN-Cache-Control dictionary key " <> show key)
-      Right _ -> do
-        member <- entry key <$> extension val
-        member <$ toDirective member
-  _ -> Left "CDN-Cache-Control requires a response cache directive"
+  Unknown key val -> DirectiveCandidate key validateExtension
+    where
+      validateExtension
+        | isStructuredFieldKey key = do
+            member <- entry key <$> extension val
+            member <$ toDirective member
+        | otherwise = Left ("Invalid CDN-Cache-Control dictionary key " <> show key)
   where
-    flag key = Right (entry key (Boolean True))
-    delay key n
+    requestOnly key = DirectiveCandidate key (Left "CDN-Cache-Control requires a response cache directive")
+    flag key = DirectiveCandidate key (Right (entry key (Boolean True)))
+    delay key n = DirectiveCandidate key (delayEntry key n)
+    delayEntry key n
       | n <= 999_999_999_999_999 = Right (entry key (Integer (fromIntegral n)))
       | otherwise = Left ("CDN-Cache-Control integer out of range for " <> show key)
     qualifiedNames key Nothing = flag key
-    qualifiedNames key (Just value) = case cacheDirectiveFieldNames directive of
+    qualifiedNames key (Just value) = DirectiveCandidate key $ case cacheDirectiveFieldNames directive of
       Just _ -> entry key . String <$> stringValue value
       Nothing -> Left ("Invalid CDN-Cache-Control field names for " <> show key)
     extension Nothing = Right (Boolean True)
@@ -191,5 +205,7 @@ entry key value = StructuredFieldDictionaryEntry key (StructuredItem (Structured
 
 stringValue :: ShortText -> Either String RFC8941String
 stringValue text
-  | ST.all (\c -> c >= ' ' && c <= '~') text = Right (RFC8941String text)
+  | isStructuredFieldString string = Right string
   | otherwise = Left "CDN-Cache-Control requires an ASCII Structured Field string"
+  where
+    string = RFC8941String text

@@ -50,7 +50,7 @@ import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName, hSignature, hSigna
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
-import Network.HTTP.Headers.Signature.Internal (signatureDictionary)
+import Network.HTTP.Headers.Signature.Internal (renderSignatureDictionary, signatureDictionary)
 import Network.HTTP.Headers.SignatureInput (SignatureInput (..), SignatureInputEntry, signatureLabel)
 
 
@@ -93,7 +93,7 @@ instance KnownHeader Signature where
   parseFromHeaders _ = parseStructuredFieldLines "Signature" signatureParser
 
 
-  renderToHeaders _ = pure . M.toStrictByteString . renderSignature
+  renderToHeaders _ = maybe [] (pure . M.toStrictByteString) . signatureBuilder
 
 
   headerName _ = hSignature
@@ -181,9 +181,13 @@ signatureParser = Signature <$> signatureDictionary fst member
 -- Renderer
 -- ---------------------------------------------------------------------------
 
+-- | Render the field value. Invalid or repeated labels produce no bytes.
 renderSignature :: Signature -> M.Builder
-renderSignature (Signature vs) =
-  M.intersperse ", " (renderMember <$> vs)
+renderSignature = maybe mempty id . signatureBuilder
+
+
+signatureBuilder :: Signature -> Maybe M.Builder
+signatureBuilder (Signature values) = renderSignatureDictionary fst (const True) renderMember values
   where
     renderMember (label, bytes) =
       R.shortText label <> M.char7 '=' <> R.rfc8941Binary bytes

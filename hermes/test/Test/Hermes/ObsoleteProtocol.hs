@@ -14,7 +14,7 @@ import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.Grammar.LegacyProtocol
-import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupHeaderWith, lookupRawHeader, setHeader, withHeaderDateReference)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupHeaderWith, lookupRawHeader, renderHeaderLines, setHeader, withCaseInsensitiveDates, withHeaderDateReference)
 import Network.HTTP.Headers.HeaderFieldName (hMethodCheck, hMethodCheckExpires, hProtocol, hProtocolInfo, hProtocolQuery, hProtocolRequest, hProxyFeatures, hProxyInstruction, hRefererRoot, hSecurityScheme)
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.MethodCheck as MethodCheck
@@ -51,14 +51,22 @@ renderBS f = M.toStrictByteString . f
 
 unit_protocol :: Spec
 unit_protocol = describe "Protocol" $ do
+  it "validates checked writes from the legacy text pattern" $ do
+    let previous = headerMapFromList [("Protocol", "{foo}")]
+        bad = Protocol.Protocol "{PICS-1.1 {headers Other}}"
+        wire = "\t{pIcS-1.1 {HeAdErs PICS-Label }} "
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
+    renderHeaderLines defaultHeaderSettings (Protocol.Protocol wire) `shouldBe` Just ("\t{pIcS-1.1 {HeAdErs PICS-Label }} " :| [])
   it "reads and renders the PICS response declaration" $ do
     let canonical = "{PICS-1.1 {headers PICS-Label}}"
         wire = " \t{pics-1.1 {HeAdErS pics-label }}\t"
     lookupHeader @Protocol.Protocol (headerMapFromList [("Protocol", BS.copy canonical)])
       `shouldBe` Right (Just Protocol.protocolPicsLabels)
-    let sliced = BS.take (BS.length canonical) (BS.drop 1 ("x" <> canonical <> "y"))
-    lookupHeader @Protocol.Protocol (headerMapFromList [("Protocol", sliced)])
-      `shouldBe` Right (Just Protocol.protocolPicsLabels)
+    forM_ [0 .. 15] $ \offset -> do
+      let sliced = BS.take (BS.length canonical) (BS.drop offset (BS.replicate offset 0 <> canonical <> "y"))
+      lookupHeader @Protocol.Protocol (headerMapFromList [("Protocol", sliced)])
+        `shouldBe` Right (Just Protocol.protocolPicsLabels)
     forM_ [0 .. BS.length canonical - 1] $ \offset -> do
       let wireVariant = BS.take offset canonical <> "!" <> BS.drop (offset + 1) canonical
           expected = either (const Nothing) Just (parseOk Protocol.protocolParser wireVariant)
@@ -104,6 +112,11 @@ unit_protocol = describe "Protocol" $ do
 
 unit_protocol_request :: Spec
 unit_protocol_request = describe "Protocol-Request" $ do
+  it "validates checked writes from the legacy text pattern" $ do
+    let previous = headerMapFromList [("Protocol-Request", "{foo}")]
+        bad = ProtocolRequest.ProtocolRequest "{PICS-1.1 {params {services}}}"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
   it "reads PICS label options, named extensions and multiple rating services" $ do
     let wire = "\t{PICS-1.1 {params FuLL {probe +test \"a%28test%29\"} {services \"http://www.gcf.org/v2.5\" \"irc://irc.test/room\"}}} "
         expected =
@@ -149,6 +162,11 @@ unit_protocol_request = describe "Protocol-Request" $ do
 
 unit_protocol_info :: Spec
 unit_protocol_info = describe "Protocol-Info" $ do
+  it "validates checked writes from the legacy text pattern" $ do
+    let previous = headerMapFromList [("Protocol-Info", "{foo}")]
+        bad = ProtocolInfo.ProtocolInfo "{foo {str req} {STR ref}}"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
   it "reads capabilities and nested parameters in the JEPI example's wire order" $ do
     let first = "{http://www.w3.org/UPP {for /PaymentPages/*}} {http://www.SET.org/PEPSpec {params {upp {instrument-brand VISA}}} {for /PaymentPages/*}}"
         second = ", {legacy {str ref} {via alt} {vendor \"x,\\\"y\"}}"
@@ -169,6 +187,11 @@ unit_protocol_info = describe "Protocol-Info" $ do
 
 unit_protocol_query :: Spec
 unit_protocol_query = describe "Protocol-Query" $ do
+  it "validates checked writes from the legacy text pattern" $ do
+    let previous = headerMapFromList [("Protocol-Query", "{foo}")]
+        bad = ProtocolQuery.ProtocolQuery "{foo {str req}}"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
   it "reads unquoted relative URI wildcards, and keeps empty realm lists" $ do
     let wire = " {http://www.w3.org/UPP {for /PaymentPages/* ../x?foo=bar /literal%2A} {str opt}}, {alt {for} {scope origin}}  "
         expected =
@@ -211,6 +234,13 @@ unit_protocol_query = describe "Protocol-Query" $ do
 
 unit_method_check :: Spec
 unit_method_check = describe "Method-Check" $ do
+  it "validates checked writes from legacy field text" $ do
+    let previous = headerMapFromList [("Method-Check", "GET")]
+        invalid = MethodCheck.MethodCheck "GET, PATCH"
+        valid = MethodCheck.MethodCheck " \tX-verify\t "
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid previous `shouldBe` previous
+    lookupRawHeader hMethodCheck (setHeader valid previous) `shouldBe` Just (" \tX-verify\t " :| [])
   it "accepts one case-sensitive HTTP method with extension methods" $ do
     let check wire = lookupHeader @MethodCheck.MethodCheck (headerMapFromList [("Method-Check", wire)])
         expectMethod wire = fmap (traverse MethodCheck.methodCheckMethod) (check wire)
@@ -233,6 +263,26 @@ unit_method_check_expires = describe "Method-Check-Expires" $ do
   let stamp = UTCTime (fromGregorian 2015 10 21) (secondsToDiffTime 26880)
       canonical = "Wed, 21 Oct 2015 07:28:00 GMT"
       check wire = lookupHeader @MethodCheckExpires.MethodCheckExpires (headerMapFromList [("Method-Check-Expires", wire)])
+  it "validates checked writes from legacy field text" $ do
+    let previous = headerMapFromList [("Method-Check-Expires", canonical)]
+        invalid = MethodCheckExpires.MethodCheckExpires "Wed, 31 Feb 2015 07:28:00 GMT"
+        folded = MethodCheckExpires.MethodCheckExpires " \twed, 21 oct 2015 07:28:00 gmt "
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid previous `shouldBe` previous
+    renderHeaderLines defaultHeaderSettings folded `shouldBe` Nothing
+    renderHeaderLines (withCaseInsensitiveDates defaultHeaderSettings) folded
+      `shouldBe` Just (" \twed, 21 oct 2015 07:28:00 gmt " :| [])
+  it "requires representable HTTP dates when writing from timestamps" $ do
+    let previous = headerMapFromList [("Method-Check-Expires", canonical)]
+        at year seconds = UTCTime (fromGregorian year 1 1) (secondsToDiffTime seconds)
+    forM_ [at 1899 0, at 10000 0, at 2015 (-1), at 2015 86401] $ \time -> do
+      let authored = MethodCheckExpires.methodCheckExpiresFromTime time
+      renderHeaderLines defaultHeaderSettings authored `shouldBe` Nothing
+      setHeader authored previous `shouldBe` previous
+    forM_ [at 1900 0, at 9999 86400] $ \time -> do
+      let headers = setHeader (MethodCheckExpires.methodCheckExpiresFromTime time) previous
+      (lookupHeader @MethodCheckExpires.MethodCheckExpires headers >>= traverse MethodCheckExpires.methodCheckExpiresTime)
+        `shouldBe` Right (Just time)
   it "reads all HTTP-date forms and preserves validated wire bytes" $ do
     forM_ [canonical, "Wednesday, 21-Oct-15 07:28:00 GMT", "Wed Oct 21 07:28:00 2015"] $ \wire -> do
       case check wire of
@@ -263,6 +313,13 @@ unit_proxy_features = describe "Proxy-Features" $ do
       offer uri options = ProxyFeatures.ProxyLog (ProxyFeatures.ProxyLogOffer uri options)
       expiry = ProxyFeatures.ProxyLogExpiryHours
       expected name options = Right (Just (ProxyFeatures.ProxyFeaturesDetails name options))
+  it "validates checked writes from legacy field text" $ do
+    let previous = headerMapFromList [("Proxy-Features", "q; logging")]
+        invalid = ProxyFeatures.ProxyFeatures "p; invalid"
+        valid = ProxyFeatures.ProxyFeatures " \tProxy.TEST.; NotIfY\t "
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid previous `shouldBe` previous
+    lookupRawHeader hProxyFeatures (setHeader valid previous) `shouldBe` Just (" \tProxy.TEST.; NotIfY\t " :| [])
   it "reads the draft example and retains spelling through the typed header map" $ do
     let uri = "http://proxy.w3.org/logs/xxxxx.org"
         wire = "\t proxy.w3.org; log=" <> uri <> "; expiry=24 \t"
@@ -351,6 +408,13 @@ unit_proxy_features = describe "Proxy-Features" $ do
 unit_proxy_instruction :: Spec
 unit_proxy_instruction = describe "Proxy-Instruction" $ do
   let readInstruction wire = lookupHeader @ProxyInstruction.ProxyInstruction (headerMapFromList [("Proxy-Instruction", wire)])
+  it "validates checked writes from legacy field text" $ do
+    let previous = headerMapFromList [("Proxy-Instruction", "q; summary")]
+        invalid = ProxyInstruction.ProxyInstruction "p; log; inform"
+        valid = ProxyInstruction.ProxyInstruction " \tProxy.TEST.; LoG\t "
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid previous `shouldBe` previous
+    lookupRawHeader hProxyInstruction (setHeader valid previous) `shouldBe` Just (" \tProxy.TEST.; LoG\t " :| [])
   it "reads every command and preserves original case and whitespace" $
     forM_ [("LoG", ProxyInstruction.ProxyCommandLog), ("summary", ProxyInstruction.ProxyCommandSummary), ("INFORM", ProxyInstruction.ProxyCommandInform)] $
       \(token, command) -> do
@@ -376,6 +440,13 @@ unit_proxy_instruction = describe "Proxy-Instruction" $ do
 
 unit_security_scheme :: Spec
 unit_security_scheme = describe "Security-Scheme" $ do
+  it "validates checked writes from legacy field text" $ do
+    let previous = headerMapFromList [("Security-Scheme", "S-HTTP/1.4")]
+        invalid = SecurityScheme.SecurityScheme "S-HTTP/1.5"
+        valid = SecurityScheme.SecurityScheme " \ts-hTtp/1.4 "
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid previous `shouldBe` previous
+    lookupRawHeader hSecurityScheme (setHeader valid previous) `shouldBe` Just (" \ts-hTtp/1.4 " :| [])
   it "reads the S-HTTP/1.4 literal and retains accepted case" $ do
     parseOk SecurityScheme.securitySchemeParser "s-hTtp/1.4"
       `shouldBe` Right (SecurityScheme.SecurityScheme "s-hTtp/1.4")
@@ -395,6 +466,13 @@ unit_security_scheme = describe "Security-Scheme" $ do
 unit_referer_root :: Spec
 unit_referer_root = describe "Referer-Root" $ do
   let readRoot wire = lookupHeader @RefererRoot.RefererRoot (headerMapFromList [("Referer-Root", wire)])
+  it "validates checked writes from legacy field text" $ do
+    let previous = headerMapFromList [("Referer-Root", "null")]
+        invalid = RefererRoot.RefererRoot "https://p.test"
+        valid = RefererRoot.RefererRoot " \thttps://[2001:db8::1]:443 "
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid previous `shouldBe` previous
+    lookupRawHeader hRefererRoot (setHeader valid previous) `shouldBe` Just (" \thttps://[2001:db8::1]:443 " :| [])
   it "parses an explicit port, IPv6, and null and preserves the source spelling" $ do
     let wire = "\t hTTps://[2001:db8::1]:00443 "
     (readRoot wire >>= traverse RefererRoot.refererRootOrigin)
@@ -409,6 +487,18 @@ unit_referer_root = describe "Referer-Root" $ do
     let origin = RefererRoot.RefererRootHost "https" "example.test" 443
     fmap (renderBS RefererRoot.renderRefererRoot) (RefererRoot.refererRootFromOrigin origin)
       `shouldBe` Right "https://example.test:443"
+  it "validates bracketed IPv6 and IPvFuture hosts before reading the port" $ do
+    let valid =
+          [ ("https://[::ffff:192.0.2.1]:65535", "[::ffff:192.0.2.1]", 65535)
+          , ("https://[vA.ext:part]:00080", "[vA.ext:part]", 80)
+          ]
+    forM_ valid $ \(wire, host, port) -> do
+      (readRoot wire >>= traverse RefererRoot.refererRootOrigin)
+        `shouldBe` Right (Just (RefererRoot.RefererRootHost "https" host port))
+      traverse (RefererRoot.refererRootOrigin . RefererRoot.RefererRoot) (ST.fromByteString wire)
+        `shouldBe` Right (Just (RefererRoot.RefererRootHost "https" host port))
+    forM_ ["https://[::ffff:192.0.2.256]:80", "https://[vX.ext]:80", "https://[v1.]:80", "https://[::1]:", "https://[::1]:65536"] $ \wire ->
+      readRoot wire `shouldSatisfy` isLeft
   it "rejects missing ports, non-root URI components and duplicate lines" $ do
     forM_ ["", "NULL", "https://example.test", "https://example.test.:443", "https://example.test:", "https://example.test:65536", "https://example.test:443/", "https://example.test:443?q=x", "https://example.test:443#a", "https://user@example.test:443", "https://[2001:db8::1:443", "null, null"] $ \wire ->
       readRoot wire `shouldSatisfy` isLeft
@@ -453,6 +543,17 @@ genMethod :: Gen ST.ShortText
 genMethod = ST.fromString <$> Gen.list (Range.linear 1 8) (Gen.element ['A' .. 'Z'])
 
 
+unit_public_checked_write :: Spec
+unit_public_checked_write = it "rejects malformed authored Public methods before replacing field lines" $ do
+  let fields = headerMapFromList [("Public", "GET"), ("Public", "OPTIONS")]
+      reject method = do
+        let value = PublicHeader.PublicHeader ("GET" :| [method])
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value fields `shouldBe` fields
+  mapM_ reject ["", "GET, PATCH", "GET METHOD", "M-\xff"]
+  renderHeaderLines defaultHeaderSettings (PublicHeader.PublicHeader ("GET" :| ["mhead"])) `shouldBe` Just ("GET, mhead" :| [])
+
+
 genPublic :: Gen PublicHeader.PublicHeader
 genPublic = PublicHeader.PublicHeader <$> Gen.nonEmpty (Range.linear 1 5) genMethod
 
@@ -495,6 +596,16 @@ unit_safe_field_lines = it "Safe reads one complete flag or conditional token" $
     readSafe fields `shouldSatisfy` isLeft
 
 
+checkedSafeWrites :: Spec
+checkedSafeWrites = it "checks the authored Safe condition token" $ do
+  let old = headerMapFromList [("Safe", "yes")]
+  forM_ ["", "bad condition", "a;b", "é", "trailing "] $ \token -> do
+    let value = Safe.SafeIf token
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value old `shouldBe` old
+  renderHeaderLines defaultHeaderSettings (Safe.SafeIf "User-Awake") `shouldBe` Just ("if-User-Awake" :| [])
+
+
 genSafe :: Gen Safe.Safe
 genSafe = Gen.choice [pure Safe.SafeYes, pure Safe.SafeNo, Safe.SafeIf <$> genMethod]
 
@@ -525,9 +636,11 @@ tests =
       , unit_public
       , unit_render_public
       , unit_public_field_lines
+      , unit_public_checked_write
       , it "Public round-trips" prop_public
       , unit_safe
       , unit_render_safe
       , unit_safe_field_lines
       , it "Safe round-trips" prop_safe
+      , checkedSafeWrites
       ]

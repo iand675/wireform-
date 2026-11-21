@@ -33,7 +33,7 @@ data PICSLabel
   | ParsedPICSLabel !ByteString !PicsLabelList
 
 
--- | Legacy wire spelling. Use 'picsLabelFromList' for checked authoring.
+-- | Legacy wire spelling. Checked field writes validate the label list.
 pattern PICSLabel :: ST.ShortText -> PICSLabel
 pattern PICSLabel {picsLabelValue} <- (legacyText -> picsLabelValue)
   where
@@ -88,6 +88,15 @@ instance KnownHeader PICSLabel where
 
 
   renderToHeaders _ = wireBytes
+
+
+  renderToHeadersChecked _ (ParsedPICSLabel wire _) = Just wire
+  renderToHeadersChecked _ (RawPICSLabel text) =
+    case parseFieldLine "PICS-Label" picsLabelListParser wire of
+      Left _ -> Nothing
+      Right _ -> Just wire
+    where
+      wire = ST.toByteString text
 
 
   headerName _ = hPICSLabel

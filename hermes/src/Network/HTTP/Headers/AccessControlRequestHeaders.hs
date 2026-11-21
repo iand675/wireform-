@@ -28,7 +28,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAccessControlRequestHeaders)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedText, shortText)
 
 
 -- | The non-empty list of requested field names.
@@ -55,6 +55,11 @@ instance KnownHeader AccessControlRequestHeaders where
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccessControlRequestHeaders
+
+
+  renderToHeadersChecked _ (RequestHeaders names)
+    | all isHttpTokenText names = Just (encodeCommaSeparatedText names)
+    | otherwise = Nothing
 
 
   headerName _ = hAccessControlRequestHeaders

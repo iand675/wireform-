@@ -19,6 +19,7 @@ import Network.HTTP.Headers (
   lookupHeader,
   lookupHeaderWith,
   lookupRawHeader,
+  renderHeaderLines,
   setHeader,
   withHeaderMessage,
  )
@@ -225,6 +226,16 @@ typedSoapAction = describe "typed SOAPAction" $ do
 
 typedMeter :: Spec
 typedMeter = describe "typed Meter" $ do
+  it "checks authored argument shape and the selected message direction" $ do
+    let old = headerMapFromList [("Meter", "w")]
+        value name argument = Meter.Meter [Meter.MeterDirective name argument]
+        invalid = [value "count" (Just "2/"), value "w" (Just "0"), value "u" (Just " 1"), value "vendor" (Just "bad\r"), value "e,f" Nothing]
+    forM_ invalid $ \candidate -> do
+      renderHeaderLines defaultHeaderSettings candidate `shouldBe` Nothing
+      setHeader candidate old `shouldBe` old
+    let response = withHeaderMessage HeaderResponse defaultHeaderSettings
+    renderHeaderLines response (value "count" (Just "2/5")) `shouldBe` Nothing
+    renderHeaderLines response (value "u" (Just "00012")) `shouldBe` Just ("u=00012" :| [])
   it "reads mixed spellings, repeated lines, and counts with arbitrary precision" $ do
     let wire = " , COUNT=18446744073709551616/42, x"
         fields = headerMapFromList [("Meter", wire), ("Meter", ",wont-limit,w,")]
@@ -294,6 +305,13 @@ tests =
             lookupHeader @Slug.Slug (headerMapFromList [("Slug", wire)]) `shouldSatisfy` isLeft
           lookupHeader @Slug.Slug (headerMapFromList [("Slug", "a"), ("Slug", "b")]) `shouldSatisfy` isLeft
       , it "slug round-trip" prop_slug_roundtrip
+      , it "checks authored Slug escape syntax and the decoded UTF-8" $ do
+          let fields = headerMapFromList [("Slug", "previous")]
+          forM_ ["%", "%00%G0", "%C0%80", "%ED%A0%80", "%C3", "rawé", "a\n", "a\DEL"] $ \wire -> do
+            let value = Slug.Slug wire
+            renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+            setHeader value fields `shouldBe` fields
+          renderHeaderLines defaultHeaderSettings (Slug.slugFromText "é + ") `shouldBe` Just ("%C3%A9 +%20" :| [])
       , unit_soap_parse
       , unit_soap_render
       , unit_soap_empty

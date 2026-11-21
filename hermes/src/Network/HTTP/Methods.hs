@@ -23,9 +23,11 @@ via 'methodFromBytes' or the 'IsString' instance.
 module Network.HTTP.Methods (
   Method (GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH, QUERY, NonStandard),
   methodToBytes,
+  methodBytesChecked,
   methodFromBytes,
   methodTokenParser,
   mkMethod,
+  mkMethodWithOWS,
   MethodError (..),
 
   -- * Semantics (RFC 9110 § 9.2)
@@ -85,13 +87,15 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Unsafe as BSU
 import Data.Hashable (Hashable (..))
 import Data.String (IsString (..))
 import Data.Word (Word8)
 import GHC.Exts (Int (I#), dataToTag#)
+import GHC.ForeignPtr (plusForeignPtr)
 import GHC.Generics (Generic (..))
 import qualified GHC.Generics as G
-import Network.HTTP.Grammar.Parser (ParserT, isTokenChar, rfc9110TokenBS)
+import Network.HTTP.Grammar.Parser (ParserT, isOWS, isTokenChar, rfc9110TokenBS)
 import Symbol (Symbol, intern, unintern)
 
 
@@ -311,6 +315,29 @@ mkMethod bytes = withStandardMethod bytes Right (checkExtensionMethod bytes)
 {-# INLINE mkMethod #-}
 
 
+-- | Validate a single method in an HTTP field value with optional SP or HTAB.
+mkMethodWithOWS :: ByteString -> Either MethodError Method
+mkMethodWithOWS bytes = withStandardMethod bytes Right (checkMethodWithOWS bytes)
+{-# INLINE mkMethodWithOWS #-}
+
+
+checkMethodWithOWS :: ByteString -> Either MethodError Method
+checkMethodWithOWS bytes@(BSI.BS ptr size)
+  | start == 0 && end == size = checkExtensionMethod bytes
+  | otherwise = mkMethod (BSI.BS (plusForeignPtr ptr start) (end - start))
+  where
+    start = skipLeading 0
+    end = skipTrailing size
+    skipLeading i
+      | i < size && atOWS i = skipLeading (i + 1)
+      | otherwise = i
+    skipTrailing i
+      | i > start && atOWS (i - 1) = skipTrailing (i - 1)
+      | otherwise = i
+    atOWS i = isOWS (BSI.w2c (BSU.unsafeIndex bytes i))
+{-# NOINLINE checkMethodWithOWS #-}
+
+
 checkExtensionMethod :: ByteString -> Either MethodError Method
 checkExtensionMethod bytes
   | BS.null bytes = Left MethodEmpty
@@ -327,6 +354,15 @@ isMethodTokenByte byte =
     || byte - 0x30 <= 9
     || isTokenChar (BSI.w2c byte)
 {-# INLINE isMethodTokenByte #-}
+
+
+-- | Check the exact wire spelling without copying or reconstructing the method.
+methodBytesChecked :: Method -> Maybe ByteString
+methodBytesChecked (ExtensionMethod (MethodExtension bytes _))
+  | BS.null bytes || not (BS.all isMethodTokenByte bytes) = Nothing
+  | otherwise = Just bytes
+methodBytesChecked method = Just (methodToBytes method)
+{-# INLINE methodBytesChecked #-}
 
 
 -- | Safe methods from the HTTP Method Registry (RFC 9110 §9.2.1).

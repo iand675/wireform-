@@ -21,8 +21,9 @@ module Network.HTTP.Headers.DifferentialID (
 ) where
 
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.URIReference (checkedURIField)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.ContentID (drpContentIdentifier)
+import Network.HTTP.Headers.ContentID (drpContentIdentifier, outboundDRPContentIdentifierBytes)
 import Network.HTTP.Headers.HeaderFieldName (hDifferentialID)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -44,6 +45,9 @@ instance KnownHeader DifferentialID where
 
 
   renderToHeaders _ = ST.toByteString . differentialID
+
+
+  renderToHeadersChecked _ = checkedURIField outboundDRPContentIdentifierBytes . ST.toByteString . differentialID
 
 
   headerName _ = hDifferentialID

@@ -872,6 +872,75 @@ unit_forward_conditional_cache_misses = it "forwards the caller's exact validato
   check [(S.status203, (H.hCacheControl, "max-age=60") : inherit, "transformed")] own
 
 
+unit_caller_304_updates_cache :: Spec
+unit_caller_304_updates_cache = it "freshens the selected snapshot from an identifying caller 304" $ do
+  let tag value = (H.hETag, value)
+      date = (H.hLastModified, "Sun, 06 Nov 1994 08:49:37 GMT")
+      named = [(H.hIfNoneMatch, "\"other\""), (H.hIfNoneMatch, "W/\"stored\"")]
+      check staleMetadata conditions freshMetadata updated = do
+        let stale = (H.hCacheControl, "max-age=0") : (H.hContentLength, "4") : staleMetadata
+            fresh = (H.hCacheControl, "max-age=60") : ("X-Metadata", "fresh") : freshMetadata
+        (inner, calls, sent) <- mkTransport [(S.status200, stale, "body"), (S.status304, fresh, "")]
+        cache <- newCache defaultCacheConfig
+        req <- makeRequest "/caller-304"
+        let fetch = sendRaw (withCache cache inner)
+        (fetch req >>= drainBody) `shouldReturn` "body"
+        reply <- fetch req{WReq.headers = conditions}
+        Resp.statusCode reply `shouldBe` S.status304
+        Resp.headers reply `shouldBe` fresh
+        drainBody reply `shouldReturn` ""
+        map WReq.headers . take 1 <$> readIORef sent `shouldReturn` [conditions]
+        hit <- fetch (WReq.setHeader H.hCacheControl "only-if-cached" req)
+        if updated
+          then do
+            Resp.statusCode hit `shouldBe` S.status200
+            H.lookupHeader "X-Metadata" (Resp.headers hit) `shouldBe` Just "fresh"
+            H.lookupHeader H.hContentLength (Resp.headers hit) `shouldBe` Just "4"
+            drainBody hit `shouldReturn` "body"
+          else Resp.statusCode hit `shouldBe` S.status504
+        readIORef calls `shouldReturn` 2
+      strong = tag "\"stored\""
+      weak = tag "W/\"stored\""
+  check [strong] named [strong, (H.hContentLength, "999")] True
+  check [strong] named [weak] True
+  check [weak] named [strong] False
+  check [strong] named [tag "\"other\""] False
+  check [strong] named [strong, weak] False
+  check [strong] named [strong, (H.hConnection, "ETag")] False
+  check [strong] named [] False
+  check [date] [(H.hIfModifiedSince, snd date)] [date] True
+  check [] [(H.hIfNoneMatch, "*")] [] True
+  let vary = (H.hVary, "Accept-Language")
+  check [strong, vary] (named <> [(H.hAcceptLanguage, "fr")]) [strong] False
+
+
+unit_late_caller_304_preserves_newer_entry :: Spec
+unit_late_caller_304_preserves_newer_entry = it "keeps a response stored while a caller 304 was in flight" $ do
+  let stale = [(H.hCacheControl, "max-age=0"), (H.hETag, "\"old\"")]
+      refreshed = [(H.hCacheControl, "max-age=60"), (H.hETag, "\"old\"")]
+      latest = [(H.hCacheControl, "max-age=60"), (H.hETag, "\"new\"")]
+  (inner, calls, _) <- mkTransport [(S.status200, stale, "old"), (S.status304, refreshed, ""), (S.status200, latest, "new")]
+  started <- newEmptyMVar
+  release <- newEmptyMVar
+  finished <- newEmptyMVar
+  let peer = Transport $ \request -> do
+        reply <- sendRaw inner request
+        when (H.hasHeader "X-Caller" (WReq.headers request)) (putMVar started () >> takeMVar release)
+        pure reply
+  cache <- newCache defaultCacheConfig
+  req <- makeRequest "/late-caller-304"
+  let fetch = sendRaw (withCache cache peer)
+      conditional = req{WReq.headers = [("X-Caller", "1"), (H.hIfNoneMatch, "\"old\"")]}
+  (fetch req >>= drainBody) `shouldReturn` "old"
+  _ <- forkFinally (fetch conditional) (putMVar finished)
+  (takeMVar started >> ((fetch req >>= drainBody) `shouldReturn` "new")) `finally` putMVar release ()
+  reply <- takeMVar finished >>= either throwIO pure
+  Resp.statusCode reply `shouldBe` S.status304
+  drainBody reply `shouldReturn` ""
+  (fetch req >>= drainBody) `shouldReturn` "new"
+  readIORef calls `shouldReturn` 3
+
+
 unit_conditional_background_validation :: Spec
 unit_conditional_background_validation = it "serves conditional stale-while-revalidate hits with cache-owned background validators" $ do
   let tag = (H.hETag, "\"stored\"")
@@ -1709,6 +1778,8 @@ tests =
       , unit_cached_entity_tag_conditions
       , unit_cached_date_conditions
       , unit_forward_conditional_cache_misses
+      , unit_caller_304_updates_cache
+      , unit_late_caller_304_preserves_newer_entry
       , unit_conditional_background_validation
       , unit_unmatched_304
       , unit_validation_fallback_once

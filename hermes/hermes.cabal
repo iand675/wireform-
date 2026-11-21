@@ -351,6 +351,7 @@ library
     , validation
     , vector
     , wireform-core
+    , wireform-hashtables
     , wireform-symbol
   default-language: Haskell2010
 

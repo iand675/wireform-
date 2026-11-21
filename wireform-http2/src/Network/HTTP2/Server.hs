@@ -100,8 +100,8 @@ data Response = Response
   , responseHeaders :: ![(ByteString, ByteString)]
   , responseBody :: !ResponseBody
   , responseTrailers :: ![(ByteString, ByteString)]
-    -- ^ Static trailers, sent before any fields from
-    -- 'ResponseBodyStreamWithTrailers' in the terminating field block.
+    -- ^ Static trailers, sent before any deferred fields in the
+    -- terminating field block.
   }
 
 data ResponseBody
@@ -110,6 +110,10 @@ data ResponseBody
   | ResponseBodyStream (IO (Maybe ByteString))
   | ResponseBodyStreamWithTrailers !(IO (Maybe ByteString)) !(IO [(ByteString, ByteString)])
     -- ^ Evaluate the trailer action when the body producer returns 'Nothing'.
+  | ResponseBodyEmptyWithTrailers !(IO [(ByteString, ByteString)])
+    -- ^ Evaluate the trailer action after sending the initial headers.
+  | ResponseBodyBSWithTrailers !ByteString !(IO [(ByteString, ByteString)])
+    -- ^ Evaluate the trailer action after sending the buffered content.
 
 defaultResponse :: Response
 defaultResponse = Response
@@ -724,7 +728,7 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef
                 let req = buildRequest conn connRecvUnackedRef connRecvWindowRef sid requestHead rec
                 _ <- serverForkStream cfg $
                   ( (serverHandler cfg req $ \resp ->
-                        sendResponse conn sid (srSendWindow rec) resp
+                        sendResponse conn sid (srSendWindow rec) (requestMethod req) resp
                           `onException` sendRstStream conn sid InternalError
                     )
                     `finally` atomicModifyStreams_ streamsRef
@@ -1057,11 +1061,16 @@ buildRequest conn connUnackedRef connWindowRef sid requestHead sr =
     , requestTrailers = readMVar (srTrailers sr) >>= either throwIO pure
     }
 
-sendResponse :: Connection -> StreamId -> FlowControl -> Response -> IO ()
-sendResponse conn sid sendWin resp = do
-  let statusBS = BS.pack (map (fromIntegral . fromEnum) (show (responseStatus resp)))
+sendResponse :: Connection -> StreamId -> FlowControl -> ByteString -> Response -> IO ()
+sendResponse conn sid sendWin method resp = do
+  let status = responseStatus resp
+      informational = status >= 100 && status < 200
+      statusBS = BS.pack (map (fromIntegral . fromEnum) (show status))
       statusHdr = (":status", statusBS)
-      allHeaders = statusHdr : responseHeaders resp
+      fields
+        | informational || status == 204 = filter ((/= "content-length") . fst) (responseHeaders resp)
+        | otherwise = responseHeaders resp
+      allHeaders = statusHdr : fields
       trailers = responseTrailers resp
       hasTrailers = not (null trailers)
   maxFrame <- peerMaxFrameSize conn
@@ -1073,8 +1082,9 @@ sendResponse conn sid sendWin resp = do
   -- two responses encode in one order and reach the wire in the other,
   -- desyncing the peer's decoder.
   case responseBody resp of
-    _ | responseStatus resp >= 100 && responseStatus resp < 200 ->
-      encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
+    _ | informational -> encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
+      | method == "HEAD" || status == 204 || status == 205 || status == 304 ->
+          encodeAndSendHeaderBlock conn sid True 0 allHeaders maxFrame
     ResponseBodyEmpty
       | hasTrailers -> do
           checkResponseTrailers trailers
@@ -1096,6 +1106,13 @@ sendResponse conn sid sendWin resp = do
     ResponseBodyStreamWithTrailers producer produceTrailers -> do
       encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
       streamBody conn sendWin sid producer ((trailers <>) <$> produceTrailers)
+    ResponseBodyEmptyWithTrailers produceTrailers -> do
+      encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
+      finishResponseTrailers conn sendWin sid ((trailers <>) <$> produceTrailers)
+    ResponseBodyBSWithTrailers body produceTrailers -> do
+      encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
+      unless (BS.null body) $ sendBytes conn sendWin sid False body maxFrame
+      finishResponseTrailers conn sendWin sid ((trailers <>) <$> produceTrailers)
 
 -- | Send a contiguous DATA payload chunked to MAX_FRAME_SIZE, with the
 -- final frame carrying @END_STREAM@ when @endStream@ is 'True'.
@@ -1177,10 +1194,19 @@ sendTrailers conn sid trailers = do
 
 checkResponseTrailers :: [(ByteString, ByteString)] -> IO ()
 checkResponseTrailers trailers =
-  case validateTrailerBlock flagEndStream trailers of
+  case validateOutboundTrailers trailers of
     Just reason -> fail (BS8.unpack reason)
     Nothing -> pure ()
 {-# INLINE checkResponseTrailers #-}
+
+finishResponseTrailers :: Connection -> FlowControl -> StreamId -> IO [Header] -> IO ()
+finishResponseTrailers conn sendWin sid produceTrailers = do
+  trailers <- produceTrailers
+  case trailers of
+    [] -> sendDataFrame conn sendWin sid True BS.empty
+    _ -> do
+      checkResponseTrailers trailers
+      sendTrailers conn sid trailers
 
 streamBody
   :: Connection
@@ -1200,13 +1226,7 @@ streamBody conn sendWin sid producer produceTrailers = do
     loop maxFrame = do
       mChunk <- producer
       case mChunk of
-        Nothing -> do
-          trailers <- produceTrailers
-          case trailers of
-            [] -> sendDataFrame conn sendWin sid True BS.empty
-            _ -> do
-              checkResponseTrailers trailers
-              sendTrailers conn sid trailers
+        Nothing -> finishResponseTrailers conn sendWin sid produceTrailers
         Just chunk
           | BS.null chunk -> loop maxFrame
           | otherwise -> do

@@ -10,13 +10,13 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
 import qualified Data.ByteString.Short as SBS
 import Data.CaseInsensitive (CI)
-import Data.Foldable (foldl')
+import Data.Foldable (foldl', toList)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as Text
 import qualified Data.Text.Short as ST
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime, toModifiedJulianDay)
-import Data.Word (Word64)
+import Data.Word (Word8, Word64)
 import Network.HTTP.ContentCoding (ContentCoding (..), contentCodingParser)
 import qualified Network.HTTP.Headers.AcceptEncoding as AcceptEncoding
 import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType (..), WeightedMediaRange (..))
@@ -45,18 +45,28 @@ import qualified Network.HTTP.Headers.AMPCacheTransform as AMP
 import Network.HTTP.Headers.Accept (Accept (..), preferredContentType)
 import qualified Network.HTTP.Headers.AcceptCH as AcceptCH
 import qualified Network.HTTP.Headers.AcceptAdditions as Additions
+import Network.HTTP.Headers.AcceptCharset (AcceptCharset (..), WeightedCharset (..), preferredCharset)
 import qualified Network.HTTP.Headers.AcceptFeatures as AcceptFeatures
 import Network.HTTP.Headers.AcceptLanguage (AcceptLanguage (..), WeightedLanguage (..), preferredLanguage)
+import qualified Network.HTTP.Headers.AcceptPatch as AcceptPatch
+import qualified Network.HTTP.Headers.AcceptPost as AcceptPost
+import qualified Network.HTTP.Headers.AcceptRanges as AcceptRanges
 import qualified Network.HTTP.Headers.AcceptSignature as AcceptSignature
 import qualified Network.HTTP.Headers.AccessControlAllowCredentials as CorsCredentials
 import qualified Network.HTTP.Headers.AccessControlAllowHeaders as CorsAllowHeaders
+import qualified Network.HTTP.Headers.AccessControlAllowMethods as CorsAllowMethods
+import qualified Network.HTTP.Headers.AccessControlAllowOrigin as CorsAllowOrigin
+import qualified Network.HTTP.Headers.AccessControlExposeHeaders as CorsExposeHeaders
 import qualified Network.HTTP.Headers.AccessControlMaxAge as CorsMaxAge
+import qualified Network.HTTP.Headers.AccessControlRequestHeaders as CorsRequestHeaders
 import qualified Network.HTTP.Headers.AccessControlRequestMethod as CorsRequestMethod
 import Network.HTTP.Headers.Age (Age (..))
 import Network.HTTP.Headers.Allow (Allow (..))
+import qualified Network.HTTP.Headers.Allow as Allow
 import qualified Network.HTTP.Headers.Alternates as Alternates
 import qualified Network.HTTP.Headers.ApplyToRedirectRef as ApplyToRedirectRef
 import qualified Network.HTTP.Headers.AuthenticationControl as AuthControl
+import qualified Network.HTTP.Headers.AuthenticationInfo as AuthInfo
 import qualified Network.HTTP.Headers.Authorization as Auth
 import qualified Network.HTTP.Headers.CDNCacheControl as CDN
 import Network.HTTP.Headers.CacheControl (CacheControl (..), CacheControlDirective (..), parseCacheControlHeader)
@@ -75,7 +85,7 @@ import qualified Network.HTTP.Headers.ContentDigest as Digest
 import qualified Network.HTTP.Headers.Digest as LegacyDigest
 import qualified Network.HTTP.Headers.WantDigest as WantDigest
 import Network.HTTP.Headers.ContentDisposition (ContentDisposition (..), contentDispositionFilename, mkContentDispositionFilename)
-import Network.HTTP.Headers.ContentEncoding (ContentEncoding, contentCodings)
+import Network.HTTP.Headers.ContentEncoding (ContentEncoding (..), contentCodings)
 import qualified Network.HTTP.Headers.ContentID as ContentID
 import Network.HTTP.Headers.ContentLanguage (ContentLanguage (..), LanguageTag (..), contentLanguageTagList)
 import Network.HTTP.Headers.ContentLength (ContentLength (..))
@@ -83,13 +93,16 @@ import qualified Network.HTTP.Headers.ContentMD5 as MD5
 import qualified Network.HTTP.Headers.ContentRange as ContentRange
 import qualified Network.HTTP.Headers.ContentScriptType as ContentScriptType
 import qualified Network.HTTP.Headers.ContentSecurityPolicy as CSP
+import qualified Network.HTTP.Headers.ContentSecurityPolicyReportOnly as CSPRO
 import qualified Network.HTTP.Headers.ContentStyleType as ContentStyleType
 import Network.HTTP.Headers.ContentType (ContentType (..), contentTypeParameters)
 import qualified Network.HTTP.Headers.ContentVersion as ContentVersion
 import Network.HTTP.Headers.Cookie (Cookie (..), CookiePair (..))
 import qualified Network.HTTP.Headers.Cookie2 as Cookie2
 import qualified Network.HTTP.Headers.CrossOriginEmbedderPolicy as COEP
+import qualified Network.HTTP.Headers.CrossOriginEmbedderPolicyReportOnly as COEPRO
 import qualified Network.HTTP.Headers.CrossOriginOpenerPolicy as COOP
+import qualified Network.HTTP.Headers.CrossOriginOpenerPolicyReportOnly as COOPRO
 import qualified Network.HTTP.Headers.CrossOriginResourcePolicy as CORP
 import qualified Network.HTTP.Headers.DASL as DASL
 import qualified Network.HTTP.Headers.DAV as DAV
@@ -111,9 +124,11 @@ import qualified Network.HTTP.Headers.Forwarded as Forwarded
 import qualified Network.HTTP.Headers.GetProfile as GetProfile
 import qualified Network.HTTP.Headers.HTTP2Settings as H2Settings
 import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName, hCacheControl, hSetCookie)
+import qualified Network.HTTP.Headers.Hobareg as Hobareg
 import Network.HTTP.Headers.Host (Host (..))
 import qualified Network.HTTP.Headers.IM as IM
 import qualified Network.HTTP.Headers.If as DAVIf
+import qualified Network.HTTP.Headers.IfRange as IfRange
 import Network.HTTP.Headers.IfNoneMatch (IfNoneMatch (..))
 import qualified Network.HTTP.Headers.KeepAlive as KeepAlive
 import qualified Network.HTTP.Headers.IfScheduleTagMatch as IfScheduleTagMatch
@@ -140,14 +155,14 @@ import qualified Network.HTTP.Headers.OSCORE as OSCORE
 import qualified Network.HTTP.Headers.OSLCCoreVersion as OSLCCoreVersion
 import qualified Network.HTTP.Headers.Opt as Opt
 import qualified Network.HTTP.Headers.OrderingType as OrderingType
-import Network.HTTP.Headers.Origin (Origin (..), OriginValue (..))
+import Network.HTTP.Headers.Origin (CorsRequestOrigin, Origin (..), OriginValue (..), parseCorsRequestOrigin)
 import qualified Network.HTTP.Headers.OriginAgentCluster as OAC
 import qualified Network.HTTP.Headers.Overwrite as Overwrite
 import qualified Network.HTTP.Headers.P3P as P3P
 import qualified Network.HTTP.Headers.PEP as PEP
 import qualified Network.HTTP.Headers.PEPInfo as PEPInfo
 import qualified Network.HTTP.Headers.PICSLabel as PICSLabel
-import Network.HTTP.Headers.Parsing.Util (Comment (..), ItemValue (..), RFC8941String (..), Result (..), runParser)
+import Network.HTTP.Headers.Parsing.Util (Comment (..), ItemValue (..), RFC8941String (..), RFC8941Token (..), Result (..), runParser)
 import qualified Network.HTTP.Headers.PermissionsPolicy as PermissionsPolicy
 import Network.HTTP.Headers.PingTo (PingTo (..))
 import qualified Network.HTTP.Headers.Position as Position
@@ -176,6 +191,7 @@ import qualified Network.HTTP.Headers.RepeatabilityRequestID as RepeatabilityReq
 import qualified Network.HTTP.Headers.RepeatabilityResult as RepeatabilityResult
 import qualified Network.HTTP.Headers.ReplayNonce as ReplayNonce
 import qualified Network.HTTP.Headers.ReportingEndpoints as Reporting
+import qualified Network.HTTP.Headers.ReprDigest as ReprDigest
 import Network.HTTP.Headers.RetryAfter (RetryAfter (..), largeDelayDigits)
 import qualified Network.HTTP.Headers.SaveData as SaveData
 import qualified Network.HTTP.Headers.ScheduleReply as ScheduleReply
@@ -209,17 +225,28 @@ import qualified Network.HTTP.Headers.TimingAllowOrigin as TimingAllowOrigin
 import qualified Network.HTTP.Headers.Topic as Topic
 import qualified Network.HTTP.Headers.Traceparent as Traceparent
 import qualified Network.HTTP.Headers.Tracestate as Tracestate
+import qualified Network.HTTP.Headers.Trailer as Trailer
 import qualified Network.HTTP.Headers.TransferEncoding as Transfer
 import qualified Network.HTTP.Headers.URI as LegacyURI
+import qualified Network.HTTP.Headers.Upgrade as Upgrade
 import qualified Network.HTTP.Headers.Urgency as Urgency
 import qualified Network.HTTP.Headers.UserAgent as UserAgent
 import qualified Network.HTTP.Headers.VariantVary as VariantVary
 import Network.HTTP.Headers.Vary (Vary (..), VaryDirective (..))
 import qualified Network.HTTP.Headers.Warning as Warning
 import qualified Network.HTTP.Headers.Via as Via
+import qualified Network.HTTP.Headers.WantContentDigest as WantContentDigest
+import qualified Network.HTTP.Headers.WantReprDigest as WantReprDigest
 import qualified Network.HTTP.Headers.WWWAuthenticate as WWW
+import qualified Network.HTTP.Headers.OptionalWWWAuthenticate as OptionalWWW
+import qualified Network.HTTP.Headers.ProxyAuthenticate as ProxyAuthn
+import qualified Network.HTTP.Headers.ProxyAuthenticationInfo as ProxyAuthInfo
+import qualified Network.HTTP.Headers.ProxyAuthorization as ProxyAuthz
 import qualified Network.HTTP.Headers.XContentTypeOptions as XCTO
 import qualified Network.HTTP.Headers.XCorrelationID as XCorrelationID
+import qualified Network.HTTP.Headers.XPoweredBy as XPoweredBy
+import qualified Network.HTTP.Headers.XRequestID as XRequestID
+import qualified Network.HTTP.Headers.XTraceID as XTraceID
 import qualified Network.HTTP.Headers.XDNSPrefetchControl as XDNS
 import qualified Network.HTTP.Headers.XDownloadOptions as XDownload
 import qualified Network.HTTP.Headers.XForwardedFor as XFF
@@ -257,6 +284,14 @@ main =
         , bench "render-preload" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Link.Link ("</main.css>; rel=preload; as=style" :| []))
         , bench "render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Link.Link linkFixture)
         , bench "render-repeated" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Link.Link linkRepeatedFixture)
+        , bench "write-preload" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Link.Link ("</main.css>; rel=preload; as=style" :| []))
+        , bench "write-repeated" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Link.Link linkRepeatedFixture)
+        , bench "title-plain" $ whnf linkTitleScore (linkEntry (NE.head linkFixture))
+        , bench "title-extended" $ whnf linkTitleScore (linkEntry "</rates>; rel=alternate; title=Rates; TITLE*=UTF-8'en-GB'%E2%82%AC+rates")
+        , bench "title-fallback" $ whnf linkTitleScore (linkEntry "</rates>; rel=alternate; TITLE=Rates; title*=UTF-8''%ff")
+        , bench "lookup-mixed-case" $ whnf (maybe 0 (shortBytes . Link.linkParamName) . Link.lookupLinkParam "rel") (linkEntry "</rates>; TITLE=Rates; REL=alternate")
+        , bench "language-hints" $ whnf linkLanguageScore (linkEntry "</guide>; rel=alternate; HREFLANG=en-GB; hreflang=\"zh-Hant-TW\"")
+        , bench "type-hint" $ whnf linkTypeScore (linkEntry "</guide>; rel=alternate; TYPE=\"application/vnd.example+json\"")
         ]
     , bgroup
         "prefer"
@@ -265,12 +300,18 @@ main =
         , bench "render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Prefer.Prefer preferFixture)
         , bench "parse-applied" $ whnf appliedScore appliedFixture
         , bench "render-applied" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Applied.PreferenceApplied appliedFixture)
+        , bench "write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Prefer.Prefer preferFixture)
+        , bench "applied-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Applied.PreferenceApplied appliedFixture)
+        , bench "repeatability-client-write" $ nf (renderHeaderLines defaultHeaderSettings) (RepeatabilityClientID.RepeatabilityClientID "0E8A7E9F-A3C4-4B2E-9F1A-1234567890AB")
+        , bench "repeatability-request-write" $ nf (renderHeaderLines defaultHeaderSettings) (RepeatabilityRequestID.RepeatabilityRequestID "retry_01+attempt")
         ]
     , bgroup
         "expect"
         [ bench "continue" $ whnf expectScore ("100-continue" :| [])
         , bench "extension" $ whnf expectScore expectFixture
         , bench "render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Expect.Expect expectFixture)
+        , bench "continue-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Expect.Expect ("100-continue" :| []))
+        , bench "extension-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Expect.Expect expectFixture)
         ]
     , bgroup
         "alt-svc"
@@ -291,6 +332,23 @@ main =
         , bench "render-named" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @From.From mailboxNamedFixture)
         ]
     , bgroup
+        "remaining-header-writes"
+        [ bench "alt-svc" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @AltSvc.AltSvc altSvcFixture)
+        , bench "expect-ct" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @ExpectCT.ExpectCT ("max-age=86400, enforce, report-uri=\"https://ct.example/report\"" :| []))
+        , bench "from-bare" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @From.From mailboxBareFixture)
+        , bench "from-named" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @From.From mailboxNamedFixture)
+        , bench "meter" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Meter.Meter ("u=3,r=6,e" :| []))
+        , bench "negotiate" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Negotiate.Negotiate ("trans, 1.0, 2.5, x-mode=fast" :| []))
+        , bench "public-key-pins" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @PKP.PublicKeyPins ((pinFixture <> "; max-age=3000; includeSubDomains") :| []))
+        , bench "public-key-pins-report-only" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @PKPRO.PublicKeyPinsReportOnly ((pinFixture <> "; max-age=3000; report-uri=\"https://ct.example/report\"") :| []))
+        , bench "refresh" $ nf (renderHeaderLines defaultHeaderSettings) (Refresh.Refresh 0 (Just "https://example.com/next"))
+        , bench "surrogate-capability" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @SurrogateCapability.SurrogateCapability surrogateCapabilityFixture)
+        , bench "surrogate-control" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @SurrogateControl.SurrogateControl surrogateControlFixture)
+        , bench "tcn" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @TCN.TCN ("choice, keep, x-note=\"vendor, mode\"" :| []))
+        , bench "x-robots-tag" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Robots.XRobotsTag robotsFixture)
+        , bench "x-xss-protection" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @XXSS.XXSSProtection ("1; mode=block; report=https://example.com/report" :| []))
+        ]
+    , bgroup
         "method-override"
         [ bench "standard" $ whnf methodOverrideScore ("PATCH" :| [])
         , bench "extension" $ whnf methodOverrideScore ("Custom-Verb" :| [])
@@ -304,9 +362,11 @@ main =
         [ bench "public-single" $ whnf publicScore ("OPTIONS, MGET, MHEAD, GET, HEAD" :| [])
         , bench "public-split" $ whnf publicScore ("OPTIONS, MGET" :| ["MHEAD, GET, HEAD"])
         , bench "public-render" $ nf (renderToHeaders defaultHeaderSettings) (Public.PublicHeader ("OPTIONS" :| ["MGET", "MHEAD", "GET", "HEAD"]))
+        , bench "public-write" $ nf (renderHeaderLines defaultHeaderSettings) (Public.PublicHeader ("OPTIONS" :| ["MGET", "MHEAD", "GET", "HEAD"]))
         , bench "ediint-single" $ whnf ediintScore ("CEM, multiple-attachments" :| [])
         , bench "ediint-split" $ whnf ediintScore ("CEM" :| ["multiple-attachments"])
         , bench "ediint-render" $ nf (renderToHeaders defaultHeaderSettings) (EDIINT.EDIINTFeatures ("CEM" :| ["multiple-attachments"]))
+        , bench "ediint-write" $ nf (renderHeaderLines defaultHeaderSettings) (EDIINT.EDIINTFeatures ("CEM" :| ["multiple-attachments"]))
         ]
     , bgroup
         "safe-and-additions"
@@ -321,8 +381,12 @@ main =
         [ bench "edge" $ whnf uaCompatibleScore ("IE=edge" :| [])
         , bench "two-engines" $ whnf uaCompatibleScore ("IE=edge, chrome=1" :| [])
         , bench "split" $ whnf uaCompatibleScore ("IE=edge" :| ["chrome=1"])
-        , bench "render-edge" $ nf (renderToHeaders defaultHeaderSettings) (UA.XUACompatible (UA.UACompatDirective "IE" "edge" :| []))
-        , bench "render-two-engines" $ nf (renderToHeaders defaultHeaderSettings) (UA.XUACompatible (UA.UACompatDirective "IE" "edge" :| [UA.UACompatDirective "chrome" "1"]))
+        , bench "render-edge" $ nf (renderToHeaders defaultHeaderSettings) uaEdgeFixture
+        , bench "render-two-engines" $ nf (renderToHeaders defaultHeaderSettings) uaTwoModeFixture
+        , bench "write-edge" $ nf (renderHeaderLines defaultHeaderSettings) uaEdgeFixture
+        , bench "write-two-engines" $ nf (renderHeaderLines defaultHeaderSettings) uaTwoModeFixture
+        , bench "buffer-control" $ nf id ("IE=edge" :: BS.ByteString)
+        , bench "field-lines-control" $ nf id (Just ("IE=edge" :| []) :: Maybe (NonEmpty BS.ByteString))
         , bench "document-mode-edge" $ whnf uaDocumentModeScore (UA.UACompatDirective "IE" "edge")
         , bench "document-mode-emulate" $ whnf uaDocumentModeScore (UA.UACompatDirective "iE" "EmulateIE11")
         , bench "document-mode-version" $ whnf uaDocumentModeScore (UA.UACompatDirective "IE" "11")
@@ -333,19 +397,46 @@ main =
         , bench "parse-content-type" $ nf contentTypeScore "multipart/form-data;boundary=\"Aa:B, 01\""
         , bench "render" $ nf (renderToHeaders defaultHeaderSettings) browserAccept
         , bench "render-content-type" $ nf (renderToHeaders defaultHeaderSettings) multipartContentType
+        , bench "representation-write" $ nf (renderHeaderLines defaultHeaderSettings) multipartContentType
+        , bench "media-ranges-write" $ nf (renderHeaderLines defaultHeaderSettings) browserAccept
+        , bench "charset-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (AcceptCharset [WeightedCharset "UTF-8" 1, WeightedCharset "ISO-8859-1" 0.5, WeightedCharset "*" 0])
+        , bench "patch-write" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              AcceptPatch.AcceptPatch
+                (MediaType "application" "json-patch+json" :| [MediaType "application" "merge-patch+json"])
+        , bench "post-write" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              AcceptPost.AcceptPost
+                (AcceptPost.AcceptPostMediaRange (MediaRange (MediaType "text" "") [("charset", "utf-8")]) :| [AcceptPost.AcceptPostAny])
         , bench "language-parse" $ nf languageScore "en-US, zh-Hant-TW;q=0.9, es-419;q=0.8, *;q=0.1"
+        , bench "language-write" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              AcceptLanguage [WeightedLanguage "en-US" 1, WeightedLanguage "zh-Hant-TW" 0.9, WeightedLanguage "*" 0.1]
         , bench "choose-absent" $ whnf (preferredContentType Nothing) offeredContentTypes
         , bench "choose-exact" $ whnf (preferredContentType exactContentPreference) offeredContentTypes
         , bench "choose-parameters" $ whnf (preferredContentType parameterContentPreference) offeredContentTypes
         , bench "choose-language-absent" $ whnf (preferredLanguage Nothing) offeredLanguages
         , bench "choose-language-exact" $ whnf (preferredLanguage exactLanguagePreference) offeredLanguages
         , bench "choose-language-prefix" $ whnf (preferredLanguage prefixLanguagePreference) offeredLanguages
+        , bench "choose-charset-absent" $ whnf (preferredCharset Nothing) offeredCharsets
+        , bench "choose-charset-exact" $ whnf (preferredCharset exactCharsetPreference) offeredCharsets
+        , bench "choose-charset-wildcard" $ whnf (preferredCharset wildcardCharsetPreference) offeredCharsets
         ]
     , bgroup
         "content-encoding"
         [ bench "registered-token" $ nf codingScore "gzip"
         , bench "coding-chain" $ nf codingChainLength "gzip, br, zstd"
         , bench "coding-chain-lines" $ nf codingChainLengthFromFields ("gzip" :| ["br", "zstd"])
+        , bench "coding-chain-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (ContentEncodingChain GZip (Brotli :| [Custom "other-coding"]))
+        , bench "preferences-write" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              AcceptEncoding.AcceptEncoding
+                [ AcceptEncoding.WeightedEncoding (AcceptEncoding.NamedEncoding GZip) 1
+                , AcceptEncoding.WeightedEncoding (AcceptEncoding.NamedEncoding Brotli) 0.8
+                , AcceptEncoding.WeightedEncoding AcceptEncoding.AnyEncoding 0
+                ]
         , bench "empty" $ nf codingChainLength ""
         ]
     , bgroup
@@ -360,6 +451,8 @@ main =
         , bench "extended-value-render" $
             nf (Mason.toStrictByteString . Extended.renderExtendedValue) extendedValueFixture
         , bench "language-parse" $ nf contentLanguageScore "en-US, es-419, zh-Hant-TW"
+        , bench "language-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (ContentLanguage (LanguageTag "en-US" :| [LanguageTag "es-419", LanguageTag "zh-Hant-TW"]))
         ]
     , bgroup
         "cache-control"
@@ -367,6 +460,12 @@ main =
         , bench "qualified" $ nf cacheDirectiveScore "private=\"Set-Cookie, X-Cache\", max-age=60"
         , bench "qualified-render" $
             nf (renderToHeaders defaultHeaderSettings) (CacheControl (Private (Just "Set-Cookie, X-Cache") :| [MaxAge 60]))
+        , bench "qualified-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (CacheControl (Private (Just "Set-Cookie, X-Cache") :| [MaxAge 60]))
+        , bench "canonical-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (CacheControl (MaxAge 60 :| [StaleWhileRevalidate 30, Public]))
+        , bench "extension-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (CacheControl (NoStore :| [Unknown "other" (Just "word"), Unknown "scope" (Just "a, b")]))
         , bench "mixed-case" $ nf cacheDirectiveScore "\t, MAX-AGE=60, , No-Store, \t"
         ]
     , bgroup
@@ -383,6 +482,8 @@ main =
         , bench "pragma-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Pragma.Pragma pragmaFixture)
         , bench "warning-parse" $ whnf warningScore warningFixture
         , bench "warning-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Warning.Warning warningFixture)
+        , bench "pragma-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Pragma.Pragma pragmaFixture)
+        , bench "warning-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Warning.Warning warningFixture)
         ]
     , let fields =
             headerMapFromList
@@ -413,8 +514,16 @@ main =
             nf contentDigestScore ("sha-256=:RK/0qy18MlBSVnWgNXKtPNwc4yQQnGzpdvc6tNkXLDg=:" :| [])
         , bench "content-digest-render" $
             nf (renderToHeaders defaultHeaderSettings) (Digest.ContentDigest (Digest.ContentDigestEntry "sha-256" (BS.replicate 32 0) [] :| []))
-        , bench "content-digest-repeated" $
-            nf contentDigestScore ("sha-256=:AA==:, ext=:Ag==:" :| ["sha-256=:AQ==:;stamp=@3"])
+        , bench "content-digest-repeated" $ nf contentDigestScore splitDigestFixture
+        , bench "repr-digest-repeated" $ nf reprDigestScore splitDigestFixture
+        , bench "repr-digest-render" $
+            nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @ReprDigest.ReprDigest splitDigestFixture)
+        , bench "want-content-digest" $ nf wantContentDigestScore digestPreferenceFixture
+        , bench "want-content-digest-render" $
+            nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @WantContentDigest.WantContentDigest digestPreferenceFixture)
+        , bench "want-repr-digest" $ nf wantReprDigestScore digestPreferenceFixture
+        , bench "want-repr-digest-render" $
+            nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @WantReprDigest.WantReprDigest digestPreferenceFixture)
         ]
     , bgroup
         "signature-reporting"
@@ -434,8 +543,24 @@ main =
     , bgroup
         "status-and-certificates"
         [ bench "cache-status" $ nf cacheStatusScore cacheStatusFixture
+        , bench "cache-status-render" $
+            nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkCacheStatus ("edge;hit;ttl=42" :| []))
+        , bench "cache-status-render-extensions" $
+            nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkCacheStatus cacheStatusExtensionsFixture)
         , bench "proxy-status" $ nf proxyStatusScore proxyStatusFixture
         , bench "proxy-status-typed" $ nf typedProxyStatusScore proxyStatusFixture
+        , bench "proxy-status-render" $
+            nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @ProxyStatus.ProxyStatus proxyStatusFixture)
+        , bench "proxy-status-author" $ nf authorProxyStatus proxyStatusParametersFixture
+        , bench "proxy-status-promote-one" $
+            nf (proxyStatusCodeSum . ProxyStatus.promoteProxyStatusTrailers proxyPromotionHeaders) proxyPromotionTrailer
+        , bench "proxy-status-promote-two" $
+            nf (proxyStatusCodeSum . ProxyStatus.promoteProxyStatusTrailers proxyPromotionHeaders) proxyPromotionTwoTrailers
+        , bench "proxy-status-promote-batch" $
+            nf (proxyStatusCodeSum . ProxyStatus.promoteProxyStatusTrailers proxyBatchHeaders) proxyBatchTrailers
+        , bench "proxy-status-lookup-trailers" $
+            nf (proxyStatusTrailerScore (headerMapFromList (map (\wire -> ("Proxy-Status", wire)) (toList proxyPromotionLines))))
+              (headerMapFromList [("Proxy-Status", "\"edge\";received-status=504")])
         , bench "client-cert" $ nf clientCertScore (certificateFixture :| [])
         , bench "client-cert-chain" $ nf clientCertChainScore (certificateFixture :| [certificateFixture])
         , bench "cert-not-after" $ whnf certValidityScore ("Thu, 10 Oct 2019 00:00:00 GMT" :| [])
@@ -444,14 +569,61 @@ main =
         "cors"
         [ bench "allow-headers" $ nf corsAllowHeadersScore ("X-Custom-Header, Content-Type" :| [])
         , bench "allow-headers-repeated" $ nf corsAllowHeadersScore ("X-Custom-Header" :| ["Content-Type"])
+        , bench "allow-methods" $ whnf (parseBenchmarkHeader @CorsAllowMethods.AccessControlAllowMethods) ("GET, PATCH, OPTIONS" :| [])
+        , bench "allow-methods-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (CorsAllowMethods.AllowMethods ("GET" :| ["PATCH", "OPTIONS"]))
+        , bench "allow-headers-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (CorsAllowHeaders.AllowHeaders ("X-Custom-Header" :| ["Content-Type"]))
+        , bench "allow-origin" $ whnf (parseBenchmarkHeader @CorsAllowOrigin.AccessControlAllowOrigin) ("https://[2001:db8::1]:8443" :| [])
+        , bench "allow-origin-dns" $ whnf (parseBenchmarkHeader @CorsAllowOrigin.AccessControlAllowOrigin) ("https://example.test" :| [])
+        , bench "check-origin-wildcard" $
+            whnf (CorsAllowOrigin.corsCheck CorsCredentials.CorsOmit corsRequestOrigin)
+              (headerMapFromList [("Access-Control-Allow-Origin", "*")])
+        , bench "check-origin-with-credentials" $
+            whnf (CorsAllowOrigin.corsCheck CorsCredentials.CorsInclude corsRequestOrigin)
+              (headerMapFromList [("Access-Control-Allow-Origin", "https://example.test"), ("Access-Control-Allow-Credentials", "true")])
+        , bench "check-origin-with-padding" $
+            whnf (CorsAllowOrigin.corsCheck CorsCredentials.CorsOmit corsRequestOrigin)
+              (headerMapFromList [("Access-Control-Allow-Origin", "\t https://example.test \t")])
+        , bench "expose-headers" $ whnf (parseBenchmarkHeader @CorsExposeHeaders.AccessControlExposeHeaders) ("X-Trace, Content-Length" :| [])
+        , bench "expose-headers-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (CorsExposeHeaders.ExposeHeaders ("X-Trace" :| ["Content-Length"]))
+        , bench "request-headers" $ whnf (parseBenchmarkHeader @CorsRequestHeaders.AccessControlRequestHeaders) ("authorization, x-custom-header" :| [])
+        , bench "request-headers-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (CorsRequestHeaders.RequestHeaders ("authorization" :| ["x-custom-header"]))
+        , bench "allow-methods-match" $
+            whnf
+              (CorsAllowMethods.allowMethodsMatches CorsCredentials.CorsInclude (CorsRequestMethod.AccessControlRequestMethod "PATCH"))
+              (parseBenchmarkHeader ("GET, PATCH, OPTIONS" :| []))
+        , bench "allow-headers-match" $
+            whnf
+              (CorsAllowHeaders.allowHeadersMatches CorsCredentials.CorsOmit "authorization")
+              (parseBenchmarkHeader ("X-Custom-Header, *" :| ["Authorization"]))
+        , bench "exposes-headers-match" $
+            whnf
+              (CorsExposeHeaders.exposesResponseHeader CorsCredentials.CorsInclude "x-trace")
+              (Just (parseBenchmarkHeader ("Content-Length, X-Trace" :| [])))
         , bench "request-method" $ nf corsRequestMethodScore ("PATCH" :| [])
+        , bench "request-method-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (CorsRequestMethod.AccessControlRequestMethod "PATCH")
         , bench "max-age" $ nf corsMaxAgeScore ("86400" :| [])
         , bench "timing-allow-origin" $ nf timingAllowOriginScore ("https://example.test, https://other.test:8443" :| [])
+        , bench "timing-allow-match-wildcard" $
+            whnf (TimingAllowOrigin.timingAllowOriginMatches corsRequestOrigin)
+              (headerMapFromList [("Timing-Allow-Origin", "*")])
+        , bench "timing-allow-match-second-origin" $
+            whnf (TimingAllowOrigin.timingAllowOriginMatches corsRequestOrigin)
+              (headerMapFromList [("Timing-Allow-Origin", "https://other.test, https://example.test")])
+        , bench "timing-allow-match-repeated" $
+            whnf (TimingAllowOrigin.timingAllowOriginMatches corsRequestOrigin)
+              (headerMapFromList [("Timing-Allow-Origin", "\"unsupported, *\""), ("Timing-Allow-Origin", "https://example.test")])
         ]
     , bgroup
         "dates-and-delays"
         [ bench "date-parse" $ nf dateScore "Sun, 06 Nov 1994 08:49:37 GMT"
         , bench "date-render" $ nf (renderToHeaders defaultHeaderSettings) exampleDate
+        , bench "date-write" $ nf (renderHeaderLines defaultHeaderSettings) exampleDate
+        , bench "retry-after-date-write" $ nf (renderHeaderLines defaultHeaderSettings) (SpecificTime (date exampleDate))
         , bench "age-parse" $ nf ageScore "3600"
         , bench "age-first-member" $ nf ageScore "3600, 7200"
         , bench "age-render" $ nf (renderToHeaders defaultHeaderSettings) (Age 3600)
@@ -461,22 +633,68 @@ main =
     , bgroup
         "entity-tags"
         [ bench "strong" $ nf etagScore "\"b72a2352fd753cde308e8589dbca1a79\""
+        , bench "strong-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (ETag.ETag (ETag.StrongETagBytes "b72a2352fd753cde308e8589dbca1a79"))
         , bench "weak" $ nf etagScore "W/\"b72a2352fd753cde308e8589dbca1a79\""
         , bench "opaque" $ nf etagScore ("\"b72a2352fd753cde" <> BS.pack [0x80, 0xff] <> "08e8589dbca1a79\"")
         , bench "match-list" $
             nf matchTagCount ("\"first\", W/\"middle\"" :| ["\"last\""])
+        , bench "match-list-write" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              IfNoneMatchTags (ETag.StrongETagBytes "first" :| [ETag.WeakETagBytes "middle", ETag.StrongETagBytes "last"])
         ]
     , bgroup
         "field-lists"
         [ bench "allow-parse" $ nf allowScore ("GET, HEAD, OPTIONS" :| [])
+        , bench "allow-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (Allow [Allow.GET, Allow.HEAD, Allow.CustomMethod "PROPFIND"])
         , bench "connection-parse" $ nf connectionScore ("keep-alive, Upgrade" :| [])
+        , bench "connection-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (Connection ("keep-alive" :| ["Upgrade"]))
         , bench "vary-parse" $ nf varyScore ("accept-encoding, accept-language" :| [])
         , bench "vary-repeated" $ nf varyScore ("accept-encoding" :| ["accept-language", "x-locale"])
+        , bench "vary-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (Vary (VaryHeader "accept-encoding" :| [VaryHeader "accept-language", VaryHeader "x-locale"]))
         , bench "keep-alive-parse" $ whnf keepAliveScore ("timeout=10, max=20" :| [])
         , bench "keep-alive-repeated" $ whnf keepAliveScore keepAliveFixture
         , bench "keep-alive-limits" $ whnf keepAliveLimitsScore ("TIMEOUT=10, MAX=20" :| [])
         , bench "keep-alive-render" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @KeepAlive.KeepAlive keepAliveFixture)
+        , bench "keep-alive-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @KeepAlive.KeepAlive keepAliveFixture)
+        ]
+    , bgroup
+        "upgrade-trailer-ranges"
+        [ bench "accept-ranges-bytes" $ whnf acceptRangesScore ("bytes" :| [])
+        , bench "accept-ranges-none" $ whnf acceptRangesScore ("NoNe" :| [])
+        , bench "accept-ranges-repeated" $ whnf acceptRangesScore ("bytes" :| [" rows , blocks"])
+        , bench "accept-ranges-render" $
+            nf (renderToHeaders defaultHeaderSettings) (AcceptRanges.AcceptRangesUnits ("bytes" :| ["rows", "blocks"]))
+        , bench "accept-ranges-bytes-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (AcceptRanges.AcceptRangesUnits ("bytes" :| []))
+        , bench "accept-ranges-list-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (AcceptRanges.AcceptRangesUnits ("bytes" :| ["rows", "blocks"]))
+        , bench "hobareg-register" $ whnf (parseBenchmarkHeader @Hobareg.Hobareg) ("regok" :| [])
+        , bench "hobareg-folded" $ whnf (parseBenchmarkHeader @Hobareg.Hobareg) ("\tReGoK " :| [])
+        , bench "hobareg-repeated" $ whnf (parseBenchmarkHeader @Hobareg.Hobareg) ("regok" :| ["regok"])
+        , bench "hobareg-render" $ nf (renderToHeaders defaultHeaderSettings) Hobareg.HobaregRegister
+        , bench "hobareg-mixed-batch" $ whnf hobaregBatchScore hobaregBatchFixture
+        , bench "hobareg-render-batch" $ whnf hobaregRenderScore (BS.pack (take 64 (cycle [1, 0])))
+        , bench "hobareg-builder" $ nf (Mason.toStrictByteString . Hobareg.renderHobareg) Hobareg.HobaregRegister
+        , bench "trailer-digest" $ whnf trailerNamesScore ("Content-Digest" :| [])
+        , bench "trailer-repeated" $ whnf trailerNamesScore ("Content-Digest, X-Checksum" :| ["Server-Timing"])
+        , bench "trailer-render" $
+            nf (renderToHeaders defaultHeaderSettings) (Trailer.Trailer ("Content-Digest" :| ["X-Checksum", "Server-Timing"]))
+        , bench "trailer-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (Trailer.Trailer ("Content-Digest" :| ["X-Checksum", "Server-Timing"]))
+        , bench "upgrade-websocket" $ whnf upgradeProtocolsScore ("websocket" :| [])
+        , bench "upgrade-repeated" $ whnf upgradeProtocolsScore ("websocket, IRC/6.9" :| ["RTA/x11"])
+        , bench "upgrade-render" $
+            nf (renderToHeaders defaultHeaderSettings) $
+              Upgrade.Upgrade (Upgrade.Protocol "websocket" Nothing :| [Upgrade.Protocol "IRC" (Just "6.9"), Upgrade.Protocol "RTA" (Just "x11")])
+        , bench "upgrade-write" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              Upgrade.Upgrade (Upgrade.Protocol "websocket" Nothing :| [Upgrade.Protocol "IRC" (Just "6.9"), Upgrade.Protocol "RTA" (Just "x11")])
         ]
     , bgroup
         "product-comments"
@@ -490,6 +708,21 @@ main =
         "ranges"
         [ bench "closed" $ whnf rangeScore ("bytes=0-499" :| [])
         , bench "multiple" $ whnf rangeScore ("bytes=0-499, 1000-, -512" :| [])
+        , bench "resolve-closed" $ whnf (resolvedRangeScore 4096) (Range.ByteRangeInt 500 (Just 999))
+        , bench "resolve-open" $ whnf (resolvedRangeScore 4096) (Range.ByteRangeInt 500 Nothing)
+        , bench "resolve-suffix" $ whnf (resolvedRangeScore 4096) (Range.ByteRangeSuffix 512)
+        , bench "resolve-outside" $ whnf (resolvedRangeScore 4096) (Range.ByteRangeInt 4096 Nothing)
+        , bench "resolve-mixed" $ whnf resolvedRangeBatch rangeResolutionFixture
+        , bench "if-range-strong" $
+            whnf (IfRange.ifRangeMatches (Just rangeValidator) Nothing) matchingIfRange
+        , bench "if-range-mixed" $ whnf ifRangeBatch ifRangeFixture
+        , bench "write-range-checked" $
+            nf (renderHeaderLines defaultHeaderSettings)
+              (Range.ByteRanges (Range.ByteRangeInt 0 (Just 499) :| [Range.ByteRangeSuffix 512]))
+        , bench "write-if-range-checked" $ nf (renderHeaderLines defaultHeaderSettings) matchingIfRange
+        , bench "write-content-range-checked" $
+            nf (renderHeaderLines defaultHeaderSettings)
+              (ContentRange.ContentRange "bytes" (ContentRange.RangeRespSatisfied 42 1233 (Just 1234)))
         , bench "content-range" $ whnf contentRangeScore ("bytes 42-1233/1234" :| [])
         , bench "content-range-unsatisfied" $ whnf contentRangeScore ("bytes */1234" :| [])
         , bench "content-range-render" $
@@ -502,10 +735,19 @@ main =
         [ bench "key" $ whnf webSocketKeySize ("dGhlIHNhbXBsZSBub25jZQ==" :| [])
         , bench "accept" $ whnf webSocketAcceptSize ("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" :| [])
         , bench "key-render" $ nf (renderToHeaders defaultHeaderSettings) (WebSocketKey.SecWebSocketKey "the sample nonce")
+        , bench "key-write" $ nf (renderHeaderLines defaultHeaderSettings) (WebSocketKey.SecWebSocketKey "the sample nonce")
+        , bench "accept-write" $ nf (renderHeaderLines defaultHeaderSettings) (WebSocketAccept.SecWebSocketAccept (BS.pack [0 .. 19]))
         , bench "version" $ whnf webSocketVersionScore ("13" :| [])
+        , bench "version-write" $ nf (renderHeaderLines defaultHeaderSettings) (WebSocketVersion.SecWebSocketVersion (13 :| []))
         , bench "protocols" $ whnf webSocketProtocolScore ("chat, superchat" :| [])
+        , bench "protocol-write" $ nf (renderHeaderLines defaultHeaderSettings) (WebSocketProtocol.SecWebSocketProtocol ("chat" :| []))
+        , bench "protocols-write" $ nf (renderHeaderLines defaultHeaderSettings) (WebSocketProtocol.SecWebSocketProtocol ("chat" :| ["superchat"]))
         , bench "extensions" $
             whnf webSocketExtensionsScore ("permessage-deflate; client_max_window_bits=\"15\"; server_no_context_takeover" :| [])
+        , bench "extensions-write" $
+            nf
+              (renderHeaderLines defaultHeaderSettings)
+              (parseBenchmarkHeader @WebSocketExtensions.SecWebSocketExtensions ("permessage-deflate; client_max_window_bits=15; server_no_context_takeover" :| []))
         ]
     , bgroup
         "transparent-negotiation"
@@ -525,12 +767,15 @@ main =
         [ bench "oscore" $ whnf (shortBytes . OSCORE.oscoreValue . parseBenchmarkHeader) ("CQUl" :| [])
         , bench "oscore-empty" $ whnf (shortBytes . OSCORE.oscoreValue . parseBenchmarkHeader) ("AA" :| [])
         , bench "oscore-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @OSCORE.OSCORE ("CQUl" :| []))
+        , bench "oscore-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @OSCORE.OSCORE ("CQUl" :| []))
+        , bench "oscore-raw-write" $ nf (renderHeaderLines defaultHeaderSettings) (OSCORE.OSCORE "CQUl")
         , bench "oscore-typed" $ whnf (either error BS.length . OSCORE.oscoreOptionBytes . parseBenchmarkHeader) ("CQUl" :| [])
         , bench "oscore-encode" $ nf (renderToHeaders defaultHeaderSettings . OSCORE.oscoreFromOptionBytes) (BS.pack [9, 5, 37])
         , bench "token-binding" $ whnf (shortBytes . TokenBinding.secTokenBindingMessage . parseBenchmarkHeader) (tokenBindingWire :| [])
         , bench "token-binding-typed" $
             whnf (either error NE.length . TokenBinding.secTokenBindingEntries . parseBenchmarkHeader) (tokenBindingWire :| [])
         , bench "token-binding-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @TokenBinding.SecTokenBinding (tokenBindingWire :| []))
+        , bench "token-binding-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @TokenBinding.SecTokenBinding (tokenBindingWire :| []))
         , bench "token-binding-author" $
             nf
               (either error (renderToHeaders defaultHeaderSettings) . TokenBinding.secTokenBindingFromEntries)
@@ -543,12 +788,20 @@ main =
             whnf (shortBytes . AcceptFeatures.rawAcceptFeatures . parseBenchmarkHeader) (featureWire :| [])
         , bench "accept-features-typed" $
             whnf (either error length . AcceptFeatures.acceptFeatureEntries . parseBenchmarkHeader) (featureWire :| [])
+        , bench "accept-features-projected" $
+            whnf acceptFeaturesProjectionScore (featureWire :| [])
         , bench "accept-features-render" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @AcceptFeatures.AcceptFeatures (featureWire :| []))
         , bench "alternates" $
             whnf (shortBytes . Alternates.rawAlternates . parseBenchmarkHeader) (alternatesWire :| [])
         , bench "alternates-typed" $
             whnf alternatesScore (alternatesWire :| [])
+        , bench "alternates-projected" $
+            whnf alternatesProjectionScore (alternatesWire :| [])
+        , bench "alternates-apache-projected" $
+            whnf alternatesProjectionScore (alternatesApacheWire :| [])
+        , bench "alternates-extensions-projected" $
+            whnf alternatesProjectionScore (alternatesExtensionsWire :| [])
         , bench "alternates-render" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Alternates.Alternates (alternatesWire :| []))
         ]
@@ -558,6 +811,8 @@ main =
         , bench "soap-relative" $ whnf (shortBytes . SoapAction.soapActionURI . parseBenchmarkHeader) ("\"../order%20now#submit\"" :| [])
         , bench "soap-render" $
             nf (renderToHeaders defaultHeaderSettings) (SoapAction.SoapAction "http://electrocommerce.org/abc#MyMessage")
+        , bench "soap-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (SoapAction.SoapAction "http://electrocommerce.org/abc#MyMessage")
         , bench "meter-parse" $ whnf meterScore ("u=3,r=6,e" :| [])
         , bench "meter-count" $ whnf meterScore ("c=18446744073709551616/42,x" :| ["wont-limit"])
         , bench "meter-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Meter.Meter ("u=3,r=6,e" :| []))
@@ -574,6 +829,23 @@ main =
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @SurrogateControl.SurrogateControl surrogateControlFixture)
         ]
     , bgroup
+        "legacy-and-product-writes"
+        [ bench "aim" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @AIM.AIM aimExtensionFixture)
+        , bench "im" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @IM.IM imExtensionFixture)
+        , bench "digest" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @LegacyDigest.Digest (legacyDigestFixture :| ["CRC32c=0a72a4df, unixsum=30637"]))
+        , bench "digest-extension" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @LegacyDigest.Digest ("ext=\"a\\;,\xff\", ext2=:a=b?" :| []))
+        , bench "want-digest" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @WantDigest.WantDigest wantDigestFixture)
+        , bench "server" $ nf (renderHeaderLines defaultHeaderSettings) exampleServer
+        , bench "user-agent" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @UserAgent.UserAgent ("Example/2 (caf\xe9 build) TLS/1" :| []))
+        , bench "server-bare" $ nf (renderHeaderLines defaultHeaderSettings) (Server.Server (Server.Product "Example" Nothing) [])
+        , bench "additions" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Additions.AcceptAdditions additionsFixture)
+        , bench "variant-vary" $ nf (renderHeaderLines defaultHeaderSettings) (VariantVary.VariantVaryFields ("Accept-Language" :| ["X-Edition"]))
+        , bench "safe" $ nf (renderHeaderLines defaultHeaderSettings) (Safe.SafeIf "User-Awake")
+        ]
+    , bgroup
         "legacy-digest"
         [ bench "parse-sha256" $ whnf legacyDigestScore (legacyDigestFixture :| [])
         , bench "parse-digest-lines" $ whnf legacyDigestScore (legacyDigestFixture :| ["CRC32c=0a72a4df, unixsum=30637"])
@@ -587,12 +859,14 @@ main =
         "mime-and-atom-fields"
         [ bench "content-md5" $ whnf (BS.length . MD5.contentMD5Digest . parseBenchmarkHeader) ("Q2hlY2sgSW50ZWdyaXR5IQ==" :| [])
         , bench "content-md5-render" $ nf (renderToHeaders defaultHeaderSettings) (MD5.ContentMD5 "Check Integrity!")
+        , bench "content-md5-write" $ nf (renderHeaderLines defaultHeaderSettings) (MD5.ContentMD5 "Check Integrity!")
         , bench "mime-version" $ whnf (MIME.mimeVersionMajor . parseBenchmarkHeader) ("1.0" :| [])
         , bench "mime-version-long" $ whnf (MIME.mimeVersionMajor . parseBenchmarkHeader) ("123.456" :| [])
         , bench "mime-version-comments" $
             whnf (MIME.mimeVersionMajor . parseBenchmarkHeader) ("(producer (MIME)) 1. (minor)0" :| [])
         , bench "mime-version-render" $ nf (renderToHeaders defaultHeaderSettings) (MIME.MIMEVersion 1 0)
         , bench "mime-version-render-long" $ nf (renderToHeaders defaultHeaderSettings) (MIME.MIMEVersion 123 456)
+        , bench "mime-version-write" $ nf (renderHeaderLines defaultHeaderSettings) (MIME.MIMEVersion 123 456)
         , bench "slug" $ whnf (shortBytes . Slug.slugText . parseBenchmarkHeader) ("The Beach at Vacation" :| [])
         , bench "slug-escaped" $ whnf (shortBytes . Slug.slugText . parseBenchmarkHeader) ("The Beach at S%C3%A8te" :| [])
         , bench "slug-render" $ nf (renderToHeaders defaultHeaderSettings) (Slug.Slug "The Beach at S%C3%A8te")
@@ -632,8 +906,11 @@ main =
     , bgroup
         "oauth-header-fields"
         [ bench "dpop" $ whnf (shortBytes . DPoP.dPoPProof . parseBenchmarkHeader) dpopBenchmarkField
+        , bench "dpop-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @DPoP.DPoP dpopBenchmarkField)
         , bench "dpop-nonce" $ whnf (shortBytes . DPoPNonce.dPoPNonceValue . parseBenchmarkHeader) ("eyJ7S_zG.eyJH0-Z.HX4w-7v" :| [])
+        , bench "dpop-nonce-write" $ nf (renderHeaderLines defaultHeaderSettings) (DPoPNonce.DPoPNonce "eyJ7S_zG.eyJH0-Z.HX4w-7v")
         , bench "replay-nonce" $ whnf (shortBytes . ReplayNonce.replayNonce . parseBenchmarkHeader) ("oFvnlf8Y9eK4Q9wQ-CKZ4g" :| [])
+        , bench "replay-nonce-write" $ nf (renderHeaderLines defaultHeaderSettings) (ReplayNonce.ReplayNonce "oFvnlf8Y9eK4Q9wQ-CKZ4g")
         ]
     , bgroup
         "web-push"
@@ -697,12 +974,24 @@ main =
         , bench "early-data" $ whnf (parseBenchmarkHeader @EarlyData.EarlyData) ("1" :| [])
         ]
     , bgroup
+        "browser-hint-writes"
+        [ bench "accept-ch" $ nf (renderHeaderLines defaultHeaderSettings) (AcceptCH.AcceptCH [RFC8941Token "Sec-CH-UA", RFC8941Token "DPR", RFC8941Token "Width"])
+        , bench "save-data" $ nf (renderHeaderLines defaultHeaderSettings) (SaveData.SaveData "on")
+        , bench "save-data-list" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @SaveData.SaveData ("on;mode=mobile" :| ["future;flag"]))
+        , bench "sec-purpose" $ nf (renderHeaderLines defaultHeaderSettings) (SecPurpose.SecPurpose (RFC8941Token "prefetch"))
+        , bench "sec-purpose-list" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @SecPurpose.SecPurpose ("prefetch;prerender, (future 3);flag" :| []))
+        , bench "set-content-length" $ whnf (headerByteCount "Content-Length" . setHeader (ContentLength 16384)) (headerMapFromList typicalRequest)
+        ]
+    , bgroup
         "browser-response-fields"
         [ bench "nosniff" $ whnf (parseBenchmarkHeader @XCTO.XContentTypeOptions) ("nosniff" :| [])
         , bench "nosniff-folded" $ whnf (parseBenchmarkHeader @XCTO.XContentTypeOptions) ("NoSnIfF" :| [])
         , bench "frame-deny" $ whnf (parseBenchmarkHeader @XFO.XFrameOptions) ("DENY" :| [])
         , bench "frame-allow-from" $ whnf frameOptionsScore ("ALLOW-FROM https://example.com:8443/" :| [])
         , bench "frame-deny-render" $ nf (renderToHeaders defaultHeaderSettings) XFO.Deny
+        , bench "frame-allow-from-write" $ nf (renderHeaderLines defaultHeaderSettings) (XFO.AllowFrom "https://example.com:8443/")
         , bench "clear-site-data" $ whnf (NE.length . CSD.clearSiteDataDirectives . parseBenchmarkHeader) ("\"cache\", \"cookies\", \"storage\"" :| [])
         ]
     , bgroup
@@ -717,17 +1006,42 @@ main =
         , bench "embedder-endpoint-render" $ nf (renderToHeaders defaultHeaderSettings) (COEP.CrossOriginEmbedderPolicy COEP.CoepRequireCorp (Just (RFC8941String "embedder")))
         ]
     , bgroup
+        "browser-policy-writes"
+        [ bench "cors" $ nf (renderHeaderLines defaultHeaderSettings) (CorsAllowOrigin.AllowOrigin "https" "example.test" Nothing)
+        , bench "cors-ipv6" $ nf (renderHeaderLines defaultHeaderSettings) (CorsAllowOrigin.AllowOrigin "https" "[2001:db8::1]" (Just 8443))
+        , bench "origin" $ nf (renderHeaderLines defaultHeaderSettings) (OriginHeader (Origin "https" "example.test" Nothing))
+        , bench "origin-list" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Origin ("https://example.test https://other.test:8443" :| []))
+        , bench "timing-origin" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @TimingAllowOrigin.TimingAllowOrigin ("https://example.test, https://other.test:8443" :| []))
+        , bench "coep-bare" $ nf (renderHeaderLines defaultHeaderSettings) (COEP.CrossOriginEmbedderPolicy COEP.CoepRequireCorp Nothing)
+        , bench "coep" $ nf (renderHeaderLines defaultHeaderSettings) (COEP.CrossOriginEmbedderPolicy COEP.CoepRequireCorp (Just (RFC8941String "embedder")))
+        , bench "coep-ro" $ nf (renderHeaderLines defaultHeaderSettings) (COEPRO.CrossOriginEmbedderPolicyReportOnly (COEP.CrossOriginEmbedderPolicy COEP.CoepRequireCorp (Just (RFC8941String "embedder"))))
+        , bench "coop" $ nf (renderHeaderLines defaultHeaderSettings) (COOP.CrossOriginOpenerPolicy COOP.CoopSameOrigin (Just (RFC8941String "opener")))
+        , bench "coop-ro" $ nf (renderHeaderLines defaultHeaderSettings) (COOPRO.CrossOriginOpenerPolicyReportOnly (COOP.CrossOriginOpenerPolicy COOP.CoopSameOrigin (Just (RFC8941String "opener"))))
+        , bench "csp" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @CSP.ContentSecurityPolicy cspFixture)
+        , bench "csp-ro" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @CSPRO.ContentSecurityPolicyReportOnly cspListFixture)
+        , bench "clear-site-data" $ nf (renderHeaderLines defaultHeaderSettings) (CSD.ClearSiteData (CSD.SiteDataCache :| [CSD.SiteDataCookies, CSD.SiteDataStorage]))
+        , bench "clear-site-data-extension" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @CSD.ClearSiteData ("\"cache\", \"unknown\\x\", \"feature\"" :| []))
+        , bench "nosniff-extension" $ nf (renderHeaderLines defaultHeaderSettings) (XCTO.XContentTypeOptionsOther "nosniff-ext")
+        ]
+    , bgroup
         "oslc"
         [ bench "version" $ whnf (shortBytes . OSLCCoreVersion.oslcCoreVersion . parseBenchmarkHeader) ("3.0" :| [])
         , bench "version-padded" $ whnf (shortBytes . OSLCCoreVersion.oslcCoreVersion . parseBenchmarkHeader) ("002.00401" :| [])
         , bench "version-numbers" $ whnf (maybe 0 OSLCCoreVersion.oslcCoreMinor . OSLCCoreVersion.oslcCoreVersionNumbers . parseBenchmarkHeader) ("002.00401" :| [])
+        , bench "version-write" $ nf (renderHeaderLines defaultHeaderSettings) (OSLCCoreVersion.OSLCCoreVersion "3.0")
+        , bench "version-padded-write" $ nf (renderHeaderLines defaultHeaderSettings) (OSLCCoreVersion.OSLCCoreVersion "002.00401")
         , bench "context" $ whnf (shortBytes . ConfigurationContext.configurationContextValue . parseBenchmarkHeader) ("https://example.com/configurations/myConfiguration1" :| [])
         , bench "context-render" $ nf (renderToHeaders defaultHeaderSettings) (ConfigurationContext.ConfigurationContext "https://example.com/configurations/myConfiguration1")
+        , bench "context-write" $ nf (renderHeaderLines defaultHeaderSettings) (ConfigurationContext.ConfigurationContext "https://example.com/configurations/myConfiguration1")
         ]
     , bgroup
         "html-metadata"
         [ bench "script-type" $ whnf (SBS.length . ContentScriptType.contentScriptTypeBytes . parseBenchmarkHeader) ("text/javascript" :| [])
         , bench "style-type" $ whnf (SBS.length . ContentStyleType.contentStyleTypeBytes . parseBenchmarkHeader) ("text/css; charset=utf-8" :| [])
+        , bench "script-type-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (ContentScriptType.ContentScriptType "text/javascript")
+        , bench "style-type-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (ContentStyleType.ContentStyleType "text/css; charset=utf-8")
         , bench "default-style" $ whnf (SBS.length . DefaultStyle.defaultStyleTitleBytes . parseBenchmarkHeader) ("\"Compact layout\"" :| [])
         , bench "default-style-render" $ nf (renderToHeaders defaultHeaderSettings) (DefaultStyle.DefaultStyle "Compact layout")
         ]
@@ -739,14 +1053,18 @@ main =
         , bench "quoted-pairs" $ whnf (SBS.length . ContentVersion.contentVersionTagBytes . parseBenchmarkHeader) ("\"release\\\"v2\\\\stable\"" :| [])
         , bench "plain-render" $ nf (renderToHeaders defaultHeaderSettings) (ContentVersion.ContentVersion "release-2026.11.19 v2")
         , bench "escaped-render" $ nf (renderToHeaders defaultHeaderSettings) (DerivedFrom.DerivedFrom "release\"v2\\stable")
+        , bench "plain-write" $ nf (renderHeaderLines defaultHeaderSettings) (ContentVersion.ContentVersion "release-2026.11.19 v2")
+        , bench "escaped-write" $ nf (renderHeaderLines defaultHeaderSettings) (DerivedFrom.DerivedFrom "release\"v2\\stable")
         ]
     , bgroup
         "legacy-uri"
         [ bench "content-base" $ whnf (shortBytes . ContentBase.contentBaseUri . parseBenchmarkHeader) ("https://example.org/documents/base%20folder/" :| [])
         , bench "content-base-render" $ nf (renderToHeaders defaultHeaderSettings) (ContentBase.ContentBase "https://example.org/documents/base%20folder/")
+        , bench "content-base-write" $ nf (renderHeaderLines defaultHeaderSettings) (ContentBase.ContentBase "https://example.org/documents/base%20folder/")
         , bench "uri-list" $ whnf legacyUriScore ("<https://example.org/a,b>, <../manual%20page#sec>" :| [])
         , bench "uri-lines" $ whnf legacyUriScore ("<https://example.org/a,b>" :| ["<../manual%20page#sec>"])
         , bench "uri-render" $ nf (renderToHeaders defaultHeaderSettings) (LegacyURI.URI ("https://example.org/a,b" :| ["../manual%20page#sec"]))
+        , bench "uri-write" $ nf (renderHeaderLines defaultHeaderSettings) (LegacyURI.URI ("https://example.org/a,b" :| ["../manual%20page#sec"]))
         ]
     , bgroup
         "content-id"
@@ -755,21 +1073,30 @@ main =
         , bench "drp" $ whnf (shortBytes . ContentID.contentID . parseBenchmarkHeader) ("urn:md5:PEFjWBDv/sd9alS9BYuX0w==" :| [])
         , bench "drp-composite" $ whnf (shortBytes . ContentID.contentID . parseBenchmarkHeader) ("http://www.acme.com/Example/,urn:x-version:5" :| [])
         , bench "differential" $ whnf (shortBytes . DifferentialID.differentialID . parseBenchmarkHeader) ("urn:md5:3FS2oCnWPZptpN05oKBemA==" :| [])
+        , bench "batch-write" $ nf (renderHeaderLines defaultHeaderSettings) (ContentID.ContentID "request-42_part.1")
+        , bench "differential-write" $ nf (renderHeaderLines defaultHeaderSettings) (DifferentialID.DifferentialID "urn:md5:3FS2oCnWPZptpN05oKBemA==")
         ]
     , bgroup
         "odata"
         [ bench "version" $ whnf (ODataVersion.oDataVersionMinor . parseBenchmarkHeader) ("4.01" :| [])
         , bench "version-render" $ nf (renderToHeaders defaultHeaderSettings) (ODataVersion.ODataVersion 4 1)
+        , bench "version-write" $ nf (renderHeaderLines defaultHeaderSettings) (ODataVersion.ODataVersion 4 1)
         , bench "max-version" $ whnf (ODataMaxVersion.oDataMaxVersionMinor . parseBenchmarkHeader) ("4.01" :| [])
         , bench "max-version-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @ODataMaxVersion.ODataMaxVersion ("4.01" :| []))
         , bench "max-version-extended" $ whnf (ODataMaxVersion.oDataMaxVersionLeadingZeros . parseBenchmarkHeader) ("12.0001234567890" :| [])
+        , bench "max-version-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (ODataMaxVersion.ODataMaxVersionWithLeadingZeros 12 1234567890 3)
         , bench "isolation" $ whnf (parseBenchmarkHeader @Isolation.Isolation) ("snapshot" :| [])
         , bench "legacy-isolation" $ whnf (parseBenchmarkHeader @ODataIsolation.ODataIsolation) ("snapshot" :| [])
+        , bench "isolation-write" $ nf (renderHeaderLines defaultHeaderSettings) Isolation.Snapshot
+        , bench "legacy-isolation-extension-write" $ nf (renderHeaderLines defaultHeaderSettings) (ODataIsolation.ODataIsolationOther "future-v2")
         , bench "entity-absolute" $ whnf (shortBytes . ODataEntityId.oDataEntityId . parseBenchmarkHeader) ("https://example.com/service/Customers(17)" :| [])
         , bench "entity-relative" $ whnf (shortBytes . ODataEntityId.oDataEntityId . parseBenchmarkHeader) ("../Customers('Caf%C3%A9')?view=short" :| [])
         , bench "entity-unicode" $ whnf (shortBytes . ODataEntityId.oDataEntityId . parseBenchmarkHeader) ("https://m\xc3\xbcnich.example/Caf\xc3\xa9s(1)" :| [])
         , bench "entity-render" $ nf (renderToHeaders defaultHeaderSettings) (ODataEntityId.ODataEntityId "https://example.com/service/Customers(17)")
         , bench "entity-unicode-render" $ nf (renderToHeaders defaultHeaderSettings) (ODataEntityId.ODataEntityId "https://münich.example/Cafés(1)")
+        , bench "entity-write" $ nf (renderHeaderLines defaultHeaderSettings) (ODataEntityId.ODataEntityId "https://example.com/service/Customers(17)")
+        , bench "entity-unicode-write" $ nf (renderHeaderLines defaultHeaderSettings) (ODataEntityId.ODataEntityId "https://münich.example/Cafés(1)")
         ]
     , bgroup
         "repeatability"
@@ -782,6 +1109,8 @@ main =
     , bgroup
         "caldav"
         [ bench "schedule-tag" $ whnf (shortBytes . ScheduleTag.scheduleTag . parseBenchmarkHeader) ("\"12ab34-cd56ef\"" :| [])
+        , bench "schedule-tag-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (ScheduleTag.ScheduleTagBytes "12ab34-cd56ef")
         , bench "if-schedule-tag-match" $ whnf (shortBytes . ScheduleTag.scheduleTag . IfScheduleTagMatch.ifScheduleTagMatch . parseBenchmarkHeader) ("\"12ab34-cd56ef\"" :| [])
         , bench "schedule-reply" $ whnf (ScheduleReply.scheduleReply . parseBenchmarkHeader) ("F" :| [])
         , bench "timezones" $ whnf (CalDAVTimezones.calDAVTimezones . parseBenchmarkHeader) ("T" :| [])
@@ -792,33 +1121,56 @@ main =
         [ bench "label" $ whnf (shortBytes . Label.labelName . parseBenchmarkHeader) ("stable-v1.0" :| [])
         , bench "label-escaped" $ whnf (shortBytes . Label.labelName . parseBenchmarkHeader) ("release%20B.3%20caf%C3%A9" :| [])
         , bench "position" $ whnf positionScore ("after chapter%201;rev=2" :| [])
+        , bench "label-write" $ nf (renderHeaderLines defaultHeaderSettings) (Label.Label "release%20B.3%20caf%C3%A9")
+        , bench "position-write" $ nf (renderHeaderLines defaultHeaderSettings) (Position.PositionAfter "chapter%201;rev=2")
         , bench "ordering-type" $ whnf (shortBytes . OrderingType.orderingTypeUri . parseBenchmarkHeader) ("DAV:custom" :| [])
         , bench "redirect-ref" $ whnf (shortBytes . RedirectRef.redirectRefTarget . parseBenchmarkHeader) ("../docs/known%20item?view=full#details" :| [])
         , bench "apply-to-redirect-ref" $ whnf (ApplyToRedirectRef.applyToReference . parseBenchmarkHeader) ("T" :| [])
         , bench "status-uri" $ whnf statusUriScore ("404 <https://a.example/x> 423 <https://b.example/y>" :| [])
+        , bench "status-uri-write" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @StatusURI.StatusURI ("404 <https://a.example/x> 423 <https://b.example/y>" :| []))
         ]
     , bgroup
         "webdav"
         [ bench "if" $ whnf (shortBytes . DAVIf.ifConditions . parseBenchmarkHeader) davIfFixture
         , bench "if-tree" $ whnf davIfTreeScore davIfFixture
         , bench "if-tree-render" $ nf (renderToHeaders defaultHeaderSettings . DAVIf.fromIfConditionLists) davIfTree
+        , bench "if-tree-write" $ nf (renderHeaderLines defaultHeaderSettings . DAVIf.fromIfConditionLists) davIfTree
         , bench "destination" $ whnf (shortBytes . Destination.destinationUri . parseBenchmarkHeader) ("https://dav.example/docs/a%20b?rev=2" :| [])
+        , bench "destination-write" $ nf (renderHeaderLines defaultHeaderSettings) (Destination.Destination "https://dav.example/docs/a%20b?rev=2")
         , bench "lock-token" $ whnf (shortBytes . LockToken.lockTokenUri . parseBenchmarkHeader) ("<urn:uuid:a515cfa4-5da4-22e1-f5b5-00a0451e6bf7>" :| [])
         , bench "depth" $ whnf depthScore ("infinity" :| [])
         , bench "overwrite" $ whnf (Overwrite.overwriteAllowed . parseBenchmarkHeader) ("T" :| [])
         , bench "timeout" $ whnf timeoutScore ("Second-120, Infinite" :| [])
+        , bench "timeout-write" $ nf (renderHeaderLines defaultHeaderSettings) (Timeout.Timeout (Timeout.TimeSeconds 120 :| [Timeout.TimeInfinite]))
         , bench "dav" $ whnf davScore ("1, 2, <https://dav.example/dav/propset>" :| [])
         , bench "dasl" $ whnf (shortBytes . DASL.daslGrammar . parseBenchmarkHeader) ("<DAV:basicsearch>" :| [])
+        , bench "dasl-write" $ nf (renderHeaderLines defaultHeaderSettings) (DASL.DASL "<DAV:basicsearch>")
         ]
     , bgroup
         "forwarding"
         [ bench "forwarded" $ whnf forwardedScore ("for=192.0.2.60;proto=https;by=203.0.113.43, for=\"[2001:db8::1]:4711\"" :| [])
+        , bench "forwarded-write" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              Forwarded.Forwarded
+                [ Forwarded.ForwardedElement [("for", Forwarded.ForwardedToken "192.0.2.60"), ("proto", Forwarded.ForwardedToken "https")]
+                , Forwarded.ForwardedElement [("for", Forwarded.ForwardedQuoted "[2001:db8::1]:4711")]
+                ]
         , bench "xff" $ whnf xffScore ("192.0.2.60, 203.0.113.43, [2001:db8::1]:4711" :| [])
+        , bench "xff-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (XFF.XForwardedFor ("192.0.2.60" :| ["203.0.113.43", "[2001:db8::1]:4711"]))
         , bench "host" $ whnf (shortBytes . XFH.xForwardedHostValue . parseBenchmarkHeader) ("app.example:443" :| [])
+        , bench "host-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (XFH.XForwardedHost "app.example:443")
         , bench "port" $ whnf (XFP.xForwardedPortNumber . parseBenchmarkHeader) ("443" :| [])
+        , bench "port-write" $ nf (renderHeaderLines defaultHeaderSettings) (XFP.XForwardedPort 443)
         , bench "proto" $ whnf xProtoScore ("https" :| [])
+        , bench "proto-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (XProto.XForwardedProtoOther "web+https")
         , bench "real-ip" $ whnf realIPScore ("192.0.2.60" :| [])
+        , bench "real-ip-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (XRealIP.XRealIP (IPv4Address (IPv4 192 0 2 60)))
         , bench "max-hops" $ whnf (MaxForwards.maxForwards . parseBenchmarkHeader) ("31" :| [])
+        , bench "max-hops-write" $ nf (renderHeaderLines defaultHeaderSettings) (MaxForwards.MaxForwards 31)
         ]
     , bgroup
         "transport-policy"
@@ -830,6 +1182,25 @@ main =
         , bench "report-only" $ whnf reportOnlyScore ((pinFixture <> "; max-age=3000; report-uri=\"https://ct.example/report\"") :| [])
         ]
     , bgroup
+        "cookie-and-parameter-writes"
+        [ bench "cookie" $ nf (renderHeaderLines defaultHeaderSettings) exampleCookie
+        , bench "set-cookie" $ nf (renderHeaderLines defaultHeaderSettings) (SetCookies [exampleSetCookie])
+        , bench "set-cookie-pair" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @SetCookies ("session=abc" :| []))
+        , bench "set-cookie-extensions" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @SetCookies (setCookieExtensionFixture :| []))
+        , bench "set-cookie-date" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              parseBenchmarkHeader @SetCookies ("session=abc; Expires=Sun, 06 Nov 1994 08:49:37 GMT; Max-Age=-6; Path=/account/" :| [])
+        , bench "disposition" $ nf (renderHeaderLines defaultHeaderSettings) exampleDisposition
+        , bench "disposition-single" $
+            nf (renderHeaderLines defaultHeaderSettings) (ContentDisposition "attachment" [("filename", "report.txt")])
+        , bench "server-timing" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @ServerTiming.ServerTiming (timingFixture :| []))
+        , bench "cdn-loop" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @CDNLoop.CDNLoop (cdnLoopFixture :| []))
+        ]
+    , bgroup
         "server-timing-and-cdn-loop"
         [ bench "timing-parse" $ whnf serverTimingScore (timingFixture :| [])
         , bench "timing-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @ServerTiming.ServerTiming (timingFixture :| []))
@@ -839,14 +1210,43 @@ main =
     , bgroup
         "trace-context"
         [ bench "parent" $ whnf traceparentScore (traceparentFixture :| [])
-        , bench "state" $ whnf tracestateScore ("rojo=00f067aa0ba902b7,congo=t61rcWkgMzE" :| [])
+        , bench "state" $ whnf tracestateScore (tracestateFixture :| [])
         , bench "parent-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Traceparent.Traceparent (traceparentFixture :| []))
+        , bench "state-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Tracestate.Tracestate (tracestateFixture :| []))
+        ]
+    , bgroup
+        "connection-and-trace-writes"
+        [ bench "alpn-single" $ nf (renderHeaderLines defaultHeaderSettings) (ALPN.ALPN (TLS.alpnHttp2 :| []))
+        , bench "alpn-list" $ nf (renderHeaderLines defaultHeaderSettings) (ALPN.ALPN (TLS.alpnHttp2 :| [TLS.alpnHttp11]))
+        , bench "http2-settings" $
+            nf (renderHeaderLines defaultHeaderSettings) (H2Settings.HTTP2Settings (BS.pack [0, 3, 0, 0, 0, 100, 0, 4, 0, 0, 255, 255]))
+        , bench "method" $ nf (renderHeaderLines defaultHeaderSettings) (MethodOverride.XHttpMethodOverride Methods.PATCH)
+        , bench "method-extension" $
+            nf (renderHeaderLines defaultHeaderSettings) (MethodOverride.XHttpMethodOverride (Methods.methodFromBytes "Custom-Verb"))
+        , bench "traceparent" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Traceparent.Traceparent (traceparentFixture :| []))
+        , bench "traceparent-extension" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              Traceparent.TraceparentWithExtension 1 "4bf92f3577b34da6a3ce929d0e0e4736" "00f067aa0ba902b7" 9 "Vendor/EX=Q-01"
+        , bench "tracestate" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Tracestate.Tracestate (tracestateFixture :| []))
+        , bench "tracestate-32" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              Tracestate.Tracestate (Tracestate.TracestateMember "k0" "v" :| map (\n -> Tracestate.TracestateMember (ST.fromString ("k" ++ show n)) "v") [1..31 :: Int])
+        , bench "nel-parsed" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @NEL.NEL nelFixture)
+        , bench "nel-authored" $
+            nf (renderHeaderLines defaultHeaderSettings) (either error id (NEL.nelFromPolicy NEL.NELRemove))
         ]
     , bgroup
         "authority"
         [ bench "host" $ nf hostScore "app.example.org:8443"
         , bench "origin" $ nf originScore "https://app.example.org:8443"
         , bench "via" $ nf viaScore "1.1 app.example.org:8443 (edge)"
+        , bench "via-write" $
+            nf (renderHeaderLines defaultHeaderSettings) $
+              Via.Via (Via.ViaEntry (Via.ReceivedProtocol Nothing "1.1") "app.example.org:8443" (Just "edge") :| [])
+        , bench "host-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (Host "app.example.org" (Just 8443))
         ]
     , bench "authority-ipv6" $ nf hostScore "[2001:db8::1]:8443"
     , bgroup
@@ -855,7 +1255,10 @@ main =
         , bench "referer-absolute" $ nf refererBytes "https://example.org/articles/http?sort=recent"
         , bench "ping-to" $ nf pingBytes "https://example.org/next?section=[api]"
         , bench "location-render" $ nf (renderToHeaders defaultHeaderSettings) (Location "/widgets/%2f?view=full#details")
+        , bench "location-write" $ nf (renderHeaderLines defaultHeaderSettings) (Location "/widgets/%2f?view=full#details")
+        , bench "referer-write" $ nf (renderHeaderLines defaultHeaderSettings) (Referer "https://example.org/articles/http?sort=recent")
         , bench "ping-to-render" $ nf (renderToHeaders defaultHeaderSettings) (PingTo "https://example.org/next?section=[api]")
+        , bench "ping-to-write" $ nf (renderHeaderLines defaultHeaderSettings) (PingTo "https://example.org/next?section=[api]")
         ]
     , bgroup
         "amp-cache-transform"
@@ -865,6 +1268,9 @@ main =
         , bench "parse-select-render" $ nf ampSelectedResponse (ampFixture :| [])
         , bench "parse-repeated-select" $ whnf ampSelectionScore ("google;v=\"1..3,5\"" :| ["any"])
         , bench "render-field-lines" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @AMP.AMPCacheTransform (ampFixture :| []))
+        , bench "write-parsed-repeated" $
+            nf (renderHeaderLines defaultHeaderSettings)
+              (parseBenchmarkHeader @AMP.AMPCacheTransform ("google;v=\"1..3" :| ["5\", any"]))
         ]
     , bgroup
         "diagnostic-fields"
@@ -874,6 +1280,24 @@ main =
         , bench "request-start-epoch" $ whnf (either error id . XRequestStart.xRequestStartEpoch . parseBenchmarkHeader) (requestStartFixture :| [])
         , bench "render-request-start" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @XRequestStart.XRequestStart (requestStartFixture :| []))
+        ]
+    , bgroup
+        "opaque-authoring"
+        [ bench "correlation" $ nf (renderHeaderLines defaultHeaderSettings) (XCorrelationID.XCorrelationID "550e8400-e29b-41d4-a716-446655440000")
+        , bench "request-id" $ nf (renderHeaderLines defaultHeaderSettings) (XRequestID.XRequestID "550e8400-e29b-41d4-a716-446655440000")
+        , bench "trace-id" $ nf (renderHeaderLines defaultHeaderSettings) (XTraceID.XTraceID "550e8400-e29b-41d4-a716-446655440000")
+        , bench "powered-by" $ nf (renderHeaderLines defaultHeaderSettings) (XPoweredBy.XPoweredBy "Hermes/0.1.0")
+        , bench "get-profile" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @GetProfile.GetProfile (opsReadFixture :| []))
+        , bench "set-profile" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @SetProfile.SetProfile (opsWriteFixture :| []))
+        , bench "profile-object" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @ProfileObject.ProfileObject (opsObjectFixture :| []))
+        , bench "timestamp-legacy" $ nf (renderHeaderLines defaultHeaderSettings) (XRequestStart.XRequestStart True "1700000000.123")
+        , bench "timestamp-parsed" $ nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @XRequestStart.XRequestStart (requestStartFixture :| []))
+        , bench "last-event-id" $ nf (renderHeaderLines defaultHeaderSettings) (LastEventID.LastEventID "evt-42:checkpoint")
+        , bench "topic" $ nf (renderHeaderLines defaultHeaderSettings) (Topic.Topic "Update_2026-11-19_Group10")
+        , bench "managed-id" $ nf (renderHeaderLines defaultHeaderSettings) (CalManagedID.CalManagedID "aUNhbGVuZGFy")
+        , bench "default-style" $ nf (renderHeaderLines defaultHeaderSettings) (DefaultStyle.DefaultStyle "Compact layout")
+        , bench "slug-literal" $ nf (renderHeaderLines defaultHeaderSettings) (Slug.Slug "The Beach at Vacation")
+        , bench "slug-escaped" $ nf (renderHeaderLines defaultHeaderSettings) (Slug.Slug "The Beach at S%C3%A8te")
         ]
     , bgroup
         "ops"
@@ -916,6 +1340,8 @@ main =
         , env (pure $! BS.copy "{PICS-1.1 {headers PICS-Label}}") $ \wire ->
             bench "pics-response-typed" $
               whnf (either error NE.head . Protocol.protocolEntries . parseBenchmarkHeader) (wire :| [])
+        , bench "pics-response-author" $
+            nf (either error (renderHeaderLines defaultHeaderSettings) . Protocol.protocolFromEntries) (Legacy.ProtocolPicsLabels :| [])
         , bench "pics-request-typed" $
             whnf (either error (foldl' picsRequestScore 0) . ProtocolRequest.protocolRequestEntries . parseBenchmarkHeader) (picsRequestFixture :| [])
         , bench "jepi-info-typed" $
@@ -951,6 +1377,9 @@ main =
             nf (Mason.toStrictByteString . Man.renderMan) (parseBenchmarkHeader @Man.Man (extensionFixture :| []))
         , bench "man-render-field-lines" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Man.Man (extensionFixture :| []))
+        , bench "man-write-parsed" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Man.Man (extensionFixture :| []))
+        , bench "ext-write" $ nf (renderHeaderLines defaultHeaderSettings) Ext.extAcknowledged
         ]
     , bgroup
         "proxy-notification"
@@ -960,32 +1389,50 @@ main =
         , bench "features-log-typed" $ whnf proxyFeaturesScore (proxyFeatureWire :| [])
         , bench "features-render" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @ProxyFeatures.ProxyFeatures (proxyFeatureWire :| []))
+        , bench "features-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @ProxyFeatures.ProxyFeatures (proxyFeatureWire :| []))
         , bench "instruction" $ whnf (shortBytes . ProxyInstruction.proxyInstructionValue . parseBenchmarkHeader) ("proxy.w3.org; log" :| [])
         , bench "instruction-typed" $
             whnf (either error ProxyInstruction.proxyInstructionCommand . ProxyInstruction.proxyInstructionDetails . parseBenchmarkHeader) ("proxy.w3.org; log" :| [])
         , bench "instruction-render" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @ProxyInstruction.ProxyInstruction ("proxy.w3.org; log" :| []))
+        , bench "instruction-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @ProxyInstruction.ProxyInstruction ("proxy.w3.org; log" :| []))
         ]
     , bgroup
         "legacy-access-fields"
         [ bench "method" $ whnf (shortBytes . MethodCheck.methodCheckValue . parseBenchmarkHeader) ("PATCH" :| [])
         , bench "method-typed" $ whnf (either (error . show) id . MethodCheck.methodCheckMethod . parseBenchmarkHeader) ("PATCH" :| [])
+        , bench "method-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @MethodCheck.MethodCheck ("PATCH" :| []))
         , bench "expires" $ whnf (shortBytes . MethodCheckExpires.methodCheckExpiresValue . parseBenchmarkHeader) (legacyExpiryWire :| [])
         , bench "expiry-timestamp" $
             whnf (either error (toModifiedJulianDay . utctDay) . MethodCheckExpires.methodCheckExpiresTime . parseBenchmarkHeader) (legacyExpiryWire :| [])
         , bench "expires-render" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @MethodCheckExpires.MethodCheckExpires (legacyExpiryWire :| []))
+        , bench "expires-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @MethodCheckExpires.MethodCheckExpires (legacyExpiryWire :| []))
         , bench "root" $ whnf (shortBytes . RefererRoot.refererRootValue . parseBenchmarkHeader) ("https://[2001:db8::1]:443" :| [])
         , bench "root-typed" $ whnf (either error scoreRefererRoot . RefererRoot.refererRootOrigin . parseBenchmarkHeader) ("https://[2001:db8::1]:443" :| [])
         , bench "root-null" $ whnf (either error scoreRefererRoot . RefererRoot.refererRootOrigin . parseBenchmarkHeader) ("null" :| [])
         , bench "root-render" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @RefererRoot.RefererRoot ("https://[2001:db8::1]:443" :| []))
+        , bench "root-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @RefererRoot.RefererRoot ("https://[2001:db8::1]:443" :| []))
         , bench "security-scheme" $ whnf (shortBytes . SecurityScheme.securitySchemeValue . parseBenchmarkHeader) ("S-HTTP/1.4" :| [])
+        , bench "security-write" $
+            nf (renderHeaderLines defaultHeaderSettings) SecurityScheme.secureHTTP14
         ]
     , bgroup
         "legacy-cookies"
         [ bench "request" $ whnf (shortBytes . Cookie2.cookie2Value . parseBenchmarkHeader) ("$Version=\"1\"" :| [])
         , bench "request-typed" $ whnf (either error id . Cookie2.cookie2Version . parseBenchmarkHeader) ("$Version=\"1\"" :| [])
+        , env (pure $! BS.copy "$Version=\"1\"") $ \wire ->
+            bench "request-version-one-quoted" $ whnf (either error id . Cookie2.cookie2Version . parseBenchmarkHeader) (wire :| [])
+        , env (pure $! BS.copy "$Version=1") $ \wire ->
+            bench "request-version-one-bare" $ whnf (either error id . Cookie2.cookie2Version . parseBenchmarkHeader) (wire :| [])
+        , bench "request-author-version-one" $
+            nf (renderHeaderLines defaultHeaderSettings . Cookie2.cookie2FromVersion) 1
         , bench "request-render" $ nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @Cookie2.Cookie2 ("$Version=\"1\"" :| []))
         , bench "response" $
             whnf (sum . map (shortBytes . SetCookie2.setCookie2Value) . SetCookie2.getSetCookie2s . parseBenchmarkHeader) (legacyCookieWire :| [])
@@ -993,6 +1440,9 @@ main =
         , bench "response-folded" $ whnf legacyCookieScore ((legacyCookieWire <> ", Locale=\"da-DK\"; Version=1") :| [])
         , bench "response-render" $
             nf (renderToHeaders defaultHeaderSettings) (parseBenchmarkHeader @SetCookie2.SetCookie2s (legacyCookieWire :| []))
+        , bench "response-write-parsed" $
+            nf (renderHeaderLines defaultHeaderSettings)
+              (parseBenchmarkHeader @SetCookie2.SetCookie2s (legacyCookieWire :| ["Locale=da-DK; Version=1"]))
         ]
     , bgroup
         "request-cookie"
@@ -1027,6 +1477,14 @@ main =
         "transfer-codings"
         [ bench "applied" $ nf transferCodingCount "gzip, chunked"
         , bench "negotiated" $ nf teScore "trailers, gzip;q=0.5"
+        , bench "applied-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (Transfer.TransferEncoding ("gzip" :| ["chunked"]))
+        , bench "applied-extension-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Transfer.TransferEncoding ("example;level=2;note=\"edge, fast\", chunked" :| []))
+        , bench "negotiated-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (TE.TE (TE.TECoding "trailers" Nothing :| [TE.TECoding "gzip" (Just 0.5)]))
+        , bench "negotiated-extension-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @TE.TE ("trailers, example;level=2;note=\"edge, fast\";q=0.5" :| []))
         ]
     , bench "transfer-extension" $ nf parameterizedTransferScore "example;level=2;note=\"edge, fast\", chunked"
     , bgroup
@@ -1039,6 +1497,26 @@ main =
             nf controlScore ("Basic realm=\"entrance\", username*=UTF-8''Ren%C3%A9e" :| [])
         , bench "control-repeated" $
             nf controlScore ("Basic realm=\"entrance\"" :| ["username*=UTF-8''Ren%C3%A9e", "Digest realm=\"account\""])
+        , bench "token68-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Auth.Authorization ("Example ab.+_/~==" :| []))
+        , bench "credential-parameters-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @Auth.Authorization ("Example realm=\"a,b\", nonce=one" :| []))
+        , bench "proxy-token68-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @ProxyAuthz.ProxyAuthorization ("Example ab.+_/~==" :| []))
+        , bench "challenges-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @WWW.WWWAuthenticate ("Example realm=\"a,b\", nonce=one, Next abc==" :| []))
+        , bench "proxy-challenges-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @ProxyAuthn.ProxyAuthenticate ("Example realm=\"a,b\", nonce=one, Next abc==" :| []))
+        , bench "optional-challenges-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @OptionalWWW.OptionalWWWAuthenticate ("Example realm=\"a,b\", nonce=one, Next abc==" :| []))
+        , bench "information-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @AuthInfo.AuthenticationInfo ("nextnonce=\"caf\xe9\", qop=auth" :| []))
+        , bench "proxy-information-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @ProxyAuthInfo.ProxyAuthenticationInfo ("nextnonce=\"caf\xe9\", qop=auth" :| []))
+        , bench "control-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @AuthControl.AuthenticationControl ("Basic realm=\"entrance\", no-auth=true, Digest realm=\"account\"" :| []))
+        , bench "control-extended-write" $
+            nf (renderHeaderLines defaultHeaderSettings) (parseBenchmarkHeader @AuthControl.AuthenticationControl ("Basic realm=\"entrance\", username*=UTF-8''Ren%C3%A9e" :| []))
         ]
     ]
   where
@@ -1071,6 +1549,26 @@ matchTagCount values = case parseFromHeaders defaultHeaderSettings values of
   _ -> error "invalid If-None-Match benchmark fixture"
 
 
+acceptRangesScore :: NonEmpty ByteString -> Int
+acceptRangesScore fields = case parseBenchmarkHeader fields of
+  AcceptRanges.AcceptRangesNone -> 0
+  AcceptRanges.AcceptRangesUnits units -> foldl' (\n unit -> n + shortBytes unit) 0 units
+
+
+trailerNamesScore :: NonEmpty ByteString -> Int
+trailerNamesScore fields = case parseBenchmarkHeader fields of
+  Trailer.TrailerEmpty -> 0
+  Trailer.Trailer names -> foldl' (\n name -> n + shortBytes name) 0 names
+
+
+upgradeProtocolsScore :: NonEmpty ByteString -> Int
+upgradeProtocolsScore fields = case parseBenchmarkHeader fields of
+  Upgrade.UpgradeEmpty -> 0
+  Upgrade.Upgrade protocols -> foldl' score 0 protocols
+  where
+    score n (Upgrade.Protocol name version) = n + shortBytes name + maybe 0 shortBytes version
+
+
 small :: [(CI ByteString, ByteString)]
 small = [("host", "example.org"), ("accept", "application/json"), ("cache-control", "max-age=10"), ("user-agent", "hermes-bench")]
 
@@ -1096,6 +1594,24 @@ linkScore = foldl' scoreLink 0 . Link.linkValues . parseBenchmarkHeader @Link.Li
     scoreParam n (Link.LinkParam name value) = n + shortBytes name + maybe 0 scoreValue value
     scoreValue (Link.LinkParamToken token) = shortBytes token
     scoreValue (Link.LinkParamQuoted text) = shortBytes text
+
+
+linkEntry :: ByteString -> Link.LinkValue
+linkEntry wire = case parseBenchmarkHeader @Link.Link (wire :| []) of
+  Link.Link [entry] -> entry
+  _ -> error "expected one link in the benchmark fixture"
+
+
+linkTitleScore :: Link.LinkValue -> Int
+linkTitleScore = maybe 0 Text.length . Link.linkTitle
+
+
+linkLanguageScore :: Link.LinkValue -> Int
+linkLanguageScore = either error (foldl' (\n -> (n +) . shortBytes . unLanguageTag) 0) . Link.linkLanguages
+
+
+linkTypeScore :: Link.LinkValue -> Int
+linkTypeScore = either error (maybe 0 (\value -> shortBytes (mediaBaseType value) + shortBytes (mediaSubtype value))) . Link.linkMediaType
 
 
 preferFixture, preferRepeatedFixture, appliedFixture :: NonEmpty BS.ByteString
@@ -1204,6 +1720,11 @@ uaCompatibleScore = foldl' directive 0 . UA.uaCompatDirectives . parseBenchmarkH
     directive n (UA.UACompatDirective engine mode) = n + shortBytes engine + shortBytes mode
 
 
+uaEdgeFixture, uaTwoModeFixture :: UA.XUACompatible
+uaEdgeFixture = UA.XUACompatible (UA.UACompatDirective "IE" "edge" :| [])
+uaTwoModeFixture = UA.XUACompatible (UA.UACompatDirective "IE" "edge" :| [UA.UACompatDirective "chrome" "1"])
+
+
 uaDocumentModeScore :: UA.UACompatDirective -> Word
 uaDocumentModeScore directive = case UA.ieDocumentMode directive of
   Just UA.IEEdge -> 1
@@ -1272,6 +1793,32 @@ contentDigestScore :: NonEmpty ByteString -> Int
 contentDigestScore fields = case parseFromHeaders @Digest.ContentDigest defaultHeaderSettings fields of
   Right value -> foldl' (\n entry -> n + BS.length (Digest.contentDigestValue entry)) 0 (Digest.contentDigestEntryList value)
   Left err -> error err
+
+
+splitDigestFixture :: NonEmpty ByteString
+splitDigestFixture = "sha-256=:AA==:, ext=:Ag==:" :| ["sha-256=:AQ==:;stamp=@3"]
+
+
+reprDigestScore :: NonEmpty ByteString -> Int
+reprDigestScore = foldl' score 0 . ReprDigest.reprDigestEntryList . parseBenchmarkHeader
+  where
+    score total entry = total + BS.length (ReprDigest.reprDigestValue entry)
+
+
+digestPreferenceFixture :: NonEmpty ByteString
+digestPreferenceFixture = "sha-512=3, sha-256=10" :| ["unixsum=0;reason=legacy"]
+
+
+wantContentDigestScore :: NonEmpty ByteString -> Int
+wantContentDigestScore = foldl' score 0 . WantContentDigest.wantContentDigestEntryList . parseBenchmarkHeader
+  where
+    score total entry = total + WantContentDigest.wantContentDigestPreference entry
+
+
+wantReprDigestScore :: NonEmpty ByteString -> Int
+wantReprDigestScore = foldl' score 0 . WantReprDigest.wantReprDigestEntryList . parseBenchmarkHeader
+  where
+    score total entry = total + WantReprDigest.wantReprDigestPreference entry
 
 
 legacyDigestFixture :: ByteString
@@ -1344,6 +1891,26 @@ signatureInputRenderFixture =
 parseBenchmarkHeader :: (KnownHeader a, ParseFailure a ~ String) => NonEmpty ByteString -> a
 parseBenchmarkHeader = either error id . parseFromHeaders defaultHeaderSettings
 {-# INLINE parseBenchmarkHeader #-}
+
+
+hobaregBatchFixture :: [NonEmpty ByteString]
+hobaregBatchFixture = take 64 (cycle ["regok" :| [], "\tReGoK " :| [], "regok" :| ["regok"], "reginwork" :| []])
+
+
+hobaregBatchScore :: [NonEmpty ByteString] -> Int
+hobaregBatchScore = foldl' countRegistrations 0
+  where
+    countRegistrations n wire = case parseBenchmarkHeader @Hobareg.Hobareg wire of
+      Hobareg.HobaregRegister -> n + 1
+      Hobareg.HobaregInProgress -> n
+
+
+hobaregRenderScore :: ByteString -> Int
+hobaregRenderScore = BS.foldl' countBytes 0
+  where
+    countBytes n flag =
+      let state = if flag == 0 then Hobareg.HobaregInProgress else Hobareg.HobaregRegister
+      in n + BS.length (renderToHeaders defaultHeaderSettings state)
 
 
 cspFixture :: NonEmpty ByteString
@@ -1433,17 +2000,26 @@ cacheStatusFixture = "ReverseProxy;hit;ttl=120" :| ["\"shared cache\";fwd=stale;
 proxyStatusFixture = "edge;next-protocol=h2;received-status=200" :| ["\"upstream\";next-hop=backend.example:443;error=connection_timeout;details=\"upstream timeout\""]
 
 
+cacheStatusExtensionsFixture :: NonEmpty ByteString
+cacheStatusExtensionsFixture =
+  "upstream;fwd=stale;fwd-status=304;stored;latency=0.125;trace=:aGk=:" :| ["edge;hit;ttl=42;fwd-status=200;note"]
+
+
 certificateFixture :: ByteString
 certificateFixture = ":" <> BS.concat (replicate 250 "ABEi") <> ":"
 
 
 cacheStatusScore :: NonEmpty ByteString -> Int
-cacheStatusScore = either (error . show) (foldl' score 0 . CacheStatus.cacheStatus) . parseFromHeaders defaultHeaderSettings
+cacheStatusScore = foldl' score 0 . CacheStatus.cacheStatus . parseBenchmarkCacheStatus
   where
     score total entry =
       total + case CacheStatus.cacheStatusHitOrForward entry of
         Left _ -> maybe 0 id (CacheStatus.cacheStatusTtl (CacheStatus.cacheStatusCommonFields entry))
         Right forwarded -> maybe 0 id (CacheStatus.forwardStatus forwarded)
+
+
+parseBenchmarkCacheStatus :: NonEmpty ByteString -> CacheStatus.CacheStatus
+parseBenchmarkCacheStatus = either (error . show) id . parseFromHeaders defaultHeaderSettings
 
 
 proxyStatusScore :: NonEmpty ByteString -> Int
@@ -1454,6 +2030,51 @@ typedProxyStatusScore :: NonEmpty ByteString -> Int
 typedProxyStatusScore = foldl' score 0 . ProxyStatus.proxyStatusEntries . parseBenchmarkHeader
   where
     score total = (total +) . maybe 0 id . ProxyStatus.proxyReceivedStatus . either error id . ProxyStatus.proxyInfoParameters
+
+
+proxyStatusParametersFixture :: ProxyStatus.ProxyStatusParameters
+proxyStatusParametersFixture =
+  ProxyStatus.ProxyStatusParameters
+    (Just (RFC8941Token "connection_timeout"))
+    (Just (Left (RFC8941Token "backend.example:443")))
+    (Just (Right "h2"))
+    (Just 504)
+    (Just (RFC8941String "upstream timeout"))
+
+
+authorProxyStatus :: ProxyStatus.ProxyStatusParameters -> [ByteString]
+authorProxyStatus params =
+  case ProxyStatus.proxyInfoFromParameters (Left (RFC8941Token "edge")) params [("attempt", Just (Integer 2)), ("trace", Nothing)] of
+    Left err -> error err
+    Right info -> renderToHeaders defaultHeaderSettings (ProxyStatus.ProxyStatus [info])
+
+
+proxyPromotionLines :: NonEmpty ByteString
+proxyPromotionLines = "origin;received-status=200, edge;received-status=204" :| ["edge;received-status=202, downstream;received-status=200"]
+
+
+proxyPromotionHeaders, proxyPromotionTrailer, proxyPromotionTwoTrailers, proxyBatchHeaders, proxyBatchTrailers :: ProxyStatus.ProxyStatus
+proxyPromotionHeaders = parseBenchmarkHeader proxyPromotionLines
+proxyPromotionTrailer = parseBenchmarkHeader ("\"edge\";received-status=504" :| [])
+proxyPromotionTwoTrailers = parseBenchmarkHeader ("downstream;received-status=503" :| ["\"edge\";received-status=504"])
+proxyBatchHeaders = parseProxyMembers (97 :| [98 .. 122]) ";received-status=200"
+proxyBatchTrailers = parseProxyMembers (110 :| [111 .. 122]) ";received-status=503"
+
+
+parseProxyMembers :: NonEmpty Word8 -> ByteString -> ProxyStatus.ProxyStatus
+parseProxyMembers ids suffix = parseBenchmarkHeader (fmap (\byte -> "proxy-" <> BS.singleton byte <> suffix) ids)
+
+
+proxyStatusCodeSum :: ProxyStatus.ProxyStatus -> Int
+proxyStatusCodeSum = foldl' memberScore 0 . ProxyStatus.proxyStatusEntries
+  where
+    memberScore score = foldl' countParameter score . ProxyStatus.proxyParams
+    countParameter score (_, Just (Integer n)) = score + n
+    countParameter score _ = score
+
+
+proxyStatusTrailerScore :: HeaderMap -> HeaderMap -> Int
+proxyStatusTrailerScore headers = either error (maybe 0 proxyStatusCodeSum) . ProxyStatus.lookupProxyStatusWithTrailers headers
 
 
 clientCertScore :: NonEmpty ByteString -> Int
@@ -1473,6 +2094,10 @@ corsAllowHeadersScore fields = case parseBenchmarkHeader fields of
   CorsAllowHeaders.AllowHeaders names -> foldl' (\total name -> total + shortBytes name) 0 names
   CorsAllowHeaders.AllowHeadersWildcard -> 1
   CorsAllowHeaders.AllowHeadersEmpty -> 0
+
+
+corsRequestOrigin :: CorsRequestOrigin
+corsRequestOrigin = either error id (parseCorsRequestOrigin "https://example.test")
 
 
 corsRequestMethodScore :: NonEmpty ByteString -> Int
@@ -1506,6 +2131,50 @@ contentRangeScore fields = case parseBenchmarkHeader fields of
   where
     score (ContentRange.RangeRespSatisfied first lastByte total) = first + lastByte + maybe 0 id total
     score (ContentRange.RangeRespUnsatisfied total) = maybe 0 id total
+
+
+resolvedRangeScore :: Word64 -> Range.ByteRange -> Word64
+resolvedRangeScore total requested = case Range.resolveByteRange total requested of
+  Just (Range.ResolvedByteRange offset count) -> offset + count
+  Nothing -> 0
+
+
+rangeResolutionFixture :: [Range.ByteRange]
+rangeResolutionFixture = concatMap batch [1 .. 16]
+  where
+    batch offset =
+      [ Range.ByteRangeInt offset (Just (offset + 499))
+      , Range.ByteRangeInt (3000 + offset) Nothing
+      , Range.ByteRangeSuffix (512 + offset)
+      , Range.ByteRangeInt (4096 + offset) Nothing
+      ]
+
+
+resolvedRangeBatch :: [Range.ByteRange] -> Word64
+resolvedRangeBatch = foldl' (\score requested -> score + resolvedRangeScore 4096 requested) 0
+
+
+rangeValidator :: ETag.EntityTag
+rangeValidator = ETag.StrongETagBytes "0123456789abcdef"
+
+
+matchingIfRange :: IfRange.IfRange
+matchingIfRange = parseBenchmarkHeader ("\"0123456789abcdef\"" :| [])
+
+
+ifRangeFixture :: [IfRange.IfRange]
+ifRangeFixture = concat (replicate 16 [matchingIfRange, different, weak, matchingIfRange])
+  where
+    different = parseBenchmarkHeader ("\"0123456789abcdea\"" :| [])
+    weak = parseBenchmarkHeader ("W/\"0123456789abcdef\"" :| [])
+
+
+ifRangeBatch :: [IfRange.IfRange] -> Int
+ifRangeBatch = foldl' step 0
+  where
+    step count field
+      | IfRange.ifRangeMatches (Just rangeValidator) Nothing field = count + 1
+      | otherwise = count
 
 
 webSocketKeySize :: NonEmpty ByteString -> Int
@@ -1680,6 +2349,10 @@ traceparentScore fields =
        + fromIntegral (Traceparent.traceparentFlags value)
 
 
+tracestateFixture :: ByteString
+tracestateFixture = "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE"
+
+
 tracestateScore :: NonEmpty ByteString -> Int
 tracestateScore = foldl' memberSize 0 . Tracestate.tracestateMembers . parseBenchmarkHeader
   where
@@ -1791,6 +2464,15 @@ exactLanguagePreference, prefixLanguagePreference :: Maybe AcceptLanguage
 exactLanguagePreference = Just $ parseBenchmarkHeader ("en-GB, fr;q=0.8, *;q=0.2" :| [])
 prefixLanguagePreference = Just $ parseBenchmarkHeader
   ("*;q=0.1, en;q=0.6, en-US;q=0, ZH-hant;q=0.8, zh;q=0.3" :| [])
+
+
+offeredCharsets :: [ST.ShortText]
+offeredCharsets = ["utf-8", "iso-8859-1", "shift_jis", "utf-16le"]
+
+
+exactCharsetPreference, wildcardCharsetPreference :: Maybe AcceptCharset
+exactCharsetPreference = Just $ parseBenchmarkHeader ("utf-8, iso-8859-1;q=0.6, *;q=0.2" :| [])
+wildcardCharsetPreference = Just $ parseBenchmarkHeader ("*;q=0.2, UTF-8;q=0, iso-8859-1;q=0.4, SHIFT_JIS;q=0.8" :| [])
 
 
 acceptScore :: ByteString -> Double
@@ -2094,11 +2776,83 @@ featureWire :: ByteString
 featureWire = "blex, !blebber, colordepth={5}, paper!=A2;mode=plain, *"
 
 
+acceptFeaturesProjectionScore :: NonEmpty ByteString -> Int
+acceptFeaturesProjectionScore =
+  either error (foldl' addEntry 0) . AcceptFeatures.acceptFeatureEntries . parseBenchmarkHeader
+  where
+    addEntry score (AcceptFeatures.FeatureEntry expression extensions) =
+      foldl' addExtension (score + expressionScore expression) extensions
+    addExtension score (AcceptFeatures.FeatureExtension name value) =
+      score + shortBytes name + maybe 0 ((+ 1) . BS.length) value
+    expressionScore AcceptFeatures.FeatureWildcard = 5
+    expressionScore (AcceptFeatures.FeatureExpression tag condition) =
+      BS.length (AcceptFeatures.featureTagBytes tag) + conditionScore condition
+    conditionScore AcceptFeatures.FeaturePresent = 0
+    conditionScore AcceptFeatures.FeatureAbsent = 1
+    conditionScore (AcceptFeatures.FeatureEqual value) = 2 + valueSize value
+    conditionScore (AcceptFeatures.FeatureUnequal value) = 3 + valueSize value
+    conditionScore (AcceptFeatures.FeatureSpecial value) = 4 + valueSize value
+    valueSize = BS.length . AcceptFeatures.featureValueBytes
+
+
 alternatesWire :: ByteString
 alternatesWire =
   "{\"paper.1\" 0.9 {type text/html} {language en}}, "
     <> "{\"paper.2\" 0.7 {features !blink;-0.5 [blebber !wolx];+1.4-0.8}}, "
     <> "{\"fallback\"}, proxy-rvsa=\"1.0, 2.5\""
+
+
+alternatesApacheWire :: ByteString
+alternatesApacheWire =
+  "{\"test.en.html\" 0.9 {type text/html} {charset utf-8} {language en} {length 17}}, "
+    <> "{\"test.fr.html\" 0.7 {type text/html} {charset utf-8} {language fr-ca} {encoding gzip} {length 23}}"
+
+
+alternatesExtensionsWire :: ByteString
+alternatesExtensionsWire =
+  "{\"../paper%20one\" 0.9 {TYPE text/html;profile=\"a,b\"} {charset utf-8} {language en, fr-CA}"
+    <> " {length 18446744073709551616} {features !textonly [blebber !wolx];+1.4-0.8 dpi=[300-] paper!=A2}"
+    <> " {description \"Caf%C3%A9, etc.\" fr} {x-note x=(a,\"b}c\")}}, "
+    <> "{\"fallback\"}, proxy-rvsa=\"1.0, 2.5\", x-directive=\"a, b\""
+
+
+alternatesProjectionScore :: NonEmpty ByteString -> Int
+alternatesProjectionScore =
+  either error (foldl' (\score entry -> score + alternate entry) 0) . Alternates.alternateEntries . parseBenchmarkHeader
+  where
+    alternate entry = case entry of
+      Alternates.AlternateVariant (Alternates.Variant uri quality attributes) ->
+        foldl' (\score value -> score + attribute value) (1 + shortBytes uri + round (quality * 1000)) attributes
+      Alternates.AlternateFallback uri -> 2 + shortBytes uri
+      Alternates.AlternateProxyRVSA versions ->
+        foldl' (\score v -> score + 1 + fromIntegral (Negotiate.rvsaMajor v) + fromIntegral (Negotiate.rvsaMinor v)) 3 versions
+      Alternates.AlternateDirective name value -> 4 + shortBytes name + maybe 0 ((+ 1) . BS.length) value
+    attribute value = case value of
+      Alternates.VariantType (MediaRange (MediaType base subtype) parameters) ->
+        foldl' (\score (key, val) -> score + shortBytes key + shortBytes val) (1 + shortBytes base + shortBytes subtype) parameters
+      Alternates.VariantCharset name -> 2 + shortBytes name
+      Alternates.VariantLanguages tags -> foldl' (\score tag -> score + languageSize tag) 3 tags
+      Alternates.VariantLength count -> 4 + numberScore count
+      Alternates.VariantFeatures features -> foldl' (\score element -> score + feature element) 5 features
+      Alternates.VariantDescriptionAttribute (Alternates.VariantDescription description language) ->
+        6 + Text.length description + maybe 0 ((+ 1) . languageSize) language
+      Alternates.VariantExtension name bytes -> 7 + shortBytes name + BS.length bytes
+    feature (Alternates.VariantFeature requirement (Alternates.FeatureFactors positive negative)) =
+      requirementScore requirement + factor positive + factor negative
+    requirementScore (Alternates.RequiredPredicate predicate) = predicateScore predicate
+    requirementScore (Alternates.AnyPredicate predicates) = foldl' (\score predicate -> score + predicateScore predicate) 1 predicates
+    predicateScore (Alternates.FeaturePredicate tag condition) =
+      BS.length (AcceptFeatures.featureTagBytes tag) + conditionScore condition
+    conditionScore AcceptFeatures.FeaturePresent = 0
+    conditionScore AcceptFeatures.FeatureAbsent = 1
+    conditionScore (AcceptFeatures.FeatureEqual value) = 2 + valueSize value
+    conditionScore (AcceptFeatures.FeatureUnequal value) = 3 + valueSize value
+    conditionScore (AcceptFeatures.FeatureSpecial (Alternates.FeatureRange lower upper)) =
+      4 + maybe 0 ((+ 1) . numberScore) lower + maybe 0 ((+ 1) . numberScore) upper
+    languageSize (LanguageTag name) = shortBytes name
+    valueSize = BS.length . AcceptFeatures.featureValueBytes
+    factor = maybe 0 ((+ 1) . fromIntegral . Alternates.shortFloatThousandths)
+    numberScore n = fromIntegral (n `rem` 1000000007)
 
 
 alternatesScore :: NonEmpty ByteString -> Int

@@ -43,9 +43,9 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
 import Data.Word (Word8)
 import Foreign.Ptr (Ptr, plusPtr)
-import Network.HTTP.Grammar.URIReference (absolutePathReference, absoluteURI, codedURL)
+import Network.HTTP.Grammar.URIReference (absolutePathReference, absolutePathReferenceBytes, absoluteURI, codedURL, outboundAbsoluteURIBytes, validURIText)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.ETag (EntityTag (StrongETagBytes, WeakETagBytes), entityTagParser)
+import Network.HTTP.Headers.ETag (EntityTag (StrongETagBytes, WeakETagBytes), entityTagParser, isValidOpaqueTag)
 import Network.HTTP.Headers.HeaderFieldName (hIf)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -153,7 +153,30 @@ instance KnownHeader If where
   renderToHeaders _ (IfHeader raw _) = SBS.fromShort raw
   renderToHeaders _ (IfFromLists lists) = encodeLists lists
   {-# INLINE renderToHeaders #-}
+  renderToHeadersChecked settings value
+    | Right lists <- ifConditionLists value
+    , validLists lists =
+        Just (renderToHeaders settings value)
+    | otherwise = Nothing
   headerName _ = hIf
+
+
+validLists :: IfConditionLists -> Bool
+validLists (IfUntagged alternatives) = all validList alternatives
+validLists (IfTagged resources) = all validResource resources
+  where
+    validResource (IfResource uri alternatives) =
+      validURIText (outboundAbsoluteURIBytes <|> absolutePathReferenceBytes) uri
+        && all validList alternatives
+
+
+validList :: IfList -> Bool
+validList (IfList conditions) = all valid conditions
+  where
+    valid (IfCondition _ operand) = case operand of
+      IfStateToken uri -> validURIText outboundAbsoluteURIBytes uri
+      IfEntityTag (StrongETagBytes tag) -> isValidOpaqueTag tag
+      IfEntityTag (WeakETagBytes tag) -> isValidOpaqueTag tag
 
 
 ifParser :: ParserT st String If

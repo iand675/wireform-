@@ -9,7 +9,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.ContentRange as CR
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -109,6 +109,25 @@ unit_invalid = it "rejects reversed bounds, inconsistent lengths, overflow and i
     ]
 
 
+unit_content_range_checked_write :: Spec
+unit_content_range_checked_write = it "rejects invalid typed Content-Range writes without replacing existing lines" $ do
+  let fields = headerMapFromList [("Content-Range", "bytes 0-1/10")]
+      invalid =
+        [ CR.ContentRange "two words" (CR.RangeRespUnsatisfied (Just 10))
+        , CR.ContentRange "bytes" (CR.RangeRespUnsatisfied Nothing)
+        , CR.ContentRange "bytes" (CR.RangeRespSatisfied 2 1 Nothing)
+        , CR.ContentRange "bytes" (CR.RangeRespSatisfied 0 10 (Just 10))
+        ]
+  mapM_
+    ( \value -> do
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value fields `shouldBe` fields
+    )
+    invalid
+  let valid = CR.ContentRange "rows" (CR.RangeRespUnsatisfied (Just 0))
+  lookupHeader @CR.ContentRange (setHeader valid fields) `shouldBe` Right (Just valid)
+
+
 -- Property: satisfied form round-trips for arbitrary positions.
 respGen :: Gen CR.RangeResp
 respGen =
@@ -145,5 +164,6 @@ tests =
       , unit_render_unsatisfied
       , unit_typed_lookup
       , unit_invalid
+      , unit_content_range_checked_write
       , it "round-trip" prop_roundtrip
       ]

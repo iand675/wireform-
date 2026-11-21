@@ -172,6 +172,7 @@ unit_ignores_unusable_resume_seed = it "omits malformed, repeated or connection-
   req <- mkRequest
   let seeds =
         [ ([(H.hLastEventID, BS.singleton 0xFF)], Just "learned")
+        , ([(H.hLastEventID, "bad\x0b\&cursor")], Just "learned")
         , ([(H.hLastEventID, "first"), (H.hLastEventID, "second")], Just "learned")
         , ([(H.hLastEventID, "local"), (H.hConnection, "last-event-id")], Nothing)
         ]

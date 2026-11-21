@@ -20,7 +20,7 @@ module Network.HTTP.Headers.ContentLocation (
 ) where
 
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (fragmentlessReference)
+import Network.HTTP.Grammar.URIReference (checkedURIField, fragmentlessReference, outboundFragmentlessReferenceBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentLocation)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,6 +43,9 @@ instance KnownHeader ContentLocation where
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentLocation
+
+
+  renderToHeadersChecked _ = checkedURIField outboundFragmentlessReferenceBytes . ST.toByteString . contentLocationUri
 
 
   headerName _ = hContentLocation

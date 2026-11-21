@@ -111,6 +111,12 @@ instance KnownHeader NEL where
   renderToHeaders _ (AuthoredNEL wire _) = wire
 
 
+  renderToHeadersChecked _ (NELValue wire details) = case details of
+    Right _ -> Just (ST.toByteString wire)
+    Left _ -> Nothing
+  renderToHeadersChecked _ (AuthoredNEL wire _) = Just wire
+
+
   headerName _ = hNEL
 
 

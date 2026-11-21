@@ -44,6 +44,11 @@ instance KnownHeader IfMatch where
   renderToHeaders _ = M.toStrictByteString . renderIfMatch
 
 
+  renderToHeadersChecked _ IfMatchAnyCurrentRepresentation = Just "*"
+  renderToHeadersChecked _ IfMatchNoTags = Just ""
+  renderToHeadersChecked _ (IfMatchEntityTags tags) = encodeEntityTagListChecked tags
+
+
   headerName _ = hIfMatch
 
 

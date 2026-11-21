@@ -26,7 +26,13 @@ module Network.HTTP1.Encode (
   -- * Builders
   requestBuilder,
   responseBuilder,
+  responseBuilderWithoutFraming,
   headersBuilder,
+  responseAllowsContent,
+  ResponseFramingHint (..),
+  responseFramingHint,
+  prepareChunkedResponse,
+  checkKnownResponseLength,
 
   -- * Convenience top-level encoders
   encodeRequestHead,
@@ -50,20 +56,25 @@ module Network.HTTP1.Encode (
 import Control.Concurrent (forkIO, myThreadId, threadCapability, threadDelay)
 import Control.Monad (forM_, forever)
 import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Internal qualified as BSI
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Vector.Mutable qualified as MV
-import Data.Word (Word8)
+import Data.Word (Word8, Word64)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (pokeByteOff)
 import GHC.Conc (getNumCapabilities)
+import Network.HTTP.Headers qualified as Typed
 import Network.HTTP.Headers.Date qualified as HDate
 import Network.HTTP.Headers.Mason qualified as M
+import Network.HTTP.Headers.Trailer qualified as Trailer
+import Network.HTTP.Headers.TransferEncoding qualified as TransferEncoding
+import Network.HTTP1.Chunked (encodeChunk)
 import Network.HTTP1.Headers
 import Network.HTTP1.Internal.Ascii (asciiIeq)
 import Network.HTTP1.Method
+import Network.HTTP1.Parser (declaredContentLength)
 import Network.HTTP1.Status
 import Network.HTTP1.Types
 import System.IO.Unsafe (unsafePerformIO)
@@ -102,9 +113,86 @@ assembly the general path uses.
 -}
 responseBuilder :: Response -> B.Builder
 responseBuilder Response {responseStatus = s, responseVersion = v, responseHeaders = h, responseBody = b} =
+  responseHeadBuilder v s (augmentResponseHeaders s v h b)
+
+
+-- | Encode a response whose framing fields have already been selected.
+responseBuilderWithoutFraming :: Response -> B.Builder
+responseBuilderWithoutFraming Response {responseStatus = s, responseVersion = v, responseHeaders = h} =
+  responseHeadBuilder v s (addResponseDate (hHas "Date" h) h)
+
+
+responseHeadBuilder :: Version -> Status -> Headers -> B.Builder
+responseHeadBuilder v s fields =
   statusLineFor v s
-    <> headersBuilder (augmentResponseHeaders s v h b)
+    <> headersBuilder fields
     <> crlfB
+{-# INLINE responseHeadBuilder #-}
+
+
+-- | Whether this status can carry content. The request method can
+-- impose further restrictions.
+responseAllowsContent :: Status -> Bool
+responseAllowsContent status = (sc < 100 || sc >= 200) && sc /= 204 && sc /= 304
+  where
+    sc = statusCode status
+
+
+-- | The framing requested by the supplied fields. The body kind can
+-- supply framing when the application leaves it unspecified.
+data ResponseFramingHint = AutomaticFraming | FixedFraming | ChunkedFraming
+
+responseFramingHint :: Headers -> ResponseFramingHint
+responseFramingHint fields = scan True AutomaticFraming fields
+  where
+    scan _ hint [] = hint
+    scan checkTrailers hint ((name, _) : rest)
+      | headerNameIeq "Transfer-Encoding" name = ChunkedFraming
+      | headerNameIeq "Content-Length" name = scan checkTrailers FixedFraming rest
+      | checkTrailers && headerNameIeq "Trailer" name =
+          if announcesTrailers fields then ChunkedFraming else scan False hint rest
+      | otherwise = scan checkTrailers hint rest
+
+
+-- | Whether a response declares at least one trailer field.
+announcesTrailers :: Headers -> Bool
+announcesTrailers fields = case hLookupAll "Trailer" fields of
+  first : rest -> case Typed.parseFromHeaders Typed.defaultHeaderSettings (first :| rest) of
+    Right (Trailer.Trailer _) -> True
+    _ -> False
+  [] -> False
+
+
+-- | Prepare the head for a response whose body writer adds the final
+-- chunked coding. The returned body marker selects the appropriate
+-- framing in 'responseBuilder'.
+prepareChunkedResponse :: Response -> Either String Response
+prepareChunkedResponse r = do
+  fields <- chunkedResponseFields (responseHeaders r)
+  pure r {responseHeaders = fields, responseBody = BodyStream (pure Nothing)}
+
+
+chunkedResponseFields :: Headers -> Either String Headers
+chunkedResponseFields fields = case hLookupAll "Transfer-Encoding" fields of
+  [] -> Right withoutLength
+  first : rest -> do
+    coding <- Typed.parseFromHeaders Typed.defaultHeaderSettings (first :| rest)
+    if TransferEncoding.transferEncodingEndsInChunked coding
+      then Right withoutLength
+      else do
+        _ <- Typed.parseFromHeaders @TransferEncoding.TransferEncoding Typed.defaultHeaderSettings (first :| (rest <> ["chunked"]))
+        Right (withoutLength <> [("Transfer-Encoding", "chunked")])
+  where
+    withoutLength = filter (not . headerNameIeq "Content-Length" . fst) fields
+
+
+-- | Check a managed body of known size against any explicit length.
+checkKnownResponseLength :: Word64 -> Headers -> Either String ()
+checkKnownResponseLength size fields =
+  case declaredContentLength fields of
+    Left err -> Left (show err)
+    Right (Just n) | n /= size -> Left "response body does not match Content-Length"
+    Right _ -> Right ()
 
 
 {- | Pre-baked @\"HTTP\/X.Y <code> <reason>\\r\\n\"@ for the codes the
@@ -157,10 +245,9 @@ encodeResponseHead = B.toStrictByteString . responseBuilder
 -- Pre-encoding
 ------------------------------------------------------------------------
 
-{- | Encode a 'Response' down to wire bytes once and wrap them in a
-'BodyPreEncoded' marker, so the server's send path emits the bytes
-with a single @send()@ on every request and never touches the
-encoder again.
+{- | Encode the head and buffered content once. The server sends those
+bytes in one operation and evaluates any declared HTTP\/1.1 trailer
+callback after writing the cached content.
 
 This is the canonical idiom for static \/ semi-static responses
 (health checks, OPTIONS preflights, hello-world fixtures): build
@@ -181,15 +268,15 @@ staticOk = precomputeResponse $ Response
       , (\"Server\", \"my-app\")
       ]
   , responseBody = BodyBytes \"Hello, world!\\n\"
+  , responseTrailers = pure []
   }
 
 handler :: Handler
 handler _ = pure staticOk
 @
 
-'BodyStream' bodies are not precomputable (their size is unknown
-ahead of time) — passing one throws. Use 'precomputeResponseEither'
-if you want the error as a 'Left'.
+Use 'precomputeResponseEither' to receive an error for streaming and
+file bodies or invalid transfer codings.
 -}
 precomputeResponse :: Response -> Response
 precomputeResponse r = case precomputeResponseEither r of
@@ -197,26 +284,35 @@ precomputeResponse r = case precomputeResponseEither r of
   Left msg -> error ("precomputeResponse: " <> msg)
 
 
-{- | Pure-error variant of 'precomputeResponse'. Returns
-@Left \"streaming body cannot be precomputed\"@ for a 'BodyStream'
-input.
--}
+-- | Pure-error variant of 'precomputeResponse'.
 precomputeResponseEither :: Response -> Either String Response
 precomputeResponseEither r = case responseBody r of
   BodyStream _ ->
     Left "streaming body cannot be precomputed"
+  BodyFile _ ->
+    Left "file body cannot be precomputed"
   BodyPreEncoded _ ->
     Right r -- idempotent
-  body ->
-    let !headBs = encodeResponseHead r
-        !bodyBs = case body of
-          BodyEmpty -> BS.empty
-          BodyBytes bs -> bs
-          _ -> BS.empty -- exhaustive: stream + preencoded handled above
-        !combined = headBs <> bodyBs
-        !pe = PreEncoded combined (BS.length headBs)
-    in Right r {responseBody = BodyPreEncoded pe}
+  BodyEmpty -> precomputeBuffered BS.empty
+  BodyBytes bytes -> precomputeBuffered bytes
+  where
+    precomputeBuffered bytes
+      | responseVersion r == HTTP_1_1
+      , responseAllowsContent (responseStatus r)
+      , ChunkedFraming <- hint = do
+          prepared <- prepareChunkedResponse r
+          let !headBytes = encodeResponseHead prepared
+              !combined =
+                if BS.null bytes
+                  then headBytes
+                  else B.toStrictByteStringWith (BS.length headBytes + BS.length bytes + 20)
+                    (B.byteString headBytes <> encodeChunk bytes)
+          Right r {responseBody = BodyPreEncoded (PreEncodedWithTrailers combined (BS.length headBytes))}
+      | otherwise =
+          let !headBytes = encodeResponseHead r
+          in Right r {responseBody = BodyPreEncoded (PreEncoded (headBytes <> bytes) (BS.length headBytes))}
 
+    hint = responseFramingHint (responseHeaders r)
 
 ------------------------------------------------------------------------
 -- Header rendering
@@ -281,11 +377,11 @@ transfer-encoding, and date simultaneously (avoids the 3× O(n)
 scans the naive version would do).
 -}
 augmentResponseHeaders :: Status -> Version -> Headers -> Body -> Headers
-augmentResponseHeaders st ver hdrs body = withDate (framingAugmented)
+augmentResponseHeaders st ver hdrs body = addResponseDate hasDate framingAugmented
   where
     !(hasCL, hasTE, hasDate) = scanResponsePresence hdrs
     framingAugmented
-      | bodyForbidden = hdrs
+      | not (responseAllowsContent st) = hdrs
       | hasCL || hasTE = hdrs
       | otherwise = case body of
           BodyEmpty -> hdrs <> [("Content-Length", "0")]
@@ -297,14 +393,12 @@ augmentResponseHeaders st ver hdrs body = withDate (framingAugmented)
           BodyPreEncoded _ -> hdrs
           BodyFile fb ->
             hdrs <> [("Content-Length", decimalBS (toInteger (fbLength fb)))]
-    sc = statusCode st
-    bodyForbidden =
-      (sc >= 100 && sc < 200)
-        || sc == 204
-        || sc == 304
-    withDate hs
-      | hasDate = hs
-      | otherwise = ("Date", cachedHttpDate ()) : hs
+
+addResponseDate :: Bool -> Headers -> Headers
+addResponseDate hasDate hs
+  | hasDate = hs
+  | otherwise = ("Date", cachedHttpDate ()) : hs
+{-# INLINE addResponseDate #-}
 
 
 -- | Single-pass scan for content-length and transfer-encoding.

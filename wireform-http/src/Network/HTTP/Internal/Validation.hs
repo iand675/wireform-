@@ -1,3 +1,4 @@
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Field-name and field-value grammar from RFC 9110 \u00a75.1 \/ \u00a75.5.
@@ -55,17 +56,37 @@ module Network.HTTP.Internal.Validation (
 
   -- * Byte-dependent metadata
   isBodyDigestField,
+  equalShortBytes,
 ) where
 
 import Control.Exception (Exception)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Internal qualified as BSI
 import Data.CaseInsensitive (CI)
 import Data.CaseInsensitive qualified as CI
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.List (foldl')
 import Data.Word (Word8)
+import GHC.Exts (
+  Addr#,
+  Int (I#),
+  Int#,
+  eqAddr#,
+  eqWord16#,
+  eqWord32#,
+  eqWord64#,
+  eqWord8#,
+  indexWord8OffAddr#,
+  indexWord8OffAddrAsWord16#,
+  indexWord8OffAddrAsWord32#,
+  indexWord8OffAddrAsWord64#,
+  isTrue#,
+  (-#),
+ )
+import GHC.ForeignPtr (ForeignPtr (..), unsafeWithForeignPtr)
+import GHC.Ptr (Ptr (..))
 
 
 -- We avoid importing "Network.HTTP.Types.Header" so that header validation
@@ -89,6 +110,37 @@ isBodyDigestField name = case CI.foldedCase name of
   "digest" -> True
   _ -> False
 {-# INLINE isBodyDigestField #-}
+
+
+-- | Compare short fields using unaligned loads while their buffers are alive.
+equalShortBytes :: ByteString -> ByteString -> Bool
+equalShortBytes
+  left@(BSI.BS leftPtr@(ForeignPtr leftAddr _) size@(I# width))
+  right@(BSI.BS rightPtr@(ForeignPtr rightAddr _) rightSize)
+  | size /= rightSize = False
+  | isTrue# (eqAddr# leftAddr rightAddr) = True
+  | size > 16 = left == right
+  | otherwise = BSI.accursedUnutterablePerformIO $
+      unsafeWithForeignPtr leftPtr $ \(Ptr a) ->
+        unsafeWithForeignPtr rightPtr $ \(Ptr b) ->
+          pure $! equalWindow a b width
+{-# INLINE equalShortBytes #-}
+
+
+-- The first and last loads cover the window. They can overlap, but both
+-- are bounded by its length. The caller establishes the 16-byte maximum.
+equalWindow :: Addr# -> Addr# -> Int# -> Bool
+equalWindow a b width
+  | I# width >= 8 = same64 0# && same64 (width -# 8#)
+  | I# width >= 4 = same32 0# && same32 (width -# 4#)
+  | I# width >= 2 = same16 0# && same16 (width -# 2#)
+  | I# width == 1 = isTrue# (eqWord8# (indexWord8OffAddr# a 0#) (indexWord8OffAddr# b 0#))
+  | otherwise = True
+  where
+    same64 i = isTrue# (eqWord64# (indexWord8OffAddrAsWord64# a i) (indexWord8OffAddrAsWord64# b i))
+    same32 i = isTrue# (eqWord32# (indexWord8OffAddrAsWord32# a i) (indexWord8OffAddrAsWord32# b i))
+    same16 i = isTrue# (eqWord16# (indexWord8OffAddrAsWord16# a i) (indexWord8OffAddrAsWord16# b i))
+{-# INLINE equalWindow #-}
 
 
 -- | Errors raised by the validating smart constructors.

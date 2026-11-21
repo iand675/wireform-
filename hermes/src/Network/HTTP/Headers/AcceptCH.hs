@@ -16,9 +16,14 @@ module Network.HTTP.Headers.AcceptCH (
   AcceptCH (..),
   acceptCHParser,
   renderAcceptCH,
+  renderAcceptCHChecked,
 ) where
 
+import Data.ByteString.Internal (w2c)
+import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptCH)
 import qualified Network.HTTP.Headers.Mason as M
@@ -48,7 +53,10 @@ instance KnownHeader AcceptCH where
           _ -> pure hints
 
 
-  renderToHeaders _ = pure . M.toStrictByteString . renderAcceptCH
+  renderToHeaders _ (AcceptCH []) = [""]
+  renderToHeaders _ (AcceptCH hints@(first : rest))
+    | validHints hints = [R.encodeCommaSeparatedText (fmap unsafeToRFC8941Token (first :| rest))]
+    | otherwise = []
 
 
   headerName _ = hAcceptCH
@@ -66,5 +74,26 @@ hintList = ows *> rfc8941List hint <* ows
     hintName = lookahead (skipSatisfyAscii (\c -> isLatinLetter c || c == '*')) *> tokenBytes
 
 
+-- | Render the field value. An invalid hint name produces no bytes.
 renderAcceptCH :: AcceptCH -> M.Builder
-renderAcceptCH (AcceptCH hints) = M.intersperse ", " (map R.rfc8941Token hints)
+renderAcceptCH = either (const mempty) id . renderAcceptCHChecked
+
+
+-- | Require each hint to be both a Structured Fields Token and a field name.
+renderAcceptCHChecked :: AcceptCH -> Either String M.Builder
+renderAcceptCHChecked (AcceptCH hints)
+  | validHints hints = Right (R.renderSeparated ", " R.rfc8941Token hints)
+  | otherwise = Left "Invalid Accept-CH field name"
+
+
+validHints :: [RFC8941Token] -> Bool
+validHints = all validHint
+  where
+    validHint (RFC8941Token token) =
+      size > 0 && (isLatinLetter (at 0) || at 0 == '*') && go 1
+      where
+        bytes = ST.toShortByteString token
+        size = SBS.length bytes
+        at i = w2c (SBSI.unsafeIndex bytes i)
+        go i = i == size || (isTokenChar (at i) && go (i + 1))
+{-# INLINE validHints #-}

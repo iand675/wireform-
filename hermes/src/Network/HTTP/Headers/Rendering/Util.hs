@@ -1,26 +1,43 @@
 {- |
-Backwards-compatible re-export of the general HTTP wire-grammar
-renderers, plus the one header-/policy/-specific renderer that does not
-belong in the grammar substrate.
+Backwards-compatible re-export of the general HTTP wire-grammar renderers.
 
-The general RFC 8941 renderers now live in
-"Network.HTTP.Grammar.Rendering"; new code should import from there
-directly. What stays here is 'fitHeaderSplitsToCommas', which depends on
-'HeaderSettings' and 'HeaderFieldName' and is therefore genuinely
-header-level (it is about fitting a rendered value into framed header
-lines, not about the wire grammar of the value itself).
+The general RFC 8941 renderers live in "Network.HTTP.Grammar.Rendering".
+This module also fits rendered values into field lines and encodes the
+reporting parameter shared by the cross-origin policies.
 -}
 module Network.HTTP.Headers.Rendering.Util (
   module Network.HTTP.Grammar.Rendering,
   fitHeaderSplitsToCommas,
+  encodeReportingPolicyChecked,
 ) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import qualified Data.Text as T
+import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Parser (isStructuredFieldString)
 import Network.HTTP.Grammar.Rendering
+import Network.HTTP.Grammar.Types (RFC8941String (..))
 import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName, toText)
 import Network.HTTP.Headers.Settings (HeaderSettings, maxHeaderSize)
+import Wireform.Encode.Direct (dBytes)
+
+
+-- | Append the optional Structured Fields reporting endpoint to a policy token.
+encodeReportingPolicyChecked :: ByteString -> RFC8941String -> Maybe ByteString
+encodeReportingPolicyChecked token endpoint@(RFC8941String value)
+  | isStructuredFieldString endpoint = Just $ BSI.unsafeCreateUptoN capacity $ \ptr -> do
+      tokenEnd <- dBytes ptr 0 token
+      start <- dBytes ptr tokenEnd parameter
+      writeHttpQuotedBytes ptr start (ST.toShortByteString value)
+  | otherwise = Nothing
+  where
+    parameter = ";report-to="
+    width = SBS.length (ST.toShortByteString value)
+    add = BSI.checkedAdd "cross-origin reporting policy"
+    capacity = add (add (B.length token) (B.length parameter + 2)) (add width width)
 
 
 {- | Given maximum header size, a field name, and a field value, split the field value into a list of field values

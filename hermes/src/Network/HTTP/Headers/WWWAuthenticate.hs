@@ -69,6 +69,7 @@ module Network.HTTP.Headers.WWWAuthenticate (
   -- * Rendering
   renderWWWAuthenticate,
   renderAuthChallenge,
+  encodeAuthChallengesChecked,
 
   -- * Re-exports
   AuthScheme (..),
@@ -82,9 +83,12 @@ import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.Authorization (
   AuthScheme (..),
+  CredentialContents (..),
   CredentialParam (..),
+  Credentials (Credentials),
   authParamParser,
   authParamsUnique,
+  encodeCredentialEntriesChecked,
   renderAuthParam,
   token68Parser,
  )
@@ -148,6 +152,9 @@ instance KnownHeader WWWAuthenticate where
 
   renderToHeaders _ (WWWAuthenticate cs) =
     [M.toStrictByteString (renderWWWAuthenticate (WWWAuthenticate cs))]
+
+
+  renderToHeadersChecked _ = fmap pure . encodeAuthChallengesChecked . authChallenges
 
 
   headerName _ = hWWWAuthenticate
@@ -223,6 +230,16 @@ authParamList = do
 renderWWWAuthenticate :: WWWAuthenticate -> M.Builder
 renderWWWAuthenticate (WWWAuthenticate cs) =
   M.intersperse ", " (map renderAuthChallenge cs)
+
+
+encodeAuthChallengesChecked :: [AuthChallenge] -> Maybe ByteString
+encodeAuthChallengesChecked = encodeCredentialEntriesChecked asCredentials
+  where
+    asCredentials (AuthChallenge scheme contents) = Credentials scheme $ case contents of
+      ChallengeBare -> CredentialBare
+      ChallengeToken68 token -> CredentialToken token
+      ChallengeParams [] -> CredentialBare
+      ChallengeParams (first : rest) -> CredentialParams (first :| rest)
 
 
 renderAuthChallenge :: AuthChallenge -> M.Builder

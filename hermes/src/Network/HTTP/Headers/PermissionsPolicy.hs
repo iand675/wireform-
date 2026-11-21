@@ -17,6 +17,7 @@ module Network.HTTP.Headers.PermissionsPolicy (
   permissionsPolicyDeclarations,
   permissionsPolicyParser,
   renderPermissionsPolicy,
+  renderPermissionsPolicyChecked,
 ) where
 
 import qualified Data.CharSet as CS
@@ -94,7 +95,7 @@ instance KnownHeader PermissionsPolicy where
 
 
   renderToHeaders _ (PermissionsPolicyDictionary []) = []
-  renderToHeaders _ policy = [M.toStrictByteString (renderPermissionsPolicy policy)]
+  renderToHeaders _ policy = either (const []) (pure . M.toStrictByteString) (renderPermissionsPolicyChecked policy)
 
 
   omitHeaderValue = null . permissionsPolicyDictionary
@@ -108,8 +109,14 @@ permissionsPolicyParser :: ParserT st String PermissionsPolicy
 permissionsPolicyParser = PermissionsPolicyDictionary <$> (ows *> structuredFieldDictionary)
 
 
+-- | Render the field value. An invalid dictionary produces no bytes.
 renderPermissionsPolicy :: PermissionsPolicy -> M.Builder
-renderPermissionsPolicy = R.renderStructuredFieldDictionary . permissionsPolicyDictionary
+renderPermissionsPolicy = either (const mempty) id . renderPermissionsPolicyChecked
+
+
+-- | Validate and normalize the Structured Fields dictionary for emission.
+renderPermissionsPolicyChecked :: PermissionsPolicy -> Either String M.Builder
+renderPermissionsPolicyChecked = R.renderStructuredFieldDictionaryChecked . permissionsPolicyDictionary
 
 
 {- | Project the allowlist and a Token-valued @report-to@ parameter for
@@ -117,21 +124,25 @@ each feature. Feature recognition and origin matching depend on the
 recipient's environment.
 -}
 permissionsPolicyDeclarations :: PermissionsPolicy -> [PermissionsPolicyDeclaration]
-permissionsPolicyDeclarations = map declaration . permissionsPolicyDictionary
+permissionsPolicyDeclarations = map declaration . normalizedPolicyEntries
   where
     declaration (StructuredFieldDictionaryEntry feature member) =
       PermissionsPolicyDeclaration feature (projectAllowlist allowItem member) (reportTo (parameters member))
     parameters (StructuredItem (StructuredFieldItem _ params)) = params
     parameters (StructuredInnerList _ params) = params
-    reportTo [] = Nothing
-    reportTo (StructuredFieldParameter "report-to" value : _) = case value of
-      Token endpoint -> Just endpoint
-      _ -> Nothing
-    reportTo (_ : rest) = reportTo rest
+    reportTo = foldl' readParameter Nothing
+    readParameter _ (StructuredFieldParameter "report-to" (Token endpoint)) = Just endpoint
+    readParameter _ (StructuredFieldParameter "report-to" _) = Nothing
+    readParameter current _ = current
+
+
+normalizedPolicyEntries :: PermissionsPolicy -> [StructuredFieldDictionaryEntry]
+normalizedPolicyEntries = orderedFieldEntries structuredDictionaryKey . permissionsPolicyDictionary
+{-# INLINE normalizedPolicyEntries #-}
 
 
 legacyDirectives :: PermissionsPolicy -> [(ST.ShortText, [AllowListItem])]
-legacyDirectives = mapMaybe directive . permissionsPolicyDictionary
+legacyDirectives = mapMaybe directive . normalizedPolicyEntries
   where
     directive (StructuredFieldDictionaryEntry feature member) = fmap (\allowed -> (feature, allowed)) (projectAllowlist legacyItem member)
     legacyItem (Token (RFC8941Token "src")) = Just AllowSrc

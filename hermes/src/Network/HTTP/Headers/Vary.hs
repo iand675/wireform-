@@ -24,6 +24,7 @@ module Network.HTTP.Headers.Vary (
 import Data.Bifunctor (first)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Short as SBS
 import Data.Char (isAsciiUpper, toLower)
 import qualified Data.CharSet as CharSet
 import qualified Data.List.NonEmpty as NE
@@ -63,6 +64,15 @@ instance KnownHeader Vary where
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderVary
+
+
+  renderToHeadersChecked _ VaryEmpty = Just [""]
+  renderToHeadersChecked _ (Vary names)
+    | all validDirective names = Just [encodeCommaSeparatedBytes varyDirectiveBytes names]
+    | otherwise = Nothing
+    where
+      validDirective VaryAll = True
+      validDirective (VaryHeader name) = isHttpTokenBytes (headerNameToShortByteString name)
 
 
   headerName _ = hVary
@@ -107,7 +117,9 @@ varyDirectiveParser = commonDirective <|> (VaryHeader . unsafeUnknownHeaderFromB
 
 renderVary :: Vary -> M.Builder
 renderVary VaryEmpty = mempty
-renderVary (Vary names) = sepByCommas1 (fmap renderVaryDirective names)
-  where
-    renderVaryDirective VaryAll = "*"
-    renderVaryDirective (VaryHeader hdr) = M.shortByteString $ headerNameToShortByteString hdr
+renderVary (Vary names) = sepByCommas1 (fmap (M.shortByteString . varyDirectiveBytes) names)
+
+
+varyDirectiveBytes :: VaryDirective -> SBS.ShortByteString
+varyDirectiveBytes VaryAll = "*"
+varyDirectiveBytes (VaryHeader hdr) = headerNameToShortByteString hdr

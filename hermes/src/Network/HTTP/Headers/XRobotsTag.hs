@@ -33,16 +33,21 @@ module Network.HTTP.Headers.XRobotsTag (
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import qualified Data.CaseInsensitive as CI
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
+import Network.HTTP.ContentNegotiation (sameNegotiationToken)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXRobotsTag)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (copyText, shortText)
+import Wireform.Encode.Direct (dBytes)
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- | A single robots directive: a keyword, optionally with a token value.
@@ -106,6 +111,9 @@ instance KnownHeader XRobotsTag where
       renderRuleGroup (RobotsRuleGroup name rules) = M.toStrictByteString (renderGroup name rules)
 
 
+  renderToHeadersChecked _ = traverse encodeGroup . NE.toList . xRobotsRuleGroups
+
+
   headerName _ = hXRobotsTag
 
 
@@ -125,7 +133,7 @@ groupParser = do
       first kind = do
         value <- directiveValue kind
         unscoped (RobotsDirective spelling (Just value))
-  case directiveKind name of
+  case directiveKind spelling of
     RobotsFlag ->
       branch $(char ':')
         (RobotsRuleGroup (Just spelling) <$> httpList1 "X-Robots-Tag" directive)
@@ -137,25 +145,24 @@ groupParser = do
       rest <- withOption $(char ',') (const (httpList directive)) (pure [])
       pure (RobotsRuleGroup Nothing (first :| rest))
     directive = do
-      name <- rfc9110TokenBS
+      name <- rfc9110Token
       value <- case directiveKind name of
         RobotsFlag -> pure Nothing
         kind -> Just <$> (ows *> $(char ':') *> ows *> directiveValue kind)
-      pure (RobotsDirective (STU.fromByteStringUnsafe name) value)
+      pure (RobotsDirective name value)
 
 
 data DirectiveKind = RobotsFlag | RobotsToken | RobotsDate
 
 
-directiveKind :: ByteString -> DirectiveKind
-directiveKind input = case B.length input of
-  11 | input == "max-snippet" || folded == "max-snippet" -> RobotsToken
+directiveKind :: ST.ShortText -> DirectiveKind
+directiveKind name = case SBS.length (ST.toShortByteString name) of
+  11 | sameNegotiationToken name "max-snippet" -> RobotsToken
   17
-    | input == "unavailable_after" || folded == "unavailable_after" -> RobotsDate
-    | folded == "max-image-preview" || folded == "max-video-preview" -> RobotsToken
+    | sameNegotiationToken name "unavailable_after" -> RobotsDate
+    | sameNegotiationToken name "max-image-preview" || sameNegotiationToken name "max-video-preview" -> RobotsToken
   _ -> RobotsFlag
-  where
-    folded = CI.foldCase input
+{-# INLINE directiveKind #-}
 
 
 directiveValue :: DirectiveKind -> ParserT st String ST.ShortText
@@ -186,3 +193,49 @@ renderGroup mBot (first :| rest) =
       Just bot -> shortText bot <> ": "
     renderDirective (RobotsDirective name Nothing) = shortText name
     renderDirective (RobotsDirective name (Just v)) = shortText name <> ": " <> shortText v
+
+
+encodeGroup :: RobotsRuleGroup -> Maybe ByteString
+encodeGroup (RobotsRuleGroup bot (first :| rest))
+  | maybe True validBot bot = sizeRules prefixSize first rest
+  | otherwise = Nothing
+  where
+    add = BSI.checkedAdd "X-Robots-Tag"
+    width = SBS.length . ST.toShortByteString
+    prefixSize = maybe 0 (add 2 . width) bot
+    validBot name = isHttpTokenText name && case directiveKind name of
+      RobotsFlag -> True
+      _ -> False
+    sizeRules size (RobotsDirective name value) more
+      | isHttpTokenText name && validArgument (directiveKind name) value =
+          let end = add (add size (width name)) (maybe 0 (add 2 . width) value)
+          in case more of
+               [] -> Just $ BSI.unsafeCreateUptoN end $ \ptr -> do
+                 prefix <- case bot of
+                   Nothing -> pure 0
+                   Just crawler -> copyText ptr 0 crawler >>= \offset -> dBytes ptr offset ": "
+                 firstEnd <- writeRule ptr prefix first
+                 writeRest ptr firstEnd rest
+               next : moreRules -> sizeRules (add end 2) next moreRules
+      | otherwise = Nothing
+    validArgument RobotsFlag Nothing = True
+    validArgument RobotsToken (Just text) = isHttpTokenText text
+    validArgument RobotsDate (Just text) =
+      not (B.null wire) && not (owsByte (B.head wire) || owsByte (B.last wire))
+        && case parseByteString (directiveValue RobotsDate <* eof) wire of
+             Right _ -> True
+             Left _ -> False
+      where
+        wire = ST.toByteString text
+        owsByte byte = byte == 32 || byte == 9
+    validArgument _ _ = False
+    writeRule ptr offset (RobotsDirective name value) = do
+      end <- copyText ptr offset name
+      case value of
+        Nothing -> pure end
+        Just text -> dBytes ptr end ": " >>= \start -> copyText ptr start text
+    writeRest _ offset [] = pure offset
+    writeRest ptr offset (rule : more) = do
+      start <- dBytes ptr offset ", "
+      end <- writeRule ptr start rule
+      writeRest ptr end more

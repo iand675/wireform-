@@ -73,6 +73,9 @@ instance KnownHeader GetProfile where
   renderToHeaders _ = getProfileBytes
 
 
+  renderToHeadersChecked _ = renderOpaqueFieldChecked . getProfileBytes
+
+
   headerName _ = hGetProfile
 
 

@@ -74,7 +74,19 @@ instance KnownHeader Pragma where
 
   parseFromHeaders _ = parseFieldLine "Pragma" pragmaParser . combineFieldLines ", "
   renderToHeaders _ = pure . M.toStrictByteString . renderPragma
+  renderToHeadersChecked _ value
+    | all validPragmaDirective (pragmaDirectives value) = Just [M.toStrictByteString (renderPragma value)]
+    | otherwise = Nothing
   headerName _ = hPragma
+
+
+validPragmaDirective :: PragmaDirective -> Bool
+validPragmaDirective (PragmaDirective name value) =
+  isHttpTokenText name && case value of
+    Nothing -> True
+    Just (PragmaToken token) -> isHttpTokenText token
+    Just (PragmaQuoted (RFC8941String text)) -> isHttpQuotedText text
+{-# INLINE validPragmaDirective #-}
 
 
 pragmaParser :: ParserT st String Pragma

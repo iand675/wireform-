@@ -2,6 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE UnboxedSums #-}
+{-# LANGUAGE UnboxedTuples #-}
 
 {- | Response decoders.
 
@@ -30,9 +32,13 @@ module Network.HTTP.Client.Decoder (
   Alt (..),
 ) where
 
+import Data.Bits ((.|.))
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.ByteString.Unsafe qualified as BSU
 import Data.Functor.Alt (Alt (..))
 import Network.HTTP.Client.Media
+import Network.HTTP.Internal.Validation (equalShortBytes)
 import Network.HTTP.Types.Status (Status)
 import Network.HTTP.Types.Status qualified as S
 
@@ -76,19 +82,77 @@ as =
 
 
 {- | Decoder combinator. The first decoder's accept list is preferred;
-at response time, the decoder whose accept list matches the
-@Content-Type@ wins. Falls back to the second if neither matches
-(which generally indicates the server ignored our @Accept@).
+use it when one of its media ranges matches the response's
+@Content-Type@, including all parameters required by the range.
+Charset values are case-insensitive. Allow an omitted charset when
+the range expects UTF-8 for JSON or plain text, as used by the
+shipped decoders. Otherwise delegate to the second decoder.
 -}
 orDecoder :: ResponseDecoder a -> ResponseDecoder a -> ResponseDecoder a
 orDecoder a b =
   ResponseDecoder
     { acceptable = acceptable a <> acceptable b
-    , decodeBody = \status ct bs ->
-        if matchesAny ct (map fst (acceptable a))
+    , decodeBody = choose (acceptable a)
+    }
+  where
+    choose [(MediaType wantedType wantedSubtype [], _)]
+      | wantedType /= "*"
+      , wantedSubtype /= "*" =
+          \status ct@(MediaType actualType actualSubtype _) bs ->
+            if equalShortBytes actualType wantedType && equalShortBytes actualSubtype wantedSubtype
+              then decodeBody a status ct bs
+              else decodeBody b status ct bs
+    choose ranges =
+      \status ct bs ->
+        if any (matchesResponseRange ct . fst) ranges
           then decodeBody a status ct bs
           else decodeBody b status ct bs
-    }
+
+
+matchesResponseRange :: MediaType -> MediaType -> Bool
+matchesResponseRange actual@(MediaType base subtype supplied) range =
+  matches actual range && all matchesParam (mtParameters range)
+  where
+    matchesParam (name, expected) =
+      case lookupParameter name supplied of
+        (# value | #) | equalShortBytes expected value -> True
+        result ->
+          sameMediaToken name "charset" && case result of
+            (# value | #) -> foldedMediaTokenEqual expected value
+            (# | (# #) #) ->
+              sameMediaToken expected "utf-8"
+                && ((base == "application" && subtype == "json") || (base == "text" && subtype == "plain"))
+{-# INLINE matchesResponseRange #-}
+
+
+lookupParameter :: ByteString -> [(ByteString, ByteString)] -> (# ByteString | (# #) #)
+lookupParameter name = go
+  where
+    go [] = (# | (# #) #)
+    go ((key, value) : rest)
+      | sameMediaToken name key = (# value | #)
+      | otherwise = go rest
+{-# INLINE lookupParameter #-}
+
+
+sameMediaToken :: ByteString -> ByteString -> Bool
+sameMediaToken a b = equalShortBytes a b || foldedMediaTokenEqual a b
+{-# INLINE sameMediaToken #-}
+
+
+foldedMediaTokenEqual :: ByteString -> ByteString -> Bool
+foldedMediaTokenEqual a b = size == BS.length b && loop 0
+  where
+    size = BS.length a
+    loop i
+      | i == size = True
+      | x == y || (folded == (y .|. 32) && 97 <= folded && folded <= 122) = loop (i + 1)
+      | otherwise = False
+      where
+        x = BSU.unsafeIndex a i
+        y = BSU.unsafeIndex b i
+        folded = x .|. 32
+{-# INLINE foldedMediaTokenEqual #-}
 
 
 {- | Replace the body-decoder while keeping the same accept list. The

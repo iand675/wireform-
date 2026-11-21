@@ -25,7 +25,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hIfScheduleTagMatch)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.ScheduleTag (ScheduleTag (ScheduleTagBytes), renderScheduleTag, scheduleTagParser)
+import Network.HTTP.Headers.ScheduleTag (ScheduleTag (ScheduleTagBytes), encodeScheduleTagChecked, renderScheduleTag, scheduleTagParser)
 
 
 -- | An @If-Schedule-Tag-Match@ precondition carrying a single 'ScheduleTag'.
@@ -43,6 +43,9 @@ instance KnownHeader IfScheduleTagMatch where
 
 
   renderToHeaders _ = M.toStrictByteString . renderIfScheduleTagMatch
+
+
+  renderToHeadersChecked _ = encodeScheduleTagChecked . ifScheduleTagMatch
 
 
   headerName _ = hIfScheduleTagMatch

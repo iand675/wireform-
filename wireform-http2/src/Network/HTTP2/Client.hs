@@ -722,9 +722,10 @@ receiveContent handle sid inbox content frameBytes payload endStream = do
       when (paddingBytes > 0) $ do
         ackConnectionRecv handle paddingBytes
         when (not endStream) $ ackStreamRecv handle sid inbox paddingBytes
-      -- The receive ring can be reused as soon as this handler returns.
-      copied <- copyReceivedBytes payload
-      atomically $ writeTBQueue (siBody inbox) (BodyChunk copied)
+      when (contentBytes > 0) $ do
+        -- The receive ring can be reused as soon as this handler returns.
+        copied <- copyReceivedBytes payload
+        atomically $ writeTBQueue (siBody inbox) (BodyChunk copied)
       when endStream $ endResponse handle sid inbox []
     else do
       -- These bytes never reach a reader. Refund their connection credit.
@@ -1125,7 +1126,7 @@ registerAndSend timeoutUs handle req = do
         _ -> not endStreamOnHeaders
   case bodyKind of
     ReqBodyBytesWithTrailers _ trailers
-      | Just reason <- validateTrailerBlock flagEndStream (NE.toList trailers) ->
+      | Just reason <- validateOutboundTrailers (NE.toList trailers) ->
           throwIO (ClientRequestHeaderError reason)
     _ -> pure ()
   continueGate <- newContinueGate carriesContent (crMethod req) (requestHeadFields requestHead)
@@ -1276,7 +1277,7 @@ sendBodyStream conn inbox sid producer produceTrailers = loop
           trailers <- produceTrailers
           case trailers of
             [] -> sendDataFrame conn inbox sid True BS.empty
-            _ -> case validateTrailerBlock flagEndStream trailers of
+            _ -> case validateOutboundTrailers trailers of
               Just reason -> fail (BS8.unpack reason)
               Nothing -> sendRequestTrailers conn sid trailers
         Just bs

@@ -366,6 +366,113 @@ tests =
           lookupHeader @SI.SignatureInput (headerMapFromList [("Signature-Input", "a=()"), ("Signature-Input", "a=(\"@status\")")])
             `shouldSatisfy` isLeft
           parseAS "a=(), a=(\"@method\")" `shouldSatisfy` isLeft
+      , it "rejects authored signature labels that the typed reader would reject" $ do
+          let populated =
+                headerMapFromList
+                  [ ("Signature", "original=:YQ==:")
+                  , ("Signature-Input", "original=()")
+                  , ("Accept-Signature", "original=()")
+                  ]
+              empty = headerMapFromList []
+              signature = Sig.Signature . fmap (\label -> (label, "proof"))
+              input = SI.SignatureInput . fmap (\label -> SI.SignatureInputEntry label [] [])
+              request = AS.AcceptSignature . fmap (\label -> AS.AcceptSignatureEntry label [] [])
+              invalidLabels =
+                [ "same" :| ["same"]
+                , "same" :| ["other", "third", "same"]
+                , "valid" :| ["Uppercase"]
+                , "" :| []
+                , "two words" :| []
+                , "7start" :| []
+                , "café" :| []
+                ]
+              keepsFields write = do
+                write populated `shouldBe` populated
+                write empty `shouldBe` empty
+          mapM_
+            ( \labels -> do
+                keepsFields (setHeader (signature labels))
+                keepsFields (setHeader (input labels))
+                keepsFields (setHeader (request labels))
+                renderSig (signature labels) `shouldBe` ""
+                renderSI (input labels) `shouldBe` ""
+                renderAS (request labels) `shouldBe` ""
+            )
+            invalidLabels
+          let valid = "second" :| ["*.first", "a_1.b-2"]
+          lookupHeader @Sig.Signature (setHeader (signature valid) populated) `shouldBe` Right (Just (signature valid))
+          lookupHeader @SI.SignatureInput (setHeader (input valid) populated) `shouldBe` Right (Just (input valid))
+          lookupHeader @AS.AcceptSignature (setHeader (request valid) populated) `shouldBe` Right (Just (request valid))
+      , it "rejects invalid authored signature components and metadata as a whole" $ do
+          let existing =
+                headerMapFromList
+                  [ ("Signature-Input", "original=()")
+                  , ("Signature-Input", "second=()")
+                  , ("Accept-Signature", "original=()")
+                  , ("Accept-Signature", "second=()")
+                  ]
+              empty = headerMapFromList []
+              input components metadata =
+                SI.SignatureInput (SI.SignatureInputEntry "first" [] [] :| [SI.SignatureInputEntry "second" (map (\(name, parameters) -> SI.SignatureComponent (RFC8941String name) parameters) components) metadata])
+              request components metadata =
+                AS.AcceptSignature (AS.AcceptSignatureEntry "first" [] [] :| [AS.AcceptSignatureEntry "second" (map (\(name, parameters) -> AS.AcceptSignatureComponent (RFC8941String name) parameters) components) metadata])
+              text = String . RFC8941String
+              rejectInput components metadata = do
+                let value = input components metadata
+                setHeader value existing `shouldBe` existing
+                setHeader value empty `shouldBe` empty
+                renderSI value `shouldBe` ""
+              rejectRequest components metadata = do
+                let value = request components metadata
+                setHeader value existing `shouldBe` existing
+                setHeader value empty `shouldBe` empty
+                renderAS value `shouldBe` ""
+              check components = do
+                rejectInput components []
+                rejectRequest components []
+              checkMetadata metadata = do
+                rejectInput [] metadata
+                rejectRequest [] metadata
+              duplicate = [("date", [("a", Nothing), ("b", Just (Integer 2))]), ("date", [("b", Just (Integer 2)), ("a", Just (Boolean True))])]
+              distinct = map (\name -> (name, [])) ["a", "b", "c", "d", "e", "f", "g"]
+          mapM_
+            check
+            [ [("", [])]
+            , [("DATE", [])]
+            , [("dáte", [])]
+            , [("@", [])]
+            , [("@extension_1", [])]
+            , [("@signature-params", [])]
+            , [("@query-param", [("name", Just (text "page")), ("name", Just (Integer 1))])]
+            , [("@query-param", [])]
+            , [("@method", [("tr", Nothing)])]
+            , [("date", [("bs", Nothing), ("sf", Just (Boolean False))])]
+            , [("date", [("key", Just (text "Invalid"))])]
+            , [("date", [("ext", Just (text "bad\tvalue"))])]
+            , [("date", [("Upper", Nothing)])]
+            , duplicate
+            , distinct <> duplicate
+            ]
+          mapM_
+            checkMetadata
+            [ [("keyid", Just (Integer 1))]
+            , [("nonce", Just (text "bad\nvalue"))]
+            , [("extra", Just (DateValue 1_000_000_000_000_000))]
+            , [("Invalid", Nothing)]
+            ]
+          rejectInput [] [("created", Nothing)]
+          rejectInput [] [("expires", Just (Integer 1_000_000_000_000_000))]
+          rejectRequest [] [("created", Just (Integer 1))]
+          rejectRequest [] [("expires", Just (Boolean False))]
+          let components = [("@query-param", [("name", Just (Integer 1)), ("req", Just (Boolean True)), ("name", Just (text "page"))]), ("date", []), ("date", [("req", Nothing)])]
+              params = [("tag", Just (Integer 1)), ("tag", Just (text "demo"))]
+              authoredInput = input components (params <> [("created", Just (Integer 123))])
+              authoredRequest = request components (params <> [("created", Nothing)])
+              expected = "first=(), second=(\"@query-param\";name=\"page\";req \"date\" \"date\";req);tag=\"demo\";created"
+          renderSI authoredInput `shouldBe` expected <> "=123"
+          renderAS authoredRequest `shouldBe` expected
+          lookupHeader @SI.SignatureInput (setHeader authoredInput existing) `shouldBe` fmap Just (parseSI (expected <> "=123"))
+          lookupHeader @AS.AcceptSignature (setHeader authoredRequest existing) `shouldBe` fmap Just (parseAS expected)
       , it "uses inner-list whitespace and String rules for both fields" $ do
           let wire = "s=(  \"@method\"   \"example\";extension=\"escaped\\\"value\"  )"
               canonical = "s=(\"@method\" \"example\";extension=\"escaped\\\"value\")"

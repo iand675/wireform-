@@ -10,7 +10,7 @@ import qualified Data.List.NonEmpty as NE
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import qualified Network.HTTP.Headers.Range as R
@@ -120,6 +120,56 @@ unit_extension = it "retains extension units and accepts only visible bytes with
   filter parses [minBound .. maxBound] `shouldBe` visible
 
 
+unit_resolve :: Spec
+unit_resolve = it "resolves typed field members against the current byte length" $ do
+  let fields = headerMapFromList [("Range", "bytes=8-20,4-,11-,-3,-30,-0")]
+  case lookupHeader @R.Range fields of
+    Right (Just (R.ByteRanges ranges)) ->
+      map (R.resolveByteRange 10) (NE.toList ranges)
+        `shouldBe` [ Just (R.ResolvedByteRange 8 2)
+                   , Just (R.ResolvedByteRange 4 6)
+                   , Nothing
+                   , Just (R.ResolvedByteRange 7 3)
+                   , Just (R.ResolvedByteRange 0 10)
+                   , Nothing
+                   ]
+    other -> expectationFailure (show other)
+
+
+unit_resolve_limits :: Spec
+unit_resolve_limits = it "checks empty, reversed, and maximum-length ranges before subtracting" $ do
+  let largest = maxBound
+  R.resolveByteRange largest (R.ByteRangeInt 0 (Just largest)) `shouldBe` Just (R.ResolvedByteRange 0 largest)
+  R.resolveByteRange largest (R.ByteRangeInt (largest - 1) Nothing) `shouldBe` Just (R.ResolvedByteRange (largest - 1) 1)
+  R.resolveByteRange largest (R.ByteRangeInt largest Nothing) `shouldBe` Nothing
+  R.resolveByteRange 10 (R.ByteRangeInt 5 (Just 4)) `shouldBe` Nothing
+  R.resolveByteRange 0 (R.ByteRangeInt 0 Nothing) `shouldBe` Nothing
+  R.resolveByteRange 0 (R.ByteRangeSuffix 0) `shouldBe` Nothing
+  R.resolveByteRange 0 (R.ByteRangeSuffix largest) `shouldBe` Just (R.ResolvedByteRange 0 0)
+
+
+unit_range_checked_write :: Spec
+unit_range_checked_write = it "rejects invalid typed Range writes without replacing existing lines" $ do
+  let fields = headerMapFromList [("Range", "bytes=0-1")]
+      extension unit entry = R.OtherRanges unit (R.RawRange entry :| [])
+      invalid =
+        [ R.ByteRanges (R.ByteRangeInt 0 (Just 1) :| [R.ByteRangeInt 8 (Just 7)])
+        , extension "ByTeS" "opaque"
+        , extension "two words" "opaque"
+        , extension "rows" ""
+        , extension "rows" "first,second"
+        , extension "rows" "first second"
+        ]
+  mapM_
+    ( \value -> do
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value fields `shouldBe` fields
+    )
+    invalid
+  let valid = extension "rows" "0-3"
+  lookupHeader @R.Range (setHeader valid fields) `shouldBe` Right (Just valid)
+
+
 -- ---------------------------------------------------------------------------
 -- Property: bytes ranges round-trip
 -- ---------------------------------------------------------------------------
@@ -158,5 +208,8 @@ tests =
       , unit_typed_lookup
       , unit_range_bounds
       , unit_extension
+      , unit_resolve
+      , unit_resolve_limits
+      , unit_range_checked_write
       , it "round-trip" prop_roundtrip
       ]

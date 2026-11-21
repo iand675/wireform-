@@ -56,6 +56,12 @@ instance KnownHeader Connection where
   renderToHeaders _ (Connection opts) = encodeCommaSeparatedText opts
 
 
+  renderToHeadersChecked _ ConnectionEmpty = Just ""
+  renderToHeadersChecked _ (Connection opts)
+    | all isHttpTokenText opts = Just (encodeCommaSeparatedText opts)
+    | otherwise = Nothing
+
+
   headerName _ = hConnection
 
 

@@ -23,7 +23,7 @@ module Network.HTTP.Headers.ContentBase (
 ) where
 
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (absoluteURI)
+import Network.HTTP.Grammar.URIReference (absoluteURI, checkedURIField, outboundAbsoluteURIBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentBase)
 import qualified Network.HTTP.Headers.Mason as M
@@ -46,6 +46,9 @@ instance KnownHeader ContentBase where
 
 
   renderToHeaders _ = ST.toByteString . contentBaseUri
+
+
+  renderToHeadersChecked _ = checkedURIField outboundAbsoluteURIBytes . ST.toByteString . contentBaseUri
 
 
   headerName _ = hContentBase

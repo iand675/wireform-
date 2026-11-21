@@ -59,6 +59,13 @@ instance KnownHeader SecWebSocketVersion where
   renderToHeaders _ = M.toStrictByteString . renderSecWebSocketVersion
 
 
+  renderToHeadersChecked _ (SecWebSocketVersion (13 NE.:| [])) = Just "13"
+  renderToHeadersChecked settings value@(SecWebSocketVersion (first NE.:| rest))
+    | not (null rest) && headerMessage settings == Just HeaderRequest = Nothing
+    | first <= 255 && all (<= 255) rest = Just (renderToHeaders settings value)
+    | otherwise = Nothing
+
+
   headerName _ = hSecWebSocketVersion
 
 

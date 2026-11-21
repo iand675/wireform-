@@ -20,7 +20,7 @@ import qualified Network.HTTP.Headers.AccessControlExposeHeaders as EH
 import qualified Network.HTTP.Headers.AccessControlMaxAge as MA
 import qualified Network.HTTP.Headers.AccessControlRequestHeaders as RH
 import qualified Network.HTTP.Headers.AccessControlRequestMethod as RM
-import Network.HTTP.Headers.HeaderFieldName (hAccessControlRequestMethod, hOrigin)
+import Network.HTTP.Headers.HeaderFieldName (hAccessControlRequestMethod, hOrigin, headerNameFromShortByteString)
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.Origin as Origin
 import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
@@ -169,6 +169,91 @@ unit_origin_lists = it "preserves the RFC 6454 origin list while CORS accepts a 
     `shouldSatisfy` isLeft
 
 
+unit_fetch_origin_syntax :: Spec
+unit_fetch_origin_syntax = it "accepts browser-serialized origin spellings and retains the request bytes" $ do
+  let allow wire = lookupHeader @AO.AccessControlAllowOrigin (headerMapFromList [("Access-Control-Allow-Origin", wire)])
+  mapM_
+    ( \wire -> do
+        fmap Origin.corsRequestOriginBytes (Origin.parseCorsRequestOrigin wire) `shouldBe` Right wire
+        allow wire `shouldSatisfy` either (const False) (maybe False (const True))
+    )
+    [ "null"
+    , "https://192.0.2.1"
+    , "web+app://example-2.test:00042"
+    , "https://[2001:db8::1]:65535"
+    , "https://[2001:db8:0:0:0:0:0:1]"
+    , "https://[::]"
+    , "null://host"
+    , "https://example.test."
+    , "https://foo_bar.test"
+    , "https://a\"b.test"
+    , "https://a\x60\&b.test"
+    , "https://a{b}.test"
+    , "https://xn--bcher-kva.example"
+    ]
+  mapM_
+    ( \wire -> do
+        Origin.parseCorsRequestOrigin wire `shouldSatisfy` isLeft
+        allow wire `shouldSatisfy` isLeft
+    )
+    [ "https://"
+    , "https://user@example.test"
+    , "https://example.test/path"
+    , "https://example.test?query"
+    , "https://example.test#fragment"
+    , "https://example.test:65536"
+    , "https://a|b.test"
+    , "https://a b.test"
+    , "https://[2001:db8:bad::broken]"
+    ]
+  Origin.parseCorsRequestOrigin "*" `shouldSatisfy` isLeft
+  Origin.parseCorsRequestOrigin "null " `shouldSatisfy` isLeft
+  Origin.parseCorsRequestOrigin "https://example.test https://other.test" `shouldSatisfy` isLeft
+  let browserWire = "https://a{b}.test"
+      browserOrigin = AO.AllowOrigin "https" "a{b}.test" Nothing
+  allow browserWire `shouldBe` Right (Just browserOrigin)
+  headerMapToList (setHeader browserOrigin (headerMapFromList []))
+    `shouldBe` [("access-control-allow-origin", browserWire)]
+  let request = Origin.OriginHeader (Origin.Origin "https" "a{b}.test" Nothing)
+  lookupHeader @Origin.Origin (headerMapFromList [("Origin", browserWire)]) `shouldBe` Right (Just request)
+  headerMapToList (setHeader request (headerMapFromList [])) `shouldBe` [("origin", browserWire)]
+  lookupHeader @Origin.Origin (headerMapFromList [("Origin", "https://[2001:DB8::1]")])
+    `shouldBe` Right (Just (Origin.OriginHeader (Origin.Origin "https" "[2001:DB8::1]" Nothing)))
+
+
+unit_cors_response_check :: Spec
+unit_cors_response_check = it "checks response syntax and matches the serialized origin byte for byte" $ do
+  let check request mode fields = fmap (\parsed -> AO.corsCheck mode parsed (headerMapFromList fields)) (Origin.parseCorsRequestOrigin request)
+      origin = "https://[2001:db8::1]:8443"
+      allow wire = ("Access-Control-Allow-Origin", wire)
+      credentials wire = ("Access-Control-Allow-Credentials", wire)
+      response = [allow origin, credentials "\t true "]
+  map (\mode -> check origin mode response) [Cred.CorsOmit, Cred.CorsSameOrigin, Cred.CorsInclude]
+    `shouldBe` [Right True, Right True, Right True]
+  check origin Cred.CorsInclude [allow ("\t " <> origin <> " "), credentials "true"] `shouldBe` Right True
+  check origin Cred.CorsSameOrigin [allow " *\t", credentials "False"] `shouldBe` Right True
+  check origin Cred.CorsInclude [allow "*", credentials "true"] `shouldBe` Right False
+  check "null" Cred.CorsInclude [allow "null", credentials "true"] `shouldBe` Right True
+  check "null" Cred.CorsOmit [] `shouldBe` Right False
+  mapM_
+    (\wire -> check origin Cred.CorsOmit [allow wire] `shouldBe` Right False)
+    [ "https://[2001:db8::1]:08443"
+    , "https://[2001:db8:0:0:0:0:0:1]:8443"
+    , "https://[2001:DB8::1]:8443"
+    , origin <> ", " <> origin
+    , origin <> "\r"
+    ]
+  check "https://example.test" Cred.CorsOmit [allow "https://example.test:443"] `shouldBe` Right False
+  check "https://example.test." Cred.CorsOmit [allow "https://example.test"] `shouldBe` Right False
+  check "https://a\"b.test" Cred.CorsOmit [allow "https://a\"b.test"] `shouldBe` Right True
+  check origin Cred.CorsOmit [allow "*", allow origin] `shouldBe` Right False
+  check origin Cred.CorsInclude [allow origin, credentials "true", credentials "true"] `shouldBe` Right False
+  check origin Cred.CorsInclude [allow origin] `shouldBe` Right False
+  mapM_
+    (\wire -> check origin Cred.CorsInclude [allow origin, credentials wire] `shouldBe` Right False)
+    ["True", "true, true", "false", "true\r"]
+
+
 -- Access-Control-Allow-Credentials -----------------------------------------
 
 unit_credentials :: Spec
@@ -307,6 +392,80 @@ unit_cors_method_value = it "projects and authors the shared case-sensitive HTTP
   RM.requestMethodAsMethod (RM.AccessControlRequestMethod "") `shouldBe` Left HTTP.MethodEmpty
 
 
+unit_invalid_request_method :: Spec
+unit_invalid_request_method = it "rejects malformed authored Access-Control-Request-Method tokens" $ do
+  let original = headerMapFromList [("Access-Control-Request-Method", "PATCH"), ("Access-Control-Request-Method", "GET")]
+  mapM_
+    ( \method -> do
+        let value = RM.AccessControlRequestMethod method
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value original `shouldBe` original
+    )
+    ["", "two words", "GET,PATCH", "GÉT"]
+
+
+unit_invalid_request_headers :: Spec
+unit_invalid_request_headers = it "rejects malformed authored Access-Control-Request-Headers names" $ do
+  let original = headerMapFromList [("Access-Control-Request-Headers", "authorization"), ("Access-Control-Request-Headers", "x-probe")]
+  mapM_
+    ( \name -> do
+        let value = RH.RequestHeaders ("authorization" :| [name])
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value original `shouldBe` original
+    )
+    ["", "two words", "x-probe,x-other", "x-café"]
+  renderHeaderLines defaultHeaderSettings RH.RequestHeadersWildcard `shouldBe` Just ("*" :| [])
+
+
+unit_cors_allow_list_matching :: Spec
+unit_cors_allow_list_matching = it "matches parsed request methods and names under each credentials mode" $ do
+  let fields =
+        headerMapFromList
+          [ ("Access-Control-Request-Method", "PATCH")
+          , ("Access-Control-Allow-Methods", "GET, patch")
+          , ("Access-Control-Allow-Methods", "*")
+          , ("Access-Control-Request-Headers", "AUTHORIZATION, x-request-id, x-other")
+          , ("Access-Control-Allow-Headers", "X-Request-ID")
+          , ("Access-Control-Allow-Headers", "*")
+          ]
+  case (lookupHeader fields, lookupHeader fields, lookupHeader fields, lookupHeader fields) of
+    (Right (Just method), Right (Just methods), Right (Just (RH.RequestHeaders names)), Right (Just allowed)) -> do
+      map (\mode -> AM.allowMethodsMatches mode method methods) modes `shouldBe` [True, True, False]
+      AM.allowMethodsMatches Cred.CorsInclude (RM.AccessControlRequestMethod "patch") methods `shouldBe` True
+      AM.allowMethodsMatches Cred.CorsInclude (RM.AccessControlRequestMethod "*") methods `shouldBe` True
+      map (\mode -> fmap (\name -> AH.allowHeadersMatches mode name allowed) names) modes
+        `shouldBe` [(False :| [True, True]), (False :| [True, True]), (False :| [True, False])]
+    other -> expectationFailure (show other)
+  AM.allowMethodsMatches Cred.CorsOmit (RM.AccessControlRequestMethod "GET") AM.AllowMethodsEmpty `shouldBe` False
+  AM.allowMethodsMatches Cred.CorsSameOrigin (RM.AccessControlRequestMethod "PATCH") AM.AllowMethodsWildcard `shouldBe` True
+  AM.allowMethodsMatches Cred.CorsInclude (RM.AccessControlRequestMethod "*") AM.AllowMethodsWildcard `shouldBe` True
+  AH.allowHeadersMatches Cred.CorsOmit "authorization" AH.AllowHeadersWildcard `shouldBe` False
+  AH.allowHeadersMatches Cred.CorsInclude "AUTHORIZATION" (AH.AllowHeaders ("Authorization" :| ["*"])) `shouldBe` True
+  AH.allowHeadersMatches Cred.CorsInclude "*" AH.AllowHeadersWildcard `shouldBe` True
+  AH.allowHeadersMatches Cred.CorsOmit "x-other" AH.AllowHeadersEmpty `shouldBe` False
+  where
+    modes = [Cred.CorsOmit, Cred.CorsSameOrigin, Cred.CorsInclude]
+
+
+unit_cors_exposed_response_names :: Spec
+unit_cors_exposed_response_names = it "applies the response safelist, cookie exclusions, and wildcard rules" $ do
+  let fields = headerMapFromList [("Access-Control-Expose-Headers", "X-Trace, Set-Cookie2"), ("Access-Control-Expose-Headers", "*")]
+  case lookupHeader fields of
+    Right exposed@(Just _) -> do
+      let names = ["Content-Type", "X-Trace", "X-Other", "*", "Set-Cookie", "Set-Cookie2"]
+          visible mode = map (\name -> EH.exposesResponseHeader mode name exposed) names
+      visible Cred.CorsOmit `shouldBe` [True, True, True, True, False, False]
+      visible Cred.CorsSameOrigin `shouldBe` [True, True, True, True, False, False]
+      visible Cred.CorsInclude `shouldBe` [True, True, False, True, False, False]
+    other -> expectationFailure (show other)
+  let safelisted = ["Cache-Control", "Content-Language", "Content-Length", "Content-Type", "Expires", "Last-Modified", "Pragma"]
+      exposed mode name = EH.exposesResponseHeader mode name (Just EH.ExposeHeadersWildcard)
+  all (\name -> EH.exposesResponseHeader Cred.CorsInclude name Nothing) safelisted `shouldBe` True
+  EH.exposesResponseHeader Cred.CorsOmit "x-other" (Just EH.ExposeHeadersEmpty) `shouldBe` False
+  exposed Cred.CorsInclude "*" `shouldBe` True
+  exposed Cred.CorsOmit (headerNameFromShortByteString "SET-COOKIE") `shouldBe` False
+
+
 unit_cors_short_max_age :: Spec
 unit_cors_short_max_age = it "agrees across short, padded, and overflowed max-age field values" $ do
   let decode wire = lookupHeader @MA.AccessControlMaxAge (headerMapFromList [("Access-Control-Max-Age", wire)])
@@ -321,6 +480,56 @@ unit_cors_short_max_age = it "agrees across short, padded, and overflowed max-ag
   mapM_ (\wire -> decode wire `shouldSatisfy` isLeft) ["1 2", "-1", "1\255", "1,2", overflow <> "x"]
 
 
+unit_cors_checked_response_lists :: Spec
+unit_cors_checked_response_lists = do
+  it "checks authored Access-Control-Allow-Methods entries" $ do
+    let fields = headerMapFromList [("Access-Control-Allow-Methods", "GET"), ("Access-Control-Allow-Methods", "PATCH")]
+    mapM_ (\entry -> do
+      let value = AM.AllowMethods ("GET" :| [entry])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields) ["", "DELETE, PATCH", "GET METHOD", "X-\xff"]
+    renderHeaderLines defaultHeaderSettings AM.AllowMethodsEmpty `shouldBe` Just ("" :| [])
+    renderHeaderLines defaultHeaderSettings (AM.AllowMethods ("patch" :| ["*"])) `shouldBe` Just ("patch, *" :| [])
+  it "checks authored Access-Control-Allow-Headers entries" $ do
+    let fields = headerMapFromList [("Access-Control-Allow-Headers", "Content-Type"), ("Access-Control-Allow-Headers", "Authorization")]
+    mapM_ (\entry -> do
+      let value = AH.AllowHeaders ("Content-Type" :| [entry])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields) ["", "a:b", "A, B", "X-\xff"]
+    renderHeaderLines defaultHeaderSettings AH.AllowHeadersWildcard `shouldBe` Just ("*" :| [])
+    renderHeaderLines defaultHeaderSettings (AH.AllowHeaders ("*" :| ["Authorization"])) `shouldBe` Just ("*, Authorization" :| [])
+  it "checks authored Access-Control-Expose-Headers entries" $ do
+    let fields = headerMapFromList [("Access-Control-Expose-Headers", "X-Trace"), ("Access-Control-Expose-Headers", "Content-Length")]
+    mapM_ (\entry -> do
+      let value = EH.ExposeHeaders ("X-Trace" :| [entry])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields) ["", "a:b", "A, B", "X-\xff"]
+    renderHeaderLines defaultHeaderSettings EH.ExposeHeadersWildcard `shouldBe` Just ("*" :| [])
+    renderHeaderLines defaultHeaderSettings (EH.ExposeHeaders ("X-Trace" :| ["x!result"])) `shouldBe` Just ("X-Trace, x!result" :| [])
+
+
+checkedOriginWrites :: Spec
+checkedOriginWrites = do
+  let candidates = [("1https","example.test"), ("https+",""), ("https","example.test/path"), ("https","user@host"), ("https","[:::1]"), ("https","%ZZ"), ("https","a b")]
+  it "checks authored Access-Control-Allow-Origin components" $ do
+    let fields = headerMapFromList [("Access-Control-Allow-Origin", "https://old.test")]
+    mapM_ (\(scheme, host) -> do
+      let value = AO.AllowOrigin scheme host Nothing
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields) candidates
+    let allowed = AO.AllowOrigin "http" "te\"s,t\x60{}.test" (Just 65535)
+    renderHeaderLines defaultHeaderSettings allowed `shouldBe` Just ("http://te\"s,t\x60{}.test:65535" :| [])
+  it "checks every authored member of an Origin list" $ do
+    let fields = headerMapFromList [("Origin", "https://old.test")]
+        good = SerializedOrigin "https" "example.test" Nothing
+    mapM_ (\(scheme, host) -> do
+      let value = Origin.OriginHeader (Origin.OriginList good (SerializedOrigin scheme host Nothing :| []))
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields) candidates
+    let allowed = Origin.OriginHeader (Origin.OriginList good (SerializedOrigin "custom+9" "[::1]" (Just 0) :| []))
+    renderHeaderLines defaultHeaderSettings allowed `shouldBe` Just ("https://example.test custom+9://[::1]:0" :| [])
+
+
 tests :: Spec
 tests =
   describe "Cors" $
@@ -329,7 +538,11 @@ tests =
       , unit_origin_render
       , unit_origin_authority
       , unit_origin_lists
+      , unit_fetch_origin_syntax
+      , unit_cors_response_check
       , unit_credentials
+      , unit_cors_checked_response_lists
+      , checkedOriginWrites
       , unit_allow_headers
       , unit_allow_methods
       , unit_expose_headers
@@ -339,6 +552,10 @@ tests =
       , unit_cors_lists
       , unit_cors_singletons
       , unit_cors_method_value
+      , unit_invalid_request_method
+      , unit_invalid_request_headers
+      , unit_cors_allow_list_matching
+      , unit_cors_exposed_response_names
       , unit_cors_short_max_age
       , it "Access-Control-Allow-Origin round-trip" $
           roundtripProp genAllowOrigin AO.renderAccessControlAllowOrigin AO.accessControlAllowOriginParser

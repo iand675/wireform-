@@ -24,6 +24,7 @@ module Network.HTTP2.Connection
   , encodeAndSendHeaderBlock
   , headerBlockFrames
   , validateTrailerBlock
+  , validateOutboundTrailers
   , RequestHead (..)
   , parseRequestHead
   , validateRequestHead
@@ -74,6 +75,7 @@ import Network.HTTP.Grammar.Authority (hostAndPortBytes, uriSchemeBytes)
 import Network.IPAddress (IPAddress (..), ipLiteralParser)
 import Network.HTTP.Grammar.Parser (boundedDecimalWord64, withShortDecimal)
 import Network.HTTP.Headers.Expect (hasContinueExpectation)
+import Network.HTTP.Headers.Trailer (isForbiddenTrailerName)
 import System.Timeout (timeout)
 
 import qualified Wireform.Transport as WT
@@ -101,6 +103,14 @@ validateTrailerBlock :: FrameFlags -> [Header] -> Maybe ByteString
 validateTrailerBlock flags
   | not (testFlag flags flagEndStream) = const (Just "trailers without END_STREAM")
   | otherwise = validateFieldLines TrailerFields
+
+-- | Validate fields before sending a terminating HEADERS block.
+validateOutboundTrailers :: [Header] -> Maybe ByteString
+validateOutboundTrailers [] = Nothing
+validateOutboundTrailers ((name, value) : rest)
+  | Just reason <- validateFieldLine TrailerFields name value = Just reason
+  | isForbiddenTrailerName name = Just "forbidden trailer field"
+  | otherwise = validateOutboundTrailers rest
 
 -- | Validate the fields after a response's leading :status.
 validateResponseFields :: [Header] -> Maybe ByteString

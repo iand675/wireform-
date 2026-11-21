@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
@@ -32,9 +33,11 @@ module Network.HTTP.Headers.ODataMaxVersion (
 ) where
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Short as SBS
 import Data.List.NonEmpty (NonEmpty (..))
+import Network.HTTP.Grammar.Rendering (encodeDecimalVersion)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.HeaderFieldName (hODataMaxVersion)
+import Network.HTTP.Headers.HeaderFieldName (hODataMaxVersion, headerNameToShortByteString)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 
@@ -77,6 +80,24 @@ instance KnownHeader ODataMaxVersion where
   renderToHeaders _ value = M.toStrictByteString (renderODataMaxVersion value)
 
 
+  renderToHeadersChecked settings value
+    | zeros >= 0
+    , limit >= fixedBytes
+    , zeros <= limit - fixedBytes =
+        Just $ case value of
+          ODataMaxVersion 4 0 -> "4.0"
+          ODataMaxVersionWithLeadingZeros 4 1 1 -> "4.01"
+          _ -> encodeDecimalVersion zeros major minor
+    | otherwise = Nothing
+    where
+      zeros = oDataMaxVersionLeadingZeros value
+      major = oDataMaxVersionMajor value
+      minor = oDataMaxVersionMinor value
+      limit = maxHeaderSize settings
+      -- Field name, colon, decimal components, and their dot.
+      fixedBytes = SBS.length (headerNameToShortByteString hODataMaxVersion) + 2 + decimalDigits major + decimalDigits minor
+
+
   headerName _ = hODataMaxVersion
 
 
@@ -90,9 +111,12 @@ oDataMaxVersionParser = do
       if zeros == 0
         then ODataMaxVersion major minor
         else ODataMaxVersionWithLeadingZeros major minor zeros
+
+
+decimalDigits :: Word -> Int
+decimalDigits = go 1
   where
-    decimalDigits = go 1
-    go digits n
+    go !digits n
       | n < 10 = digits
       | otherwise = go (digits + 1) (n `quot` 10)
 

@@ -20,7 +20,7 @@ module Network.HTTP.Headers.LockToken (
 ) where
 
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (codedURL)
+import Network.HTTP.Grammar.URIReference (codedURL, outboundAbsoluteURIBytes, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hLockToken)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,6 +43,11 @@ instance KnownHeader LockToken where
 
 
   renderToHeaders _ = M.toStrictByteString . renderLockToken
+
+
+  renderToHeadersChecked settings value@(LockToken uri)
+    | validURIText outboundAbsoluteURIBytes uri = Just (renderToHeaders settings value)
+    | otherwise = Nothing
 
 
   headerName _ = hLockToken

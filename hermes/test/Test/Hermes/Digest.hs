@@ -11,12 +11,12 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.ContentDigest as CD
 import qualified Network.HTTP.Headers.ContentMD5 as MD5
 import qualified Network.HTTP.Headers.Digest as DG
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.Parsing.Util (ItemValue (..), Result (..), runParser)
+import Network.HTTP.Headers.Parsing.Util (ItemValue (..), RFC8941String (..), Result (..), runParser)
 import qualified Network.HTTP.Headers.ReprDigest as RD
 import qualified Network.HTTP.Headers.WantContentDigest as WCD
 import qualified Network.HTTP.Headers.WantDigest as WD
@@ -259,9 +259,37 @@ dictionaryCases = describe "RFC 9530 dictionaries" $ do
     setHeader invalidRepr fields `shouldBe` fields
     headerMapToList (setHeader WCD.WantContentDigestEmpty fields) `shouldBe` [("want-repr-digest", "sha-256=2")]
     headerMapToList (setHeader WRD.WantReprDigestEmpty fields) `shouldBe` [("want-content-digest", "sha-256=2")]
+  it "keeps existing fields when an authored digest dictionary is invalid" $ do
+    let fields =
+          headerMapFromList
+            [ ("Content-Digest", "sha-256=:AAAA:")
+            , ("Repr-Digest", "sha-256=:AAAA:")
+            , ("Want-Content-Digest", "sha-256=2")
+            , ("Want-Repr-Digest", "sha-256=2")
+            ]
+        check algorithm parameters = do
+          let cd = CD.ContentDigest (CD.ContentDigestEntry "sha-256" "\x00" [] :| [CD.ContentDigestEntry algorithm "\x01" parameters])
+              rd = RD.ReprDigest (RD.ReprDigestEntry "sha-256" "\x00" [] :| [RD.ReprDigestEntry algorithm "\x01" parameters])
+              wcd = WCD.WantContentDigest (WCD.WantContentDigestEntry "sha-256" 2 [] :| [WCD.WantContentDigestEntry algorithm 3 parameters])
+              wrd = WRD.WantReprDigest (WRD.WantReprDigestEntry "sha-256" 2 [] :| [WRD.WantReprDigestEntry algorithm 3 parameters])
+          setHeader cd fields `shouldBe` fields
+          setHeader rd fields `shouldBe` fields
+          setHeader wcd fields `shouldBe` fields
+          setHeader wrd fields `shouldBe` fields
+          isLeft (CD.renderContentDigestChecked cd) `shouldBe` True
+          isLeft (RD.renderReprDigestChecked rd) `shouldBe` True
+          isLeft (WCD.renderWantContentDigestChecked wcd) `shouldBe` True
+          isLeft (WRD.renderWantReprDigestChecked wrd) `shouldBe` True
+    mapM_ (`check` []) ["", "SHA-512", "2example", "ext, injected"]
+    mapM_
+      (check "sha-512")
+      [ [("BAD", Nothing)]
+      , [("p", Just (Integer 1_000_000_000_000_000))]
+      , [("p", Just (String (RFC8941String "é")))]
+      ]
   it "uses dictionary merge semantics when combining and rendering constructed values" $ do
     let first = CD.ContentDigestEntry "example" "\x01" []
-        second = CD.ContentDigestEntry "example" "\x02" [("p", Just (Integer 1)), ("p", Just (Boolean True))]
+        second = CD.ContentDigestEntry "example" "\x02" [("p", Just (Integer 1_000_000_000_000_000)), ("p", Just (Boolean True))]
         other = CD.ContentDigestEntry "other" "" []
         merged = CD.ContentDigest (first :| [other]) <> CD.ContentDigest (second :| [])
     CD.contentDigestEntryList merged `shouldBe` [second, other]
@@ -375,6 +403,37 @@ legacyDigestFields = describe "legacy digest fields through typed lookup and set
     forM_ ["", ".2", "-1", "2", "00", "0..1", "1.001", "1.0000", "0.0000", "0.0junk", "\"1\"", "1;q=0"] $ \q ->
       lookupHeader @WD.WantDigest (headerMapFromList [("Want-Digest", "sha"), ("Want-Digest", "md5;q=" <> q)])
         `shouldSatisfy` isLeft
+  it "checks authored Digest algorithms and output syntax before replacing field lines" $ do
+    let old = headerMapFromList [("Digest", "crc32c=1"), ("Digest", "unixsum=2")]
+        first = DG.DigestValue "crc32c" "1"
+        bad =
+          [ DG.DigestValue "MD5" "x="
+          , DG.DigestValue "md5" "HUXZLQLMuI_KZ5KDcJPcOA=="
+          , DG.DigestValue "sha-256" "AA=="
+          , DG.DigestValue "UNIXsum" "65536"
+          , DG.DigestValue "UNIXcksum" "4294967296"
+          , DG.DigestValue "adler32" "123456789"
+          , DG.DigestValue "ConTenTMD5" "HUXZLQLMuI/KZ5KDcJPcOA=="
+          , DG.DigestValue "ext" "a;b"
+          , DG.DigestValue "ext" "\"a\"suffix"
+          , DG.DigestValue "ext" "\"a\\"
+          , DG.DigestValue "bad algorithm" "ok"
+          ]
+    forM_ bad $ \entry -> do
+      let value = DG.Digest (first :| [entry])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old
+  it "checks authored Want-Digest qvalue spelling before writing the whole list" $ do
+    let old = headerMapFromList [("Want-Digest", "sha")]
+        first = WD.WantDigestValue "contentMD5" Nothing
+        invalid = WD.WantDigestValue "bad token" Nothing
+          : map (WD.WantDigestValue "ext" . Just) ["", "1.001", "0.0010", "\"0.8\"", " 0.5", "0.5 "]
+    forM_ invalid $ \entry -> do
+      let value = WD.WantDigest (first :| [entry])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old
+    renderHeaderLines defaultHeaderSettings (WD.WantDigest (first :| [WD.WantDigestValue "SHA" (Just "0.")]))
+      `shouldBe` Just ("contentMD5, SHA;q=0." :| [])
 
 
 -- ---------------------------------------------------------------------------
@@ -410,6 +469,12 @@ typedContentMD5 = describe "typed Content-MD5" $ do
       lookupHeader @MD5.ContentMD5 (headerMapFromList [("Content-MD5", wire)]) `shouldSatisfy` isLeft
     let wire = "Q2hlY2sgSW50ZWdyaXR5IQ=="
     lookupHeader @MD5.ContentMD5 (headerMapFromList [("Content-MD5", wire), ("Content-MD5", wire)]) `shouldSatisfy` isLeft
+  it "validates public constructors before writing field lines" $ do
+    let previous = headerMapFromList [("Content-MD5", "Q2hlY2sgSW50ZWdyaXR5IQ==")]
+    forM_ [0, 15, 17] $ \width -> do
+      let value = MD5.ContentMD5 (BS.replicate width 0xff)
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous
   it "round-trips an arbitrary sixteen-byte digest through typed lookup" $ property $ do
     bytes <- forAll (Gen.bytes (Range.singleton 16))
     let value = MD5.ContentMD5 bytes

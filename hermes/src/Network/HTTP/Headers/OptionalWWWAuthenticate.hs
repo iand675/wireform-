@@ -41,6 +41,7 @@ import Network.HTTP.Headers.WWWAuthenticate (
   AuthChallenge (..),
   ChallengeContents (..),
   challengesParser,
+  encodeAuthChallengesChecked,
   parseChallengeFieldLines,
   renderAuthChallenge,
  )
@@ -68,6 +69,9 @@ instance KnownHeader OptionalWWWAuthenticate where
 
   omitHeaderValue = null . optionalAuthChallenges
   {-# INLINE omitHeaderValue #-}
+
+
+  renderToHeadersChecked _ = fmap pure . encodeAuthChallengesChecked . optionalAuthChallenges
 
 
   headerName _ = hOptionalWWWAuthenticate

@@ -57,6 +57,14 @@ instance KnownHeader XContentTypeOptions where
   renderToHeaders _ (XContentTypeOptionsOther token) = ST.toByteString token
 
 
+  renderToHeadersChecked _ NoSniff = Just "nosniff"
+  renderToHeadersChecked _ (XContentTypeOptionsOther token)
+    | isHttpTokenText token, not (bareNoSniff wire) = Just wire
+    | otherwise = Nothing
+    where
+      wire = ST.toByteString token
+
+
   headerName _ = hXContentTypeOptions
 
 

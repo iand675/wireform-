@@ -22,7 +22,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hFrom)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.Mailbox (Mailbox, mailboxParser, renderMailbox)
+import Network.Mailbox (Mailbox, mailboxParser, renderMailbox, renderMailboxChecked)
 
 
 -- | The parsed value of a @From@ header: a single mailbox.
@@ -40,6 +40,9 @@ instance KnownHeader From where
 
 
   renderToHeaders _ = M.toStrictByteString . renderFrom
+
+
+  renderToHeadersChecked _ = renderMailboxChecked . fromMailbox
 
 
   headerName _ = hFrom

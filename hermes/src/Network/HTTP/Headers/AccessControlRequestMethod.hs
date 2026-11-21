@@ -51,6 +51,12 @@ instance KnownHeader AccessControlRequestMethod where
   renderToHeaders _ = ST.toByteString . requestMethod
 
 
+  renderToHeadersChecked _ (AccessControlRequestMethod method)
+    | isHttpTokenText method = Just (ST.toByteString method)
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
+
+
   headerName _ = hAccessControlRequestMethod
 
 

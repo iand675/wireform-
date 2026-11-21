@@ -135,6 +135,12 @@ instance KnownHeader OSCORE where
   renderToHeaders _ = wireBytes
 
 
+  renderToHeadersChecked _ (ParsedOSCORE wire _) = Just wire
+  renderToHeadersChecked _ (RawOSCORE text) =
+    let wire = ST.toByteString text
+    in either (const Nothing) (const (Just wire)) (decodeField wire)
+
+
   headerName _ = hOSCORE
 
 

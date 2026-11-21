@@ -12,7 +12,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import qualified Network.HTTP.Headers.SurrogateCapability as SCap
@@ -172,6 +172,14 @@ prop_con_roundtrip = property $ do
 
 typedCapabilities :: Spec
 typedCapabilities = describe "typed surrogate capabilities" $ do
+  it "checks authored device uniqueness and complete feature tokens" $ do
+    let old = headerMapFromList [("Surrogate-Capability", "edge=\"ESI/1.0\"")]
+        good = SCap.SurrogateCapabilityEntry "edge" "ESI/1.0"
+        invalid = [good, SCap.SurrogateCapabilityEntry "other" " ESI/1.0", SCap.SurrogateCapabilityEntry "other" "ESI//1", SCap.SurrogateCapabilityEntry "bad name" "ESI"]
+    mapM_ (\entry -> do
+      let value = SCap.SurrogateCapability (good :| [entry])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old) invalid
   it "preserves devices and capabilities in the advertised order across field lines" $ do
     let a = SCap.SurrogateCapabilityEntry "abc" "Surrogate/1.0"
         b = SCap.SurrogateCapabilityEntry "def" "ESI/1.0 ESI-Inline/2 notify"
@@ -193,6 +201,15 @@ typedCapabilities = describe "typed surrogate capabilities" $ do
 
 typedControl :: Spec
 typedControl = describe "typed surrogate control" $ do
+  it "checks authored Surrogate-Control arguments and targets before replacing fields" $ do
+    let old = headerMapFromList [("Surrogate-Control", "max-age=10")]
+        make = SCon.SurrogateControlDirective
+        invalid = [make "no-store" (Just "1"), make "max-age" (Just "1+"), make "content" (Just "ESI/"), make "stale-if-error" (Just "\"10\""), make "extension" (Just "bad\n"),
+                   SCon.TargetedSurrogateControlDirective "no-store" Nothing ("edge" :| ["a;b"])]
+    mapM_ (\entry -> do
+      let value = SCon.SurrogateControl (make "no-store" Nothing :| [entry])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old) invalid
   it "preserves multiple targets and separates supported directive arguments" $ do
     let first = SCon.TargetedSurrogateControlDirective "MAX-AGE" (Just "60+300") ("abc" :| ["def"])
         second = SCon.SurrogateControlDirective "no-store-remote" Nothing

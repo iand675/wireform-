@@ -26,7 +26,7 @@ module Network.HTTP.Headers.Position (
 ) where
 
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (nonEmptyPathSegment)
+import Network.HTTP.Grammar.URIReference (nonEmptyPathSegment, nonEmptyPathSegmentBytes, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPosition)
 import qualified Network.HTTP.Headers.Mason as M
@@ -57,6 +57,16 @@ instance KnownHeader Position where
 
 
   renderToHeaders _ = M.toStrictByteString . renderPosition
+
+
+  renderToHeadersChecked _ PositionFirst = Just "first"
+  renderToHeadersChecked _ PositionLast = Just "last"
+  renderToHeadersChecked settings value@(PositionBefore segment)
+    | validURIText nonEmptyPathSegmentBytes segment = Just (renderToHeaders settings value)
+    | otherwise = Nothing
+  renderToHeadersChecked settings value@(PositionAfter segment)
+    | validURIText nonEmptyPathSegmentBytes segment = Just (renderToHeaders settings value)
+    | otherwise = Nothing
 
 
   headerName _ = hPosition

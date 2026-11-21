@@ -19,7 +19,7 @@ module Network.HTTP.Headers.Expires (
 
 import Data.Time.Clock (UTCTime)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate, renderDateBytesChecked)
 import Network.HTTP.Headers.HeaderFieldName (hExpires)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -39,6 +39,9 @@ instance KnownHeader Expires where
 
 
   renderToHeaders _ = M.toStrictByteString . renderExpires
+
+
+  renderToHeadersChecked _ = renderDateBytesChecked . expires
 
 
   headerName _ = hExpires

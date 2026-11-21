@@ -32,7 +32,7 @@ module Network.HTTP.Headers.ProxyAuthenticationInfo (
 
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Authorization (CredentialParam (..), authParamParser, renderAuthParam)
+import Network.HTTP.Headers.Authorization (CredentialParam (..), authParamParser, encodeAuthParamsChecked, renderAuthParam)
 import Network.HTTP.Headers.HeaderFieldName (hProxyAuthenticationInfo)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -61,6 +61,9 @@ instance KnownHeader ProxyAuthenticationInfo where
 
 
   renderToHeaders _ pai = [M.toStrictByteString (renderProxyAuthenticationInfo pai)]
+
+
+  renderToHeadersChecked _ = fmap pure . encodeAuthParamsChecked . proxyAuthenticationInfoParams
 
 
   headerName _ = hProxyAuthenticationInfo

@@ -69,6 +69,9 @@ instance KnownHeader Man where
   renderToHeaders _ (ManDeclarations declarations) = NE.toList (declarationsLines declarations)
 
 
+  renderToHeadersChecked _ (ManDeclarations declarations) = NE.toList <$> checkedDeclarationsLines "Man" declarations
+
+
   headerName _ = hMan
 
 

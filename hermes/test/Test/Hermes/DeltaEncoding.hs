@@ -11,7 +11,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.AIM as AIM
 import qualified Network.HTTP.Headers.DeltaBase as DB
 import Network.HTTP.Headers.ETag (EntityTag (..))
@@ -115,6 +115,33 @@ unit_aim_fields = it "reads ordered A-IM field lines with an optional parameter 
   parseAIM "range; flag; Q=1." `shouldBe` Right (AIM.AIM [AIM.WeightedIMWithParameter "range" 1 (AIM.IMParameter "flag" Nothing)])
   forM_ ["range;q", "range;q=1.001", "range;q=0.1234", "range;q=0.7;extra", "range;first;second", "range;flag;q=\"0.5\""] $ \bad ->
     lookupHeader @AIM.AIM (headerMapFromList [("A-IM", "gzip"), ("A-IM", bad)]) `shouldSatisfy` isLeft
+
+
+checkedManipulationWrites :: Spec
+checkedManipulationWrites = do
+  let badParams =
+        [ IM.IMParameter "Q" Nothing
+        , IM.IMParameter "bad name" Nothing
+        , IM.IMParameter "mode" (Just (IM.IMParameterToken "a;b"))
+        , IM.IMParameter "mode" (Just (IM.IMParameterQuoted "a\DEL"))
+        ]
+  it "checks A-IM names and parameters before replacing the field" $ do
+    let old = headerMapFromList [("A-IM", "gzip")]
+        entries = AIM.WeightedIM "gzip" 1 : [AIM.WeightedIM "bad name" 0.5]
+        bad = entries : map (\param -> [AIM.WeightedIM "gzip" 1, AIM.WeightedIMWithParameter "ext" 0.5 param]) badParams
+    forM_ (map AIM.AIM bad) $ \value -> do
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old
+    renderHeaderLines defaultHeaderSettings (AIM.AIM [AIM.WeightedIM "identity" 1.5]) `shouldBe` Just ("identity" :| [])
+  it "checks IM names and parameters, reserving identity for A-IM" $ do
+    let old = headerMapFromList [("IM", "gzip")]
+        first = IM.InstanceManipulation "gzip" Nothing
+        bad = map (`IM.InstanceManipulation` Nothing) ["", "bad,name", "IdEnTiTy"]
+          ++ map (IM.InstanceManipulation "ext" . Just) badParams
+    forM_ bad $ \entry -> do
+      let value = IM.IMEntries [first, entry]
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old
 
 
 unit_aim_authored_weights :: Spec
@@ -277,6 +304,7 @@ tests =
       , unit_aim_render
       , unit_aim_fields
       , unit_aim_authored_weights
+      , checkedManipulationWrites
       , it "A-IM round-trips" prop_aim_roundtrip
       , unit_im_parse
       , unit_im_render

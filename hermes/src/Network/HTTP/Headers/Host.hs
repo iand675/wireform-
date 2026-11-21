@@ -21,7 +21,7 @@ module Network.HTTP.Headers.Host (
 
 import qualified Data.Text.Short as ST
 import Data.Word (Word16)
-import Network.HTTP.Grammar.Authority (hostAndPort, renderHostAndPort)
+import Network.HTTP.Grammar.Authority (encodeHostAndPortChecked, hostAndPort, renderHostAndPort)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hHost)
 import qualified Network.HTTP.Headers.Mason as M
@@ -48,6 +48,10 @@ instance KnownHeader Host where
 
 
   renderToHeaders _ = M.toStrictByteString . renderHost
+
+
+  renderToHeadersChecked _ (Host "" Nothing) = Just ""
+  renderToHeadersChecked _ (Host host port) = encodeHostAndPortChecked host port
 
 
   headerName _ = hHost

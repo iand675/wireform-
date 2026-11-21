@@ -25,7 +25,7 @@ module Network.HTTP.Headers.AltUsed (
 
 import Data.Text.Short (ShortText)
 import Data.Word (Word16)
-import Network.HTTP.Grammar.Authority (hostAndPort, renderHostAndPort)
+import Network.HTTP.Grammar.Authority (encodeHostAndPortChecked, hostAndPort, renderHostAndPort)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAltUsed)
 import qualified Network.HTTP.Headers.Mason as M
@@ -56,6 +56,9 @@ instance KnownHeader AltUsed where
 
 
   renderToHeaders _ = M.toStrictByteString . renderAltUsed
+
+
+  renderToHeadersChecked _ (AltUsed host port) = encodeHostAndPortChecked host port
 
 
   headerName _ = hAltUsed

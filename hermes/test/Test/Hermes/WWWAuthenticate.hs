@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -33,11 +34,11 @@ import qualified Hedgehog.Range as Range
 import Network.HTTP.Headers
 import qualified Network.HTTP.Headers.AuthenticationInfo as Info
 import qualified Network.HTTP.Headers.Authorization as Auth
-import Network.HTTP.Headers.HeaderFieldName (hAuthorization, hWWWAuthenticate)
+import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName, hAuthenticationInfo, hAuthorization, hProxyAuthenticate, hProxyAuthenticationInfo, hWWWAuthenticate)
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.OptionalWWWAuthenticate as Optional
 import Network.HTTP.Headers.Parsing.Util (
-  RFC8941String,
+  RFC8941String (..),
   Result (..),
   eof,
   mkRFC8941String,
@@ -203,10 +204,17 @@ unit_token68_octets =
 
 unit_repeated_challenge_fields :: Spec
 unit_repeated_challenge_fields = it "joins challenge parameters and schemes across repeated lines" $ do
-  let fields name = headerMapFromList [(name, "Example realm=\"a,b\","), (name, ", nonce=one, Next abc==")]
+  let fieldsWith name lastLine = headerMapFromList [(name, "Example realm=\"a,b\","), (name, lastLine)]
+      fields name = fieldsWith name ", nonce=one, Next abc=="
       challenges = [W.AuthChallenge (scheme "Example") (W.ChallengeParams [paramString "realm" "a,b", paramToken "nonce" "one"]), W.AuthChallenge (scheme "Next") (W.ChallengeToken68 "abc==")]
+      proxyFields = fields "Proxy-Authenticate"
+      proxyChallenges = Proxy.ProxyAuthenticate challenges
   lookupHeader (fields "WWW-Authenticate") `shouldBe` Right (Just (W.WWWAuthenticate challenges))
-  lookupHeader (fields "Proxy-Authenticate") `shouldBe` Right (Just (Proxy.ProxyAuthenticate challenges))
+  lookupHeader @Proxy.ProxyAuthenticate proxyFields `shouldBe` Right (Just proxyChallenges)
+  lookupRawHeader hProxyAuthenticate (setHeader proxyChallenges proxyFields)
+    `shouldBe` Just ("Example realm=\"a,b\", nonce=one, Next abc==" :| [])
+  lookupHeader @Proxy.ProxyAuthenticate (fieldsWith "Proxy-Authenticate" "nonce=\"unterminated")
+    `shouldSatisfy` isLeft
   lookupHeader (fields "Optional-WWW-Authenticate") `shouldBe` Right (Just (Optional.OptionalWWWAuthenticate challenges))
   lookupHeader @W.WWWAuthenticate (headerMapFromList [("WWW-Authenticate", "Example realm=one"), ("WWW-Authenticate", "REALM=two")])
     `shouldSatisfy` isLeft
@@ -224,17 +232,75 @@ unit_opaque_auth_params = it "keeps opaque parameter octets in challenge and inf
       challenge = W.WWWAuthenticate [W.AuthChallenge (scheme "Example") (W.ChallengeParams [("realm", opaque)])]
       fields = headerMapFromList [("WWW-Authenticate", "Example " <> wire)]
       params = [("realm", opaque), paramToken "nonce" "token"]
+      infoFields name lastLine = headerMapFromList [(name, wire <> ",,"), (name, lastLine)]
+      info = Info.AuthenticationInfo params
+      proxyInfo = ProxyInfo.ProxyAuthenticationInfo params
+      infoLines = infoFields "Authentication-Info" "nonce=token"
+      proxyInfoLines = infoFields "Proxy-Authentication-Info" "nonce=token"
+      canonical = Just ((wire <> ", nonce=token") :| [])
   lookupHeader fields `shouldBe` Right (Just challenge)
   lookupRawHeader hWWWAuthenticate (setHeader challenge fields) `shouldBe` Just (("Example " <> wire) :| [])
-  lookupHeader (headerMapFromList [("Authentication-Info", wire <> ",,"), ("Authentication-Info", "nonce=token")])
-    `shouldBe` Right (Just (Info.AuthenticationInfo params))
-  lookupHeader (headerMapFromList [("Proxy-Authentication-Info", wire <> ",,"), ("Proxy-Authentication-Info", "nonce=token")])
-    `shouldBe` Right (Just (ProxyInfo.ProxyAuthenticationInfo params))
+  lookupHeader @Info.AuthenticationInfo infoLines `shouldBe` Right (Just info)
+  lookupRawHeader hAuthenticationInfo (setHeader info infoLines) `shouldBe` canonical
+  lookupHeader @Info.AuthenticationInfo (infoFields "Authentication-Info" "nonce=token?") `shouldSatisfy` isLeft
+  lookupHeader @ProxyInfo.ProxyAuthenticationInfo proxyInfoLines `shouldBe` Right (Just proxyInfo)
+  lookupRawHeader hProxyAuthenticationInfo (setHeader proxyInfo proxyInfoLines) `shouldBe` canonical
+  lookupHeader @ProxyInfo.ProxyAuthenticationInfo (infoFields "Proxy-Authentication-Info" "nonce=token?") `shouldSatisfy` isLeft
   Auth.credentialParamBytes opaque `shouldBe` payload
   let (_, quoted) = paramString "name" "abc"
       (_, token) = paramToken "name" "abc"
   quoted `shouldBe` token
   token `shouldBe` quoted
+
+
+checkedAuthenticationWrites :: Spec
+checkedAuthenticationWrites = do
+  it "rejects invalid Authorization credentials before replacing the field" $
+    mapM_ (reject "Authorization" . Auth.Authorization) invalidCredentials
+  it "rejects invalid Proxy-Authorization credentials before replacing the field" $
+    mapM_ (reject "Proxy-Authorization" . ProxyAuth.ProxyAuthorization) invalidCredentials
+  it "checks every authored WWW-Authenticate challenge" $
+    mapM_ (reject "WWW-Authenticate" . W.WWWAuthenticate) invalidChallenges
+  it "checks every authored Proxy-Authenticate challenge" $
+    mapM_ (reject "Proxy-Authenticate" . Proxy.ProxyAuthenticate) invalidChallenges
+  it "checks every authored Optional-WWW-Authenticate challenge" $
+    mapM_ (reject "Optional-WWW-Authenticate" . Optional.OptionalWWWAuthenticate) invalidChallenges
+  it "rejects malformed Authentication-Info parameters" $
+    mapM_ (reject "Authentication-Info" . Info.AuthenticationInfo) invalidInfo
+  it "rejects malformed Proxy-Authentication-Info parameters" $
+    mapM_ (reject "Proxy-Authentication-Info" . ProxyInfo.ProxyAuthenticationInfo) invalidInfo
+  where
+    valid = ("realm", Auth.CredentialParamToken "ok")
+    duplicate = ("REALM", Auth.CredentialParamToken "other")
+    invalidParams =
+      [ ("", Auth.CredentialParamToken "ok")
+      , ("bad,name", Auth.CredentialParamToken "ok")
+      , ("key", Auth.CredentialParamToken "")
+      , ("key", Auth.CredentialParamToken "a b")
+      , ("key", Auth.CredentialParamOpaque (BS.pack [97, 127]))
+      , ("key", Auth.CredentialParamString (RFC8941String "a\DEL"))
+      ]
+    invalidCredentials =
+      [ Auth.Credentials (Auth.AuthScheme "") Auth.CredentialBare
+      , Auth.Credentials (Auth.AuthScheme "two schemes") Auth.CredentialBare
+      , Auth.Credentials (Auth.AuthScheme "Example") (Auth.CredentialParams (valid :| [duplicate]))
+      ]
+        <> map (Auth.Credentials (Auth.AuthScheme "Example") . Auth.CredentialToken) ["", "==", "ab==cd", "word space", "a=b"]
+        <> map (\p -> Auth.Credentials (Auth.AuthScheme "Example") (Auth.CredentialParams (valid :| [p]))) invalidParams
+    invalidChallenges =
+      map (\c -> [W.AuthChallenge (scheme "Example") W.ChallengeBare, c]) $
+        [ W.AuthChallenge (W.AuthScheme "one,two") W.ChallengeBare
+        , W.AuthChallenge (scheme "Example") (W.ChallengeParams [valid, duplicate])
+        ]
+          <> map (W.AuthChallenge (scheme "Next") . W.ChallengeToken68) ["", "=", "a=b"]
+          <> map (\p -> W.AuthChallenge (scheme "Next") (W.ChallengeParams [valid, p])) invalidParams
+    invalidInfo = map (\p -> [valid, p]) invalidParams
+
+    reject :: (KnownHeader a, HeaderRenderingResultToNonEmpty (Cardinality a)) => HeaderFieldName -> a -> Expectation
+    reject name value = do
+      let previous = setRawHeader name ("first" :| ["second"]) (headerMapFromList [])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous
 
 
 unit_basic :: Spec
@@ -368,6 +434,7 @@ tests =
       , unit_token68_octets
       , unit_repeated_challenge_fields
       , unit_opaque_auth_params
+      , checkedAuthenticationWrites
       , unit_multi_challenge
       , unit_token68
       , unit_digest_qop_list

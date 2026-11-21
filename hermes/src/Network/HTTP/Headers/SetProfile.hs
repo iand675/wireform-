@@ -73,6 +73,9 @@ instance KnownHeader SetProfile where
   renderToHeaders _ = setProfileBytes
 
 
+  renderToHeadersChecked _ = renderOpaqueFieldChecked . setProfileBytes
+
+
   headerName _ = hSetProfile
 
 

@@ -73,6 +73,9 @@ instance KnownHeader ProfileObject where
   renderToHeaders _ = profileObjectBytes
 
 
+  renderToHeadersChecked _ = renderOpaqueFieldChecked . profileObjectBytes
+
+
   headerName _ = hProfileObject
 
 

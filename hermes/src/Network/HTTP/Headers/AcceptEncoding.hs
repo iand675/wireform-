@@ -32,7 +32,7 @@ import Data.List (find)
 import Data.Maybe (listToMaybe)
 import GHC.Exts (Double (D#), Double#, Int#, isTrue#, (+#), (<#), (==##), (>##))
 import Network.HTTP.ContentCoding
-import Network.HTTP.ContentNegotiation (negotiationList, parseNegotiationHeaders, renderWeight, weightParser)
+import Network.HTTP.ContentNegotiation (encodeWeightedTokensChecked, negotiationList, parseNegotiationHeaders, renderWeight, weightParser)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptEncoding)
 import qualified Network.HTTP.Headers.Mason as M
@@ -140,6 +140,15 @@ instance KnownHeader AcceptEncoding where
 
 
   renderToHeaders _ = M.toStrictByteString . renderAcceptEncoding
+
+
+  renderToHeadersChecked _ =
+    encodeWeightedTokensChecked (validEncoding . encodingTag) (encodingText . encodingTag) encodingWeight . acceptEncoding
+    where
+      validEncoding AnyEncoding = True
+      validEncoding (NamedEncoding coding) = isValidContentCoding coding && contentCodingText coding /= "*"
+      encodingText AnyEncoding = "*"
+      encodingText (NamedEncoding coding) = contentCodingText coding
 
 
   headerName _ = hAcceptEncoding

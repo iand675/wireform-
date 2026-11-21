@@ -21,9 +21,6 @@ module Network.HTTP.Headers.Accept (
   renderAccept,
 ) where
 
-import Data.Bits ((.|.))
-import qualified Data.ByteString.Short as SBS
-import qualified Data.ByteString.Short.Internal as SBSI
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (listToMaybe)
 import qualified Data.Text.Short as ST
@@ -99,9 +96,9 @@ selectQuality actualType actualParams !maxParams = select (-1) 0 0
 typeSpecificity :: MediaType -> MediaType -> Int
 typeSpecificity (MediaType base sub) (MediaType actualBase actualSub)
   | ST.null base && ST.null sub = 0
-  | not (sameMediaName base actualBase) = -1
+  | not (sameNegotiationToken base actualBase) = -1
   | ST.null sub = 1
-  | sameMediaName sub actualSub = 2
+  | sameNegotiationToken sub actualSub = 2
   | otherwise = -1
 {-# INLINE typeSpecificity #-}
 
@@ -112,30 +109,14 @@ matchingParameters available = count 0
     count !total [] = total
     count !total ((name, value) : rest)
       | matchValue name value available =
-          if any (sameMediaName name . fst) rest then count total rest else count (total + 1) rest
+          if any (sameNegotiationToken name . fst) rest then count total rest else count (total + 1) rest
       | otherwise = -1
 
     matchValue name value ((key, actual) : rest)
-      | sameMediaName name key =
-          if sameMediaName name "charset" then sameMediaName value actual else value == actual
+      | sameNegotiationToken name key =
+          if sameNegotiationToken name "charset" then sameNegotiationToken value actual else value == actual
       | otherwise = matchValue name value rest
     matchValue _ _ [] = False
-
-
-sameMediaName :: ST.ShortText -> ST.ShortText -> Bool
-sameMediaName a b = a == b || (SBS.length right == size && loop 0)
-  where
-    left = ST.toShortByteString a
-    right = ST.toShortByteString b
-    size = SBS.length left
-    loop i
-      | i == size = True
-      | lower (SBSI.unsafeIndex left i) == lower (SBSI.unsafeIndex right i) = loop (i + 1)
-      | otherwise = False
-    lower byte
-      | 65 <= byte && byte <= 90 = byte .|. 32
-      | otherwise = byte
-{-# INLINE sameMediaName #-}
 
 
 instance KnownHeader Accept where
@@ -148,6 +129,9 @@ instance KnownHeader Accept where
 
 
   renderToHeaders _ = M.toStrictByteString . renderAccept
+
+
+  renderToHeadersChecked _ = encodeWeightedMediaRangesChecked . accept
 
 
   headerName _ = hAccept

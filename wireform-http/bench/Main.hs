@@ -22,6 +22,8 @@ import Network.HTTP.Client.Cache qualified as Cache
 import Network.HTTP.Client.Compression qualified as Compression
 import Network.HTTP.Client.Conditional qualified as Conditional
 import Network.HTTP.Client.Cookies qualified as Cookies
+import Network.HTTP.Client.Decoder qualified as Decoder
+import Network.HTTP.Client.Media qualified as Media
 import Network.HTTP.Client.Protocol qualified as Protocol
 import Network.HTTP.Client.Range qualified as Range
 import Network.HTTP.Client.Redirect qualified as Redirect
@@ -31,11 +33,26 @@ import Network.HTTP.Client.SSE qualified as SSE
 import Network.HTTP.Client.Transport qualified as Transport
 import Network.HTTP.Client.URI qualified as URI
 import Network.HTTP.Connection
+import Network.HTTP.HttpDate (parseHttpDate)
 import Network.HTTP.Server
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Status qualified as S
 import Network.HTTP.Types.Version qualified as V
 import Network.Socket qualified as NS
+
+
+preconditionRequest :: H.Headers -> Request
+preconditionRequest fields =
+  Request
+    { requestMethod = GET
+    , requestTarget = "/"
+    , requestAuthority = Just "example.test"
+    , requestScheme = SchemeHttp
+    , requestHeaders = (H.hAccept, "*/*") : ("User-Agent", "benchmark") : fields
+    , requestBody = BodyEmpty
+    , requestVersion = V.HTTP1_1
+    , requestTrailers = pure []
+    }
 
 
 main :: IO ()
@@ -70,11 +87,60 @@ main = do
         , bench "ASCII IDs" $ nf sseCursorScore (sseBatch "id: event-42\ndata: payload\n\n")
         , bench "UTF-8 IDs" $ nf sseCursorScore (sseBatch "id: caf\xC3\xA9\ndata: payload\n\n")
         ]
+    , let modified = either error id (parseHttpDate "Sun, 06 Nov 1994 08:49:37 GMT")
+          validators = Just (RepresentationValidators (Just (Conditional.strongETag "v1")) (Just modified))
+          evaluate = evaluatePreconditions modified S.status200 validators
+          ordinaryFields =
+            [ ("Accept-Encoding", "gzip")
+            , ("Accept-Language", "en")
+            , ("Cache-Control", "max-age=0")
+            , ("Connection", "keep-alive")
+            , ("Cookie", "session=example")
+            , ("Referer", "https://example.test/")
+            , ("Sec-Fetch-Dest", "document")
+            , ("Sec-Fetch-Mode", "navigate")
+            , ("Sec-Fetch-Site", "same-origin")
+            , ("X-Request-ID", "request-123")
+            ]
+      in bgroup
+           "Server preconditions"
+           [ bench "ordinary GET" $ whnf evaluate (preconditionRequest [])
+           , bench "weak tag match" $ whnf evaluate (preconditionRequest [(H.hIfNoneMatch, "W/\"v1\"")])
+           , bench "modification date match" $
+               whnf evaluate (preconditionRequest [(H.hIfModifiedSince, "Sun, 06 Nov 1994 08:49:37 GMT")])
+           , bench "ordinary GET with twelve fields" $ whnf evaluate (preconditionRequest ordinaryFields)
+           , bench "weak tag after twelve fields" $
+               whnf evaluate (preconditionRequest (ordinaryFields <> [(H.hIfNoneMatch, "W/\"v1\"")]))
+           , bench "repeated tag fields" $
+               whnf evaluate (preconditionRequest ((H.hIfNoneMatch, "\"other\"") : ordinaryFields <> [(H.hIfNoneMatch, "W/\"v1\"")]))
+           ]
     , bgroup
         "Multipart ranges"
         [ bench "two short parts" $ nf multipartScore (multipartFixture "0123456789")
         , bench "two 64 KiB parts" $ nf multipartScore (multipartFixture payload64k)
         , bench "two 64 KiB LF-filled parts" $ nf multipartScore (multipartFixture (BS.replicate (64 * 1024) 0x0A))
+        ]
+    , bgroup
+        "Accept authoring"
+        [ bench "unweighted" $ nf Media.acceptHeaderValue [("application/json", Media.maxQuality)]
+        , bench "weighted with parameters" $ nf Media.acceptHeaderValue acceptOffers
+        ]
+    , bgroup
+        "Content-Type dispatch"
+        [ bench "bare type" $
+            whnf (dispatchDecoder (decoderAlternatives "application/json")) "application/json"
+        , bench "quoted profile and charset" $
+            whnf (dispatchDecoder profiledDecoder)
+              "application/example; profile=\"a,b\"; charset=UTF-8; version=2"
+        , bench "different profile" $
+            whnf (dispatchDecoder profiledDecoder)
+              "application/example; profile=\"a,B\"; charset=utf-8"
+        , bench "bare field and dispatch" $
+            whnf (dispatchDecoder (decoderAlternatives "application/json") . Media.contentTypeOf)
+              [(H.hContentType, "application/json")]
+        , bench "quoted field and dispatch" $
+            whnf (dispatchDecoder profiledDecoder . Media.contentTypeOf)
+              [(H.hContentType, "application/example; profile=\"a,b\"; charset=UTF-8; version=2")]
         ]
     , bgroup
         "Range request authoring"
@@ -94,9 +160,38 @@ main = do
           , bench "gzip partial" $ nfIO (decompressionScore rangeRequest S.status206 [(H.hContentEncoding, "gzip")] (BS.drop 5 gzip))
           ]
     , env (Compression.compressBytes @Compression.Gzip "cached representation") $ \gzip ->
-        bgroup "Cache body metadata" [bench "revalidate decoded body" $ nfIO (revalidationScore gzip)]
+        bgroup
+          "Cache body metadata"
+          [ bench "revalidate decoded body" $ nfIO (revalidationScore False gzip)
+          , bench "caller 304" $ nfIO (revalidationScore True gzip)
+          ]
     , bgroup "Cookie receipt" cookieBenchmarks
     ]
+
+
+acceptOffers :: [(Media.MediaType, Media.Quality)]
+acceptOffers =
+  [ ("application/json", Media.maxQuality)
+  , ("text/plain; charset=utf-8", Media.Quality 0.825)
+  , (Media.MediaType "application" "example" [("profile", "a,b")], Media.Quality 0.125)
+  , ("*/*", Media.minQuality)
+  ]
+
+
+profiledDecoder :: Decoder.ResponseDecoder Int
+profiledDecoder = decoderAlternatives "application/example; profile=\"a,b\"; charset=utf-8"
+
+
+decoderAlternatives :: Media.MediaType -> Decoder.ResponseDecoder Int
+decoderAlternatives wanted = Decoder.orDecoder primary fallback
+  where
+    primary = Decoder.ResponseDecoder [(wanted, Media.maxQuality)] (\_ _ _ -> Right 1)
+    fallback = Decoder.ResponseDecoder [] (\_ _ _ -> Right 2)
+
+
+dispatchDecoder :: Decoder.ResponseDecoder Int -> Media.MediaType -> Int
+dispatchDecoder decoder actual = either (const 0) id (Decoder.decodeBody decoder S.status200 actual "")
+{-# NOINLINE dispatchDecoder #-}
 
 
 receiveCookieBenchmark :: String -> BS.ByteString -> IO Benchmark
@@ -181,10 +276,11 @@ decompressionScore request status fields bytes = do
   pure (BS.length payload + length (Raw.headers reply))
 
 
-revalidationScore :: BS.ByteString -> IO Int
-revalidationScore gzip = do
+revalidationScore :: Bool -> BS.ByteString -> IO Int
+revalidationScore callerOwnsValidator gzip = do
   cache <- Cache.newCache Cache.defaultCacheConfig
-  let tag = (H.hETag, "\"gzip-revision\"")
+  let token = "\"gzip-revision\""
+      tag = (H.hETag, token)
       coding = (H.hContentEncoding, "gzip")
       peer = Transport.Transport $ \req ->
         if H.hasHeader H.hIfNoneMatch (Request.headers req)
@@ -193,10 +289,12 @@ revalidationScore gzip = do
             body <- popperFromStrict gzip
             pure (Raw.RawResponse S.status200 [(H.hCacheControl, "max-age=0"), tag, coding] body Protocol.HTTP1_1)
       client = Cache.withCache cache (Compression.withDecompression peer)
-      fetch = Transport.sendRaw client (fmap (const emptyStream) ordinaryRedirectRequest)
-  original <- fetch
+      request = fmap (const emptyStream) ordinaryRedirectRequest
+      conditional = Request.setHeader H.hIfNoneMatch token request
+      fetch = Transport.sendRaw client
+  original <- fetch request
   _ <- popperBytes (Raw.bodyPopper original)
-  refreshed <- fetch
+  refreshed <- fetch (if callerOwnsValidator then conditional else request)
   bytes <- popperBytes (Raw.bodyPopper refreshed)
   pure (BS.length bytes + length (Raw.headers refreshed))
 

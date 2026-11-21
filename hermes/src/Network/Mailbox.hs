@@ -53,6 +53,7 @@ module Network.Mailbox (
   -- * Renderers
   renderAddrSpec,
   renderMailbox,
+  renderMailboxChecked,
   renderAddress,
   renderMailboxList,
   renderAddressList,
@@ -67,6 +68,7 @@ module Network.Mailbox (
 
 import Control.Monad.Combinators (sepBy, sepBy1)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
 import qualified Data.ByteString.Short.Internal as SBSI
 import Data.CharSet (CharSet)
@@ -75,10 +77,11 @@ import qualified Data.Text as T
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Data.Word (Word8)
+import Network.HTTP.Grammar (WireGrammar (..))
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
-import Network.HTTP.Grammar (WireGrammar (..))
+import Wireform.Encode.Direct (dBytes, dWord8)
 
 
 -- ---------------------------------------------------------------------------
@@ -163,10 +166,6 @@ ldhSet = asciiSet ldhCharSet
 
 dtextChar :: ParserT st String ()
 dtextChar = satisfyAscii_ (`CharSet.member` dtextCharSet)
-
-
-isAtext :: Char -> Bool
-isAtext c = c `CharSet.member` atextCharSet
 
 
 -- ---------------------------------------------------------------------------
@@ -337,6 +336,52 @@ renderMailbox (Mailbox (Just name) a) =
     <> M.char7 '>'
 
 
+-- | Validate a mailbox before emitting its canonical HTTP spelling.
+renderMailboxChecked :: Mailbox -> Maybe B.ByteString
+renderMailboxChecked (Mailbox name (AddrSpec local host))
+  | validDomain host
+  , localBare || isHttpLatin1Text local
+  , nameBare || maybe True isHttpLatin1Text name =
+      Just $ BSI.unsafeCreateUptoN capacity $ \ptr -> do
+        start <- case name of
+          Nothing -> pure 0
+          Just text -> writePart ptr 0 nameBare text >>= \end -> dBytes ptr end " <"
+        at <- writePart ptr start localBare local
+        afterAt <- dWord8 ptr at 64
+        end <- case host of
+          DomainName text -> R.copyText ptr afterAt text
+          DomainLiteral text -> do
+            opened <- dWord8 ptr afterAt 91
+            closed <- R.copyText ptr opened text
+            dWord8 ptr closed 93
+        case name of
+          Nothing -> pure end
+          Just _ -> dWord8 ptr end 62
+  | otherwise = Nothing
+  where
+    localBare = isDotAtomText local
+    nameBare = maybe False isPhraseOfAtoms name
+    capacity = add (add (partBound localBare local) hostBound) (maybe 0 (add 3 . partBound nameBare) name)
+    hostBound = case host of
+      DomainName text -> add 1 (width text)
+      DomainLiteral text -> add 3 (width text)
+    partBound True text = width text
+    partBound False text = let size = width text in add 2 (add size size)
+    width = SBS.length . ST.toShortByteString
+    add = BSI.checkedAdd "mailbox"
+    writePart ptr offset True text = R.copyText ptr offset text
+    writePart ptr offset False text
+      | SBS.all (\byte -> byte < 128 && byte /= 34 && byte /= 92) bytes = do
+          opened <- dWord8 ptr offset 34
+          end <- R.copyText ptr opened text
+          dWord8 ptr end 34
+      | otherwise = R.foldHttpQuotedShortBytes (dWord8 ptr) offset bytes
+      where
+        bytes = ST.toShortByteString text
+    validDomain (DomainName text) = separatedAtoms ldhSet 46 text
+    validDomain (DomainLiteral text) = scanCompactBytes ((`CharSet.member` dtextCharSet) . BSI.w2c) (ST.toShortByteString text) 0
+
+
 renderAddress :: Address -> M.Builder
 renderAddress (AddressMailbox m) = renderMailbox m
 renderAddress (AddressGroup name members) =
@@ -391,23 +436,23 @@ renderQuoted t =
   @atext@ labels (no leading\/trailing\/doubled dots).
 -}
 isDotAtomText :: ST.ShortText -> Bool
-isDotAtomText = separatedAtoms 46
+isDotAtomText = separatedAtoms atextSet 46
 
 
 -- | True iff @t@ is a space-separated @phrase@ of @atom@s.
 isPhraseOfAtoms :: ST.ShortText -> Bool
-isPhraseOfAtoms = separatedAtoms 32
+isPhraseOfAtoms = separatedAtoms atextSet 32
 
 
-separatedAtoms :: Word8 -> ST.ShortText -> Bool
-separatedAtoms separator text = scan 0 False
+separatedAtoms :: AsciiSet -> Word8 -> ST.ShortText -> Bool
+separatedAtoms (AsciiSet low high) separator text = scan 0 False
   where
     bytes = ST.toShortByteString text
     size = SBS.length bytes
     scan !offset !inAtom
       | offset == size = inAtom
       | byte == separator = inAtom && scan (offset + 1) False
-      | otherwise = isAtext (toEnum (fromIntegral byte)) && scan (offset + 1) True
+      | otherwise = asciiMember low high (BSI.w2c byte) && scan (offset + 1) True
       where
         byte = SBSI.unsafeIndex bytes offset
 {-# INLINE separatedAtoms #-}

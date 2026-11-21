@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
@@ -31,15 +32,17 @@ module Network.HTTP.Headers.AcceptAdditions (
   renderAcceptAdditions,
 ) where
 
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
 import Data.List (find)
 import qualified Data.Text.Short as ST
-import Network.HTTP.ContentNegotiation (qualityValueParser)
+import Network.HTTP.ContentNegotiation (isQualityValueText, qualityValueParser)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptAdditions)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Wireform.Encode.Direct (dWord8)
 
 
 -- | A @;@-separated parameter attached to an addition.
@@ -73,6 +76,37 @@ instance KnownHeader AcceptAdditions where
 
 
   renderToHeaders _ = M.toStrictByteString . renderAcceptAdditions
+
+
+  renderToHeadersChecked _ (AcceptAdditions entries) = R.encodeCommaSeparatedChecked bound write entries
+    where
+      bound (Addition ty ps)
+        | isHttpTokenText ty = measure (width ty) False ps
+        | otherwise = -1
+      measure !size _ [] = size
+      measure !size weighted (AdditionParam key value : rest)
+        | not (isHttpTokenText key) = -1
+        | not weighted && isQuality key = case value of
+            Just wire | isQualityValueText wire -> measure (add (add nameEnd 1) (width wire)) True rest
+            _ -> -1
+        | otherwise = case value of
+            Nothing -> measure nameEnd weighted rest
+            Just text | isHttpQuotedText text ->
+              measure (add (add nameEnd 3) (add (width text) (width text))) weighted rest
+            _ -> -1
+        where
+          nameEnd = add (add size 1) (width key)
+      add = BSI.checkedAdd "Accept-Additions"
+      width = SBS.length . ST.toShortByteString
+      write ptr start (Addition ty ps) = R.copyText ptr start ty >>= writeParams ptr ps
+      writeParams _ [] !offset = pure offset
+      writeParams ptr (AdditionParam key value : rest) !offset = do
+        start <- dWord8 ptr offset 59
+        nameEnd <- R.copyText ptr start key
+        end <- case value of
+          Nothing -> pure nameEnd
+          Just text -> dWord8 ptr nameEnd 61 >>= \begin -> R.writeParameterValue ptr begin text
+        writeParams ptr rest end
 
 
   headerName _ = hAcceptAdditions

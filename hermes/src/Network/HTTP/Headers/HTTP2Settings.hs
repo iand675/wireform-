@@ -68,6 +68,11 @@ instance KnownHeader HTTP2Settings where
   renderToHeaders _ = encodeField
 
 
+  renderToHeadersChecked _ value
+    | validSettingsPayload (http2SettingsPayload value) = Just (encodeField value)
+    | otherwise = Nothing
+
+
   headerName _ = hHTTP2Settings
 
 
@@ -91,7 +96,7 @@ constructor yields 'Nothing'.
 -}
 http2SettingsEntries :: HTTP2Settings -> Maybe (NonEmpty HTTP2Setting)
 http2SettingsEntries (HTTP2Settings payload)
-  | size == 0 || size `rem` 6 /= 0 = Nothing
+  | not (validSettingsPayload payload) = Nothing
   | otherwise = Just (entry 0 :| remaining 6)
   where
     size = B.length payload
@@ -109,6 +114,13 @@ http2SettingsEntries (HTTP2Settings payload)
     octet :: Num a => Int -> a
     octet i = fromIntegral (BU.unsafeIndex payload i)
     {-# INLINE octet #-}
+
+
+validSettingsPayload :: ByteString -> Bool
+validSettingsPayload payload = size /= 0 && size `rem` 6 == 0
+  where
+    size = B.length payload
+{-# INLINE validSettingsPayload #-}
 
 
 -- | Construct a payload from one or more ordered parameters.

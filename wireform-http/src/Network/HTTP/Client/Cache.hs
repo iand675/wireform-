@@ -521,7 +521,11 @@ withCache cache inner = Transport $ \req -> do
                   replayHit timing entry
                 ContactOrigin -> contactOrigin (revalidateOrReplace cache inner req policy generation key stored)
               else case decision of
-                ContactOrigin -> contactOrigin bypass
+                ContactOrigin -> contactOrigin $
+                  if ceStatus entry == S.status200
+                    && cachedNotModified now timing entry (WReq.headers req) == Right True
+                    then revalidateCallerCondition cache generation key inner req entry
+                    else bypass
                 _
                   | ceStatus entry == S.status200
                   , Right unchanged <- cachedNotModified now timing entry (WReq.headers req) -> do
@@ -705,6 +709,48 @@ data TimedResponse = TimedResponse
   , trReceivedAt :: !UTCTime
   , trRaw :: !RawResponse
   }
+
+
+-- | Refresh the selected snapshot while forwarding the caller's own 304.
+revalidateCallerCondition
+  :: Cache
+  -> Word64
+  -> CacheKey
+  -> Transport IO
+  -> WReq.Request BSm.BodyStream
+  -> CacheEntry
+  -> IO RawResponse
+revalidateCallerCondition cache generation key inner req entry = do
+  timed <- sendCacheTimed cache generation key inner req
+  let reply = trRaw timed
+      fields = Resp.headers reply
+      usable = H.stripHopByHop fields
+      validatorField name = name == H.hETag || name == H.hLastModified
+  when
+    ( Resp.statusCode reply == S.status304
+        && cacheMetadataRetained validatorField fields usable
+        && callerResponseValidates entry (trReceivedAt timed) usable
+    ) $
+      void (refreshCachedEntry cache generation key req entry timed usable)
+        `onException` discardReply reply
+  pure reply
+
+
+-- | Identify the one stored variant this cache keeps for a primary key,
+-- using the validators in the 304 (RFC 9111 §4.3.4).
+callerResponseValidates :: CacheEntry -> UTCTime -> H.Headers -> Bool
+callerResponseValidates stored now fields = case (readETag fields, readLastModified now fields) of
+  (Right (Just tag), Right _) -> case readETag (ceHeaders stored) of
+    Right (Just previous) -> case tag of
+      ETag.StrongETagBytes{} -> ETag.strongMatch tag previous
+      ETag.WeakETagBytes{} -> ETag.weakMatch tag previous
+    _ -> False
+  (Right Nothing, Right (Just date)) -> storedDate == Right (Just date)
+  (Right Nothing, Right Nothing) ->
+    readETag (ceHeaders stored) == Right Nothing && storedDate == Right Nothing
+  _ -> False
+  where
+    storedDate = readLastModified (ceResponseTime stored) (ceHeaders stored)
 
 
 sendTimed :: Transport IO -> WReq.Request BSm.BodyStream -> IO TimedResponse

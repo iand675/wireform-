@@ -13,18 +13,27 @@ module Network.HTTP.Headers.TransportPolicy (
   quoted,
   pinPolicy,
   renderPinPolicy,
+  encodePinPolicyChecked,
 ) where
 
 import qualified Control.Applicative as A
 import Control.Monad (void)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Builder.Prim as Prim
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short.Internal as SBS
 import qualified Data.CaseInsensitive as CI
 import qualified Data.Set as Set
 import Data.Text.Short (ShortText)
-import Network.HTTP.Grammar.URIReference (absoluteURI, uriWithFragment)
+import qualified Data.Text.Short as ST
+import Foreign.Ptr (minusPtr, plusPtr)
+import Network.HTTP.ContentNegotiation (sameNegotiationToken)
+import Network.HTTP.Grammar.URIReference (absoluteURI, outboundAbsoluteURIWithFragmentBytes, uriWithFragment, validURIText)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (copyText, shortText)
+import Wireform.Encode.Direct (dBytes, dWord8)
 import Wireform.Parser.Driver (parseByteString)
 
 
@@ -191,3 +200,80 @@ renderPinPolicy algorithm fingerprint pins age subdomains uri =
     agePart = maybe [] (\n -> ["max-age=" <> M.wordDec n]) age
     subdomainsPart = if subdomains then ["includeSubDomains"] else []
     reportPart = maybe [] (\u -> ["report-uri=" <> quoted u]) uri
+
+
+-- | Check every fingerprint and the reporting URI before emitting a policy.
+encodePinPolicyChecked
+  :: (pin -> ShortText)
+  -> (pin -> ShortText)
+  -> [pin]
+  -> Maybe Word
+  -> Bool
+  -> Maybe ShortText
+  -> Maybe BS.ByteString
+encodePinPolicyChecked algorithm fingerprint pins age subdomains uri
+  | maybe True (validURIText outboundAbsoluteURIWithFragmentBytes) uri = sizePins optionsSize pins
+  | otherwise = Nothing
+  where
+    add = BSI.checkedAdd "Public-Key-Pins"
+    width = SBS.length . ST.toShortByteString
+    optionsSize = add (maybe 0 (const 30) age + if subdomains then 19 else 0) (maybe 0 (add 15 . width) uri)
+    sizePins !size [] = Just $ BSI.unsafeCreateUptoN size $ \ptr -> do
+      afterPins <- writePins ptr 0 pins
+      afterAge <- case age of
+        Nothing -> pure afterPins
+        Just seconds -> do
+          start <- separator ptr afterPins >>= \end -> dBytes ptr end "max-age="
+          end <- Prim.runB Prim.wordDec seconds (ptr `plusPtr` start)
+          pure (end `minusPtr` ptr)
+      afterDomains <-
+        if subdomains
+          then separator ptr afterAge >>= \end -> dBytes ptr end "includeSubDomains"
+          else pure afterAge
+      case uri of
+        Nothing -> pure afterDomains
+        Just endpoint -> do
+          start <- separator ptr afterDomains >>= \end -> dBytes ptr end "report-uri=\""
+          end <- copyText ptr start endpoint
+          dWord8 ptr end 34
+    sizePins !size (pin : rest)
+      | isHttpTokenText name, validFingerprint (sameNegotiationToken "sha256" name) digest =
+          sizePins (add (add (add size 9) (width name)) (width digest)) rest
+      | otherwise = Nothing
+      where
+        name = algorithm pin
+        digest = fingerprint pin
+    writePins _ !offset [] = pure offset
+    writePins ptr !offset (pin : rest) = do
+      start <- separator ptr offset >>= \end -> dBytes ptr end "pin-"
+      nameEnd <- copyText ptr start (algorithm pin)
+      opened <- dBytes ptr nameEnd "=\""
+      digestEnd <- copyText ptr opened (fingerprint pin)
+      closed <- dWord8 ptr digestEnd 34
+      writePins ptr closed rest
+    separator ptr offset
+      | offset == 0 = pure 0
+      | otherwise = dBytes ptr offset "; "
+{-# INLINE encodePinPolicyChecked #-}
+
+
+validFingerprint :: Bool -> ShortText -> Bool
+validFingerprint sha256 text =
+  size >= 4 && size `rem` 4 == 0
+    && (not sha256 || (size == 44 && padding == 1))
+    && canonicalPadding
+    && validBase64Prefix bytes end
+  where
+    bytes = ST.toShortByteString text
+    size = SBS.length bytes
+    at = SBS.unsafeIndex bytes
+    padding
+      | at (size - 1) /= 61 = 0
+      | at (size - 2) == 61 = 2
+      | otherwise = 1
+    end = size - padding
+    canonicalPadding = case padding of
+      2 -> at (end - 1) `BS.elem` "AQgw"
+      1 -> at (end - 1) `BS.elem` "AEIMQUYcgkosw048"
+      _ -> True
+{-# INLINE validFingerprint #-}

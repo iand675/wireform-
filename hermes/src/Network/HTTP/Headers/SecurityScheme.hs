@@ -44,18 +44,28 @@ instance KnownHeader SecurityScheme where
   renderToHeaders _ = ST.toByteString . securitySchemeValue
 
 
+  renderToHeadersChecked _ (SecurityScheme text)
+    | text == "S-HTTP/1.4" = Just "S-HTTP/1.4"
+    | otherwise =
+        let wire = ST.toByteString text
+        in either (const Nothing) (const (Just wire)) $
+             parseSingleFieldLine "Security-Scheme" securitySchemeVersion (wire :| [])
+
+
   headerName _ = hSecurityScheme
 
 
 securitySchemeParser :: ParserT st String SecurityScheme
-securitySchemeParser = SecurityScheme <$> shortASCIIFromParser_ version
-  where
-    version = do
-      prefix <- anyWord64be
-      -- Fold only the letters of "S-HTTP/1".
-      if prefix .|. 0x2000202020200000 == 0x732d687474702f31
-        then $(string ".4")
-        else failed
+securitySchemeParser = SecurityScheme <$> shortASCIIFromParser_ securitySchemeVersion
+
+
+securitySchemeVersion :: ParserT st String ()
+securitySchemeVersion = do
+  prefix <- anyWord64be
+  -- Fold only the letters of "S-HTTP/1".
+  if prefix .|. 0x2000202020200000 == 0x732d687474702f31
+    then $(string ".4")
+    else failed
 
 
 renderSecurityScheme :: SecurityScheme -> M.Builder

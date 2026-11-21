@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
@@ -24,12 +25,18 @@ module Network.HTTP.Headers.Timeout (
   renderTimeout,
 ) where
 
+import qualified Data.ByteString.Builder.Prim as Prim
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.List.NonEmpty as NE
+import Data.Word (Word32)
+import Foreign.Ptr (minusPtr, plusPtr)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTimeout)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (sepByCommas1)
+import Wireform.Encode.Direct (dBytes)
 
 
 -- | A single requested timeout value.
@@ -59,6 +66,9 @@ instance KnownHeader Timeout where
   renderToHeaders _ = M.toStrictByteString . renderTimeout
 
 
+  renderToHeadersChecked _ (Timeout choices) = encodeTimeout choices
+
+
   headerName _ = hTimeout
 
 
@@ -68,7 +78,7 @@ timeTypeParser =
        [|
          case _ of
            "infinite" -> pure TimeInfinite
-           "second-" -> TimeSeconds <$> boundedDecimalWord 4_294_967_295 (err "Timeout exceeds 2^32-1 seconds")
+           "second-" -> TimeSeconds <$> boundedDecimalWord maxTimeoutSeconds (err "Timeout exceeds 2^32-1 seconds")
          |]
    )
 
@@ -76,6 +86,33 @@ timeTypeParser =
 timeoutParser :: ParserT st String Timeout
 timeoutParser =
   Timeout <$> (httpList timeTypeParser >>= maybe failed pure . NE.nonEmpty)
+
+
+maxTimeoutSeconds :: Word
+maxTimeoutSeconds = fromIntegral (maxBound :: Word32)
+
+
+encodeTimeout :: NE.NonEmpty TimeType -> Maybe BSI.ByteString
+encodeTimeout (first NE.:| rest) = sizeChoices 0 first rest
+  where
+    sizeChoices !size choice remaining
+      | TimeSeconds seconds <- choice, seconds > maxTimeoutSeconds = Nothing
+      | otherwise =
+          -- Allow space for "Second-", ten digits, and a comma and space.
+          let bound = BSI.checkedAdd "Timeout" size 19
+          in case remaining of
+               [] -> Just $ BSI.unsafeCreateUptoN bound $ \ptr -> writeChoice ptr 0 first >>= writeRest ptr rest
+               next : more -> sizeChoices bound next more
+    writeRest _ [] !offset = pure offset
+    writeRest ptr (next : more) !offset = do
+      afterComma <- dBytes ptr offset ", "
+      afterChoice <- writeChoice ptr afterComma next
+      writeRest ptr more afterChoice
+    writeChoice ptr offset TimeInfinite = dBytes ptr offset "Infinite"
+    writeChoice ptr offset (TimeSeconds seconds) = do
+      afterPrefix <- dBytes ptr offset "Second-"
+      end <- Prim.runB Prim.word32Dec (fromIntegral seconds) (ptr `plusPtr` afterPrefix)
+      pure (end `minusPtr` ptr)
 
 
 renderTimeout :: Timeout -> M.Builder

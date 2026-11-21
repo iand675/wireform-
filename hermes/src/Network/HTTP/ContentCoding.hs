@@ -14,6 +14,8 @@ module Network.HTTP.ContentCoding (
   ContentCoding (..),
   sameContentCoding,
   contentCodingParser,
+  contentCodingText,
+  isValidContentCoding,
   renderContentCoding,
 ) where
 
@@ -98,8 +100,8 @@ registeredCodingParser =
     wholeToken coding = coding <$ notFollowedBy (skipSatisfyAscii (`CharSet.member` tokenCharSet))
 
 
-renderContentCoding :: ContentCoding -> M.Builder
-renderContentCoding = \case
+contentCodingText :: ContentCoding -> ShortText
+contentCodingText = \case
   AES128GCM -> "aes128gcm"
   Brotli -> "br"
   Compress -> "compress"
@@ -109,4 +111,15 @@ renderContentCoding = \case
   Identity -> "identity"
   Pack200GZip -> "pack200-gzip"
   ZStd -> "zstd"
-  Custom x -> shortText x
+  Custom x -> x
+{-# INLINE contentCodingText #-}
+
+
+isValidContentCoding :: ContentCoding -> Bool
+isValidContentCoding (Custom token) = isHttpTokenText token
+isValidContentCoding _ = True
+{-# INLINE isValidContentCoding #-}
+
+
+renderContentCoding :: ContentCoding -> M.Builder
+renderContentCoding = shortText . contentCodingText

@@ -23,14 +23,17 @@ module Network.HTTP.Headers.Safe (
 
 import Data.Bits ((.|.))
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import qualified Data.ByteString.Unsafe as BSU
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
+import Network.HTTP.Grammar.Rendering (copyText, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSafe)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Encode.Direct (dBytes, directEncode)
 
 
 -- | Whether repeating the corresponding request is considered safe.
@@ -62,6 +65,16 @@ instance KnownHeader Safe where
   renderToHeaders _ SafeYes = "yes"
   renderToHeaders _ SafeNo = "no"
   renderToHeaders _ result = M.toStrictByteString (renderSafe result)
+
+
+  renderToHeadersChecked _ SafeYes = Just "yes"
+  renderToHeadersChecked _ SafeNo = Just "no"
+  renderToHeadersChecked _ (SafeIf condition)
+    | isHttpTokenText condition = Just $ directEncode size $ \ptr start ->
+        dBytes ptr start "if-" >>= \offset -> copyText ptr offset condition
+    | otherwise = Nothing
+    where
+      size = BSI.checkedAdd "Safe" 3 (SBS.length (ST.toShortByteString condition))
 
 
   headerName _ = hSafe

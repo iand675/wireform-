@@ -21,7 +21,7 @@ module Network.HTTP.Headers.Sunset (
 
 import Data.Time.Clock (UTCTime)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate, renderDateBytesChecked)
 import Network.HTTP.Headers.HeaderFieldName (hSunset)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -41,6 +41,9 @@ instance KnownHeader Sunset where
 
 
   renderToHeaders _ = M.toStrictByteString . renderSunset
+
+
+  renderToHeadersChecked _ = renderDateBytesChecked . sunsetDate
 
 
   headerName _ = hSunset

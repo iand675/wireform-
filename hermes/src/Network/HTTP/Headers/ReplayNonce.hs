@@ -22,6 +22,7 @@ module Network.HTTP.Headers.ReplayNonce (
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Unsafe as BSU
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
@@ -48,14 +49,24 @@ instance KnownHeader ReplayNonce where
   renderToHeaders _ = ST.toByteString . replayNonce
 
 
+  renderToHeadersChecked _ (ReplayNonce nonce) =
+    let wire = ST.toByteString nonce
+    in either (const Nothing) (const (Just wire)) $
+         parseSingleFieldLine "Replay-Nonce" replayNonceWire (wire :| [])
+
+
   headerName _ = hReplayNonce
 
 
 replayNonceParser :: ParserT st String ReplayNonce
-replayNonceParser =
+replayNonceParser = ReplayNonce . STU.fromByteStringUnsafe <$> replayNonceWire
+
+
+replayNonceWire :: ParserT st String BS.ByteString
+replayNonceWire =
   withByteString base64UrlBytes $ \() wire ->
     if canonicalTail wire
-      then pure (ReplayNonce (STU.fromByteStringUnsafe wire))
+      then pure wire
       else err "Invalid unpadded Base64url Replay-Nonce"
   where
     -- The scanner guarantees a nonempty run. A partial group must have

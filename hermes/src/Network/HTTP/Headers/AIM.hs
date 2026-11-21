@@ -20,14 +20,16 @@ module Network.HTTP.Headers.AIM (
   renderAIM,
 ) where
 
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import qualified Data.Text.Short as ST
-import Network.HTTP.ContentNegotiation (qualityValueParser, renderWeight)
+import Network.HTTP.ContentNegotiation (qualityValueParser, renderWeight, writeWeight)
+import Network.HTTP.Grammar.Rendering (copyText, encodeCommaSeparatedChecked, renderSeparated, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAIM)
-import Network.HTTP.Headers.IM (IMParameter (..), IMParameterValue (..), imParameterParser, imParameterSeparator, renderIMParameter)
+import Network.HTTP.Headers.IM (IMParameter (..), IMParameterValue (..), imParameterBound, imParameterParser, imParameterSeparator, renderIMParameter, writeIMParameter)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (renderSeparated, shortText)
 
 
 -- | An instance manipulation with a quality weight (default 1.0).
@@ -65,6 +67,20 @@ instance KnownHeader AIM where
 
 
   renderToHeaders _ = M.toStrictByteString . renderAIM
+
+
+  renderToHeadersChecked _ (AIM entries) = encodeCommaSeparatedChecked bound write entries
+    where
+      bound entry
+        | isHttpTokenText (imTag entry)
+        , let size = imParameterBound (weightedIMParameter entry)
+        , size >= 0 = add (add (SBS.length (ST.toShortByteString (imTag entry))) size) 8
+        | otherwise = -1
+      add = BSI.checkedAdd "A-IM"
+      write ptr start entry = do
+        end <- copyText ptr start (imTag entry)
+        parameterEnd <- writeIMParameter ptr end (weightedIMParameter entry)
+        writeWeight ptr parameterEnd (imWeight entry)
 
 
   headerName _ = hAIM

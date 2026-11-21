@@ -34,15 +34,23 @@ module Network.HTTP.Headers.ExpectCT (
 ) where
 
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Builder.Prim as Prim
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import Data.CaseInsensitive (CI)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Set as Set
 import qualified Data.Text.Short as ST
+import Foreign.Ptr (minusPtr, plusPtr)
+import Network.HTTP.Grammar.URIReference (outboundAbsoluteURIBytes, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hExpectCT)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Network.HTTP.Headers.Rendering.Util (copyText)
 import Network.HTTP.Headers.TransportPolicy (directiveEnd, extension, policyAge, quoted, reportURI, valueless)
+import Wireform.Encode.Direct (dBytes, dWord8)
 
 
 -- | Parsed @Expect-CT@ policy.
@@ -68,6 +76,25 @@ instance KnownHeader ExpectCT where
 
 
   renderToHeaders _ = M.toStrictByteString . renderExpectCT
+
+
+  renderToHeadersChecked _ (ExpectCT age enforce uri)
+    | maybe True (validURIText outboundAbsoluteURIBytes) uri =
+        Just $ BSI.unsafeCreateUptoN capacity $ \ptr -> do
+          start <- dBytes ptr 0 "max-age="
+          end <- Prim.runB Prim.wordDec age (ptr `plusPtr` start)
+          let ageEnd = end `minusPtr` ptr
+          afterEnforce <- if enforce then dBytes ptr ageEnd ", enforce" else pure ageEnd
+          case uri of
+            Nothing -> pure afterEnforce
+            Just endpoint -> do
+              opened <- dBytes ptr afterEnforce ", report-uri=\""
+              closed <- copyText ptr opened endpoint
+              dWord8 ptr closed 34
+    | otherwise = Nothing
+    where
+      capacity = BSI.checkedAdd "Expect-CT" (28 + if enforce then 9 else 0)
+        (maybe 0 (BSI.checkedAdd "Expect-CT" 15 . SBS.length . ST.toShortByteString) uri)
 
 
   headerName _ = hExpectCT

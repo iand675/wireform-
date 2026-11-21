@@ -1,5 +1,8 @@
+{-# LANGUAGE FlexibleContexts #-}
+
 module Test.Hermes.StructuredFields (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft, isRight)
@@ -130,6 +133,63 @@ tests = describe "Structured Fields" $ do
     renderHeaderLines defaultHeaderSettings resetHints `shouldBe` Just ("" :| [])
     (setHeader resetHints . setHeader policy . setHeader reporting . setHeader saveData . setHeader purpose) fields
       `shouldBe` headerMapFromList [("Accept-CH", ""), ("Content-Type", "text/plain")]
+  it "rejects invalid authored browser hints without replacing existing fields" $ do
+    let fields = headerMapFromList [("Accept-CH", "DPR"), ("Save-Data", "on"), ("Sec-Purpose", "prefetch")]
+        invalidToken = P.RFC8941Token "bad token"
+        invalidParameter = P.StructuredFieldParameter "flag" (Integer 1_000_000_000_000_000)
+        invalidString = String (RFC8941String "invalid\nvalue")
+        reject value = do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value fields `shouldBe` fields
+    forM_ ["1hint", "bad/name", "a:b", "Sec CH", ""] $ \name ->
+      reject (ACH.AcceptCH [P.RFC8941Token "DPR", P.RFC8941Token name])
+    reject (SD.SaveData "bad token")
+    reject (SD.SaveDataList [SD.SaveDataItem (P.RFC8941Token "on") [invalidParameter]])
+    reject (SP.SecPurpose invalidToken)
+    reject (SP.SecPurposeList [P.StructuredInnerList [P.StructuredFieldItem invalidString []] []])
+    reject (SP.SecPurposeList [P.StructuredInnerList [] [invalidParameter]])
+  it "normalizes authored duplicate parameters inside browser hint lists" $ do
+    let parameter = P.StructuredFieldParameter
+        modeParams =
+          [ parameter "mode" (Integer 1)
+          , parameter "flag" (Boolean True)
+          , parameter "mode" (Token (P.RFC8941Token "mobile"))
+          ]
+        dataHint = SD.SaveDataList [SD.SaveDataItem (P.RFC8941Token "on") modeParams]
+        future = P.StructuredFieldItem (Token (P.RFC8941Token "future")) [parameter "flag" (Boolean False), parameter "flag" (Boolean True)]
+        choiceParams = [parameter "choice" (Integer 1_000_000_000_000_000), parameter "choice" (Integer 2)]
+        purpose = SP.SecPurposeList [P.StructuredInnerList [future] choiceParams]
+    renderHeaderLines defaultHeaderSettings dataHint `shouldBe` Just ("on;mode=mobile;flag" :| [])
+    renderHeaderLines defaultHeaderSettings purpose `shouldBe` Just ("(future;flag);choice=2" :| [])
+  it "rejects invalid policy and endpoint writes while preserving previous values" $ do
+    let fields = headerMapFromList [("Permissions-Policy", "camera=()"), ("Reporting-Endpoints", "default=\"/reports\"")]
+        reject value = do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value fields `shouldBe` fields
+        malformed = String (RFC8941String "missing\nvalue")
+        item bare = P.StructuredItem (P.StructuredFieldItem bare [])
+        entry key member = PP.PermissionsPolicyDictionary [P.StructuredFieldDictionaryEntry key member]
+        endpoint key uri = RE.ReportingEndpoints [RE.ReportingEndpoint key (RFC8941String uri)]
+    reject (entry "Camera" (P.StructuredInnerList [] []))
+    reject (entry "camera" (item malformed))
+    reject (entry "camera" (P.StructuredInnerList [] [P.StructuredFieldParameter "invalid" (DateValue 1_000_000_000_000_000)]))
+    reject (endpoint "Default" "/reports")
+    reject (endpoint "default" "/bad url")
+    reject (endpoint "default" "/bad%XX")
+  it "applies dictionary replacement to authored policy and endpoint writes" $ do
+    let entry = P.StructuredFieldDictionaryEntry
+        param = P.StructuredFieldParameter
+        reportTo name = param "report-to" (Token (P.RFC8941Token name))
+        obsolete = P.StructuredItem (P.StructuredFieldItem (String (RFC8941String "bad\nvalue")) [])
+        camera = P.StructuredInnerList [] [reportTo "old", reportTo "policy"]
+        future = P.StructuredItem (P.StructuredFieldItem (Boolean True) [param "flag" (Boolean False), param "flag" (Boolean True)])
+        policy = PP.PermissionsPolicyDictionary [entry "camera" obsolete, entry "future" future, entry "camera" camera]
+        endpoint key uri = RE.ReportingEndpoint key (RFC8941String uri)
+        reporting = RE.ReportingEndpoints [endpoint "default" "/bad%XX", endpoint "backup" "https://report.example/", endpoint "default" "../r?q=%2F#top"]
+    renderHeaderLines defaultHeaderSettings policy `shouldBe` Just ("camera=();report-to=policy, future;flag" :| [])
+    PP.permissionsPolicyDeclarations policy
+      `shouldBe` [PP.PermissionsPolicyDeclaration "camera" (Just []) (Just (P.RFC8941Token "policy")), PP.PermissionsPolicyDeclaration "future" Nothing Nothing]
+    renderHeaderLines defaultHeaderSettings reporting `shouldBe` Just ("default=\"../r?q=%2F#top\", backup=\"https://report.example/\"" :| [])
   it "clears every prior Cache-Status line with an empty list" $ do
     let rest = [("Content-Type", "text/plain")]
         fields = headerMapFromList ([("Cache-Status", "edge;hit"), ("Cache-Status", "origin;fwd=uri-miss")] <> rest)
@@ -176,6 +236,62 @@ tests = describe "Structured Fields" $ do
         headerMapToList (setHeader value fields)
           `shouldBe` [("cache-status", "edge;hit;stored;fwd-status=304;note;collapsed=?0, origin;stored=?0")]
       result -> expectationFailure (show result)
+  it "keeps registered Cache-Status values when extensions reuse their names" $ do
+    let fields =
+          headerMapFromList
+            [ ("Cache-Status", "upstream;fwd=stale;fwd-status=304;stored;collapsed=?0;ttl=-5;key=\"cache key\";detail=refresh;extension")
+            , ("Cache-Status", "edge;hit;ttl=23;fwd-status=200;stored=?0")
+            ]
+        registered =
+          [ ("hit", Just (Boolean False))
+          , ("fwd", Just (Token (P.RFC8941Token "bypass")))
+          , ("ttl", Just (Integer 99))
+          , ("key", Nothing)
+          , ("detail", Nothing)
+          ]
+        forwarding = [("fwd-status", Just (Integer 500)), ("stored", Just (Boolean False)), ("collapsed", Nothing)]
+        addExtensions extras member =
+          let common = CS.cacheStatusCommonFields member
+          in member
+               { CS.cacheStatusCommonFields =
+                   common {CS.cacheStatusUnknownParameters = CS.cacheStatusUnknownParameters common <> extras}
+               }
+    case lookupHeader @CS.CacheStatus fields of
+      Right (Just original@(CS.CacheStatus [upstream, edge])) -> do
+        let authored = CS.CacheStatus [addExtensions (registered <> forwarding) upstream, addExtensions registered edge]
+            rendered = setHeader authored fields
+        headerMapToList rendered
+          `shouldBe` [("cache-status", "upstream;fwd=stale;fwd-status=304;stored;collapsed=?0;ttl=-5;key=\"cache key\";detail=refresh;extension, edge;hit;ttl=23;fwd-status=200;stored=?0")]
+        lookupHeader @CS.CacheStatus rendered `shouldBe` Right (Just original)
+      result -> expectationFailure (show result)
+  it "rejects invalid authored Cache-Status without replacing existing lines" $ do
+    let fields = headerMapFromList [("Cache-Status", "edge;hit"), ("Cache-Status", "origin;fwd=stale")]
+        token = Left . P.RFC8941Token
+        string = Right . P.RFC8941String
+        common = CS.CacheStatusCommonFields Nothing Nothing Nothing []
+        valid = CS.CacheStatusEntry (token "edge") (Left CS.Hit) common
+        forward reason status = Right (CS.ForwardInfo reason status Nothing Nothing)
+        withCommon params = valid {CS.cacheStatusCommonFields = params}
+        invalid =
+          [ valid {CS.cacheStatusIdentifier = token "123"}
+          , valid {CS.cacheStatusIdentifier = string "café"}
+          , valid {CS.cacheStatusHitOrForward = forward (CS.UnknownForward "uri miss") Nothing}
+          , valid {CS.cacheStatusHitOrForward = forward CS.Stale (Just 600)}
+          , withCommon (common {CS.cacheStatusTtl = Just (-1_000_000_000_000_000)})
+          , withCommon (common {CS.cacheStatusKey = Just (P.RFC8941String "a\nb")})
+          , withCommon (common {CS.cacheStatusDetail = Just (token "bad,detail")})
+          , withCommon (common {CS.cacheStatusUnknownParameters = [("Upper", Nothing)]})
+          , withCommon (common {CS.cacheStatusUnknownParameters = [("eta", Just (DateValue 1_000_000_000_000_000))]})
+          ]
+    forM_ invalid $ \member -> do
+      let value = CS.CacheStatus [valid, member]
+      isLeft (CS.renderCacheStatusChecked value) `shouldBe` True
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields
+    let extensions = [("x", Just (Token (P.RFC8941Token ""))), ("ttl", Just (DateValue maxBound)), ("x", Nothing)]
+        repaired = CS.CacheStatus [withCommon (common {CS.cacheStatusTtl = Just (-999_999_999_999_999), CS.cacheStatusUnknownParameters = extensions})]
+    headerMapToList (setHeader repaired fields) `shouldBe` [("cache-status", "edge;hit;ttl=-999999999999999;x")]
+
   it "parses ordered Cache-Status fields and replaces parameters before validating them" $ do
     let fields =
           headerMapFromList

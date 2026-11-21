@@ -31,14 +31,18 @@ module Network.HTTP.Headers.XXSSProtection (
   renderXXSSProtection,
 ) where
 
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (uriReference)
+import Network.HTTP.Grammar.URIReference (outboundURIReferenceBytes, uriReference, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXXSSProtection)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (copyText, shortText)
+import Wireform.Encode.Direct (dBytes, directEncode)
 import Wireform.Parser.Driver (parseByteString)
 
 
@@ -72,6 +76,19 @@ instance KnownHeader XXSSProtection where
   renderToHeaders _ (XXSSEnabled False Nothing) = "1"
   renderToHeaders _ (XXSSEnabled True Nothing) = "1; mode=block"
   renderToHeaders _ value = M.toStrictByteString (renderXXSSProtection value)
+
+
+  renderToHeadersChecked _ (XXSSEnabled blocked (Just endpoint))
+    | not (SBS.null bytes)
+    , not (SBS.elem 59 bytes)
+    , validURIText outboundURIReferenceBytes endpoint =
+        Just $ directEncode capacity $ \ptr start -> dBytes ptr start prefix >>= \end -> copyText ptr end endpoint
+    | otherwise = Nothing
+    where
+      bytes = ST.toShortByteString endpoint
+      prefix = if blocked then "1; mode=block; report=" else "1; report="
+      capacity = BSI.checkedAdd "X-XSS-Protection" (BS.length prefix) (SBS.length bytes)
+  renderToHeadersChecked settings value = Just (renderToHeaders settings value)
 
 
   headerName _ = hXXSSProtection

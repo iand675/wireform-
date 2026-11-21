@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
@@ -35,6 +36,9 @@ import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Data.Word (Word8)
 import Foreign.Ptr (plusPtr)
+import GHC.ByteOrder (ByteOrder (..), targetByteOrder)
+import GHC.Exts (indexWord16Array#, indexWord32Array#, indexWord64Array#, isTrue#, sizeofByteArray#, (<=#), (==#))
+import GHC.Word (Word16 (..), Word32 (..), Word64 (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXUACompatible)
 import qualified Network.HTTP.Headers.Mason as M
@@ -56,8 +60,9 @@ newtype XUACompatible = XUACompatible {uaCompatDirectives :: NonEmpty UACompatDi
   deriving stock (Eq, Show)
 
 
--- | A declared Internet Explorer mode. The browser version and document
--- doctype determine the mode ultimately used for rendering.
+{- | A declared Internet Explorer mode. The browser version and document
+doctype determine the mode ultimately used for rendering.
+-}
 data IEDocumentMode
   = IEEdge
   | IEVersion {-# UNPACK #-} !Word
@@ -70,7 +75,7 @@ ieDocumentMode :: UACompatDirective -> Maybe IEDocumentMode
 ieDocumentMode (UACompatDirective engine mode)
   | not (matchesIE 32 engineBytes) = Nothing
   | matchesEdge 32 modeBytes = Just IEEdge
-  | hasASCIIPrefix "emulateie" modeBytes = readModeVersion IEEmulate 9 modeBytes
+  | hasEmulatePrefix modeBytes = readModeVersion IEEmulate 9 modeBytes
   | otherwise = readModeVersion IEVersion 0 modeBytes
   where
     engineBytes = ST.toShortByteString engine
@@ -78,16 +83,17 @@ ieDocumentMode (UACompatDirective engine mode)
 {-# INLINE ieDocumentMode #-}
 
 
--- The prefix contains only lowercase ASCII letters. Setting bit five
--- matches each of those letters or its uppercase form.
-hasASCIIPrefix :: SBS.ShortByteString -> SBS.ShortByteString -> Bool
-hasASCIIPrefix prefix bytes = size <= SBS.length bytes && go 0
+-- Check the complete nine-byte prefix before reading either segment.
+hasEmulatePrefix :: SBS.ShortByteString -> Bool
+hasEmulatePrefix bytes@(SBSI.SBS array) =
+  isTrue# (9# <=# sizeofByteArray# array)
+    && W64# (indexWord64Array# array 0#) .|. 0x2020_2020_2020_2020 == prefix
+    && SBSI.unsafeIndex bytes 8 .|. 32 == 101
   where
-    size = SBS.length prefix
-    go i =
-      i == size
-        || (SBSI.unsafeIndex bytes i .|. 32 == SBSI.unsafeIndex prefix i && go (i + 1))
-{-# INLINE hasASCIIPrefix #-}
+    prefix = case targetByteOrder of
+      BigEndian -> 0x656d_756c_6174_6569
+      LittleEndian -> 0x6965_7461_6c75_6d65
+{-# INLINE hasEmulatePrefix #-}
 
 
 readModeVersion :: (Word -> IEDocumentMode) -> Int -> SBS.ShortByteString -> Maybe IEDocumentMode
@@ -120,10 +126,15 @@ instance KnownHeader XUACompatible where
 
 
   renderToHeaders _ (XUACompatible (UACompatDirective engine mode :| []))
-    | matchesIE 0 (ST.toShortByteString engine)
-    , matchesEdge 0 (ST.toShortByteString mode) = "IE=edge"
+    | isCanonicalEdge engine mode = "IE=edge"
   renderToHeaders _ (XUACompatible directives) = encodeDirectives directives
   {-# INLINE renderToHeaders #-}
+
+
+  renderToHeadersChecked _ (XUACompatible (UACompatDirective engine mode :| []))
+    | isCanonicalEdge engine mode = Just "IE=edge"
+  renderToHeadersChecked _ (XUACompatible directives) = encodeCheckedDirectives directives
+  {-# INLINE renderToHeadersChecked #-}
 
 
   headerName _ = hXUACompatible
@@ -141,35 +152,84 @@ edgeCompatibility :: XUACompatible
 edgeCompatibility = XUACompatible (UACompatDirective "IE" "edge" :| [])
 
 
--- Use a mask of zero for the wire spelling and 32 for ASCII case folding.
+isCanonicalEdge :: ST.ShortText -> ST.ShortText -> Bool
+isCanonicalEdge engine mode =
+  matchesIE 0 (ST.toShortByteString engine) && matchesEdge 0 (ST.toShortByteString mode)
+{-# INLINE isCanonicalEdge #-}
+
+
+-- The length checks bound the word loads. A mask of 32 folds ASCII case.
 matchesIE :: Word8 -> SBS.ShortByteString -> Bool
-matchesIE mask engine =
-  SBS.length engine == 2
-    && SBSI.unsafeIndex engine 0 .|. mask == 73 .|. mask
-    && SBSI.unsafeIndex engine 1 .|. mask == 69 .|. mask
+matchesIE mask (SBSI.SBS bytes) =
+  isTrue# (sizeofByteArray# bytes ==# 2#)
+    && W16# (indexWord16Array# bytes 0#) .|. maskWord == ieWord .|. maskWord
+  where
+    maskWord = fromIntegral mask * 0x0101
 {-# INLINE matchesIE #-}
 
 
 matchesEdge :: Word8 -> SBS.ShortByteString -> Bool
-matchesEdge mask mode =
-  SBS.length mode == 4
-    && SBSI.unsafeIndex mode 0 .|. mask == 101
-    && SBSI.unsafeIndex mode 1 .|. mask == 100
-    && SBSI.unsafeIndex mode 2 .|. mask == 103
-    && SBSI.unsafeIndex mode 3 .|. mask == 101
+matchesEdge mask (SBSI.SBS bytes) =
+  isTrue# (sizeofByteArray# bytes ==# 4#)
+    && W32# (indexWord32Array# bytes 0#) .|. (fromIntegral mask * 0x01010101) == edgeWord
 {-# INLINE matchesEdge #-}
 
 
+ieWord :: Word16
+ieWord = case targetByteOrder of
+  BigEndian -> 0x4945
+  LittleEndian -> 0x4549
+{-# INLINE ieWord #-}
+
+
+edgeWord :: Word32
+edgeWord = case targetByteOrder of
+  BigEndian -> 0x65646765
+  LittleEndian -> 0x65676465
+{-# INLINE edgeWord #-}
+
+
 encodeDirectives :: NonEmpty UACompatDirective -> ByteString
-encodeDirectives (first :| rest) = directEncode size $ \ptr start ->
+encodeDirectives directives@(first :| rest) =
+  encodeDirectivesAtSize size directives
+  where
+    size = foldl' (\total entry -> addDirectiveSize (addSize total 2) entry) (addDirectiveSize 0 first) rest
+-- Keep the fallback's result boxed so the renderer can return the shared
+-- ByteString directly on the canonical branch.
+{-# OPAQUE encodeDirectives #-}
+
+
+encodeCheckedDirectives :: NonEmpty UACompatDirective -> Maybe ByteString
+encodeCheckedDirectives directives@(first :| rest)
+  | valid first = go (addDirectiveSize 0 first) rest
+  | otherwise = Nothing
+  where
+    go !size [] = Just (encodeDirectivesAtSize size directives)
+    go !size (entry : more)
+      | valid entry = go (addDirectiveSize (addSize size 2) entry) more
+      | otherwise = Nothing
+    valid (UACompatDirective engine mode) = isHttpTokenText engine && isHttpTokenText mode
+-- Keep scans out of callers that inline the cached singleton path.
+{-# NOINLINE encodeCheckedDirectives #-}
+
+
+addDirectiveSize :: Int -> UACompatDirective -> Int
+addDirectiveSize total (UACompatDirective engine mode) =
+  addSize (addSize (addSize total (textSize engine)) 1) (textSize mode)
+  where
+    textSize = SBS.length . ST.toShortByteString
+{-# INLINE addDirectiveSize #-}
+
+
+addSize :: Int -> Int -> Int
+addSize = BSI.checkedAdd "X-UA-Compatible"
+{-# INLINE addSize #-}
+
+
+encodeDirectivesAtSize :: Int -> NonEmpty UACompatDirective -> ByteString
+encodeDirectivesAtSize size (first :| rest) = directEncode size $ \ptr start ->
   writeDirective ptr start first >>= writeRest ptr rest
   where
-    add = BSI.checkedAdd "X-UA-Compatible"
-    size = foldl' (\total entry -> addDirective (add total 2) entry) (addDirective 0 first) rest
-    addDirective total (UACompatDirective engine mode) =
-      add (add (add total (textSize engine)) 1) (textSize mode)
-    textSize = SBS.length . ST.toShortByteString
-
     writeDirective ptr offset (UACompatDirective engine mode) = do
       engineEnd <- writeText ptr offset engine
       modeStart <- dWord8 ptr engineEnd 61
@@ -185,6 +245,7 @@ encodeDirectives (first :| rest) = directEncode size $ \ptr start ->
       start <- dWord8 ptr space 32
       end <- writeDirective ptr start entry
       writeRest ptr more end
+{-# INLINE encodeDirectivesAtSize #-}
 
 
 renderXUACompatible :: XUACompatible -> M.Builder

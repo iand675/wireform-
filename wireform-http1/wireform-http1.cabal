@@ -130,6 +130,7 @@ test-suite wireform-http1-test
     network,
     network-run >= 0.3,
     stm,
+    unix,
     wireform-core,
     wireform-http1,
     wireform-network,

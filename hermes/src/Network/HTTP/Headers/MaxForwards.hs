@@ -21,6 +21,7 @@ module Network.HTTP.Headers.MaxForwards (
 ) where
 
 import Data.List.NonEmpty (NonEmpty (..))
+import Network.HTTP.Grammar.Rendering (encodeWordDecimal)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hMaxForwards)
 import qualified Network.HTTP.Headers.Mason as M
@@ -48,6 +49,14 @@ instance KnownHeader MaxForwards where
 
 
   renderToHeaders _ = M.toStrictByteString . renderMaxForwards
+
+
+  renderToHeadersChecked _ (MaxForwards hops)
+    | hops >= 0 = Just (encodeWordDecimal (fromIntegral hops))
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
+
+
   headerName _ = hMaxForwards
 
 

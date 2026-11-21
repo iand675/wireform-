@@ -26,7 +26,7 @@ module Network.HTTP.Headers.DeltaBase (
 ) where
 
 import Network.HTTP.Headers
-import Network.HTTP.Headers.ETag (EntityTag, entityTagParser, renderEntityTag)
+import Network.HTTP.Headers.ETag (EntityTag, encodeEntityTagChecked, entityTagParser, renderEntityTag)
 import Network.HTTP.Headers.HeaderFieldName (hDeltaBase)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -49,6 +49,9 @@ instance KnownHeader DeltaBase where
 
 
   renderToHeaders _ = M.toStrictByteString . renderDeltaBase
+
+
+  renderToHeadersChecked _ = encodeEntityTagChecked . deltaBase
 
 
   headerName _ = hDeltaBase

@@ -45,6 +45,7 @@ import Network.HTTP.Headers.WWWAuthenticate (
   ChallengeContents (..),
   CredentialParam (..),
   challengesParser,
+  encodeAuthChallengesChecked,
   parseChallengeFieldLines,
   renderAuthChallenge,
  )
@@ -68,6 +69,9 @@ instance KnownHeader ProxyAuthenticate where
 
   renderToHeaders _ (ProxyAuthenticate cs) =
     [M.toStrictByteString (renderProxyAuthenticate (ProxyAuthenticate cs))]
+
+
+  renderToHeadersChecked _ = fmap pure . encodeAuthChallengesChecked . proxyAuthChallenges
 
 
   headerName _ = hProxyAuthenticate

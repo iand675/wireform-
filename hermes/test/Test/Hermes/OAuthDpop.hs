@@ -12,7 +12,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (HeaderMap, headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (HeaderMap, defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.DPoP as DP
 import qualified Network.HTTP.Headers.DPoPNonce as DN
 import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName, toCIByteString)
@@ -27,6 +27,7 @@ import Network.HTTP.Headers.WWWAuthenticate (
   ChallengeContents (..),
   CredentialParam (..),
  )
+import Network.HTTP.Status (StatusCode (..))
 import Test.Syd
 import Test.Syd.Hedgehog ()
 
@@ -185,6 +186,37 @@ unit_replay_fields = it "validates the unpadded Base64url alphabet and canonical
     lookupHeader @RN.ReplayNonce (field bad) `shouldSatisfy` isLeft
 
 
+unit_checked_writers :: Spec
+unit_checked_writers = do
+  describe "DPoP" $
+    it "checks authored wire values before writing" $ do
+      let previous = fieldLines "DPoP" ["first.second.third"]
+          valid = DP.DPoP " \tALPHA.123-_.~+/==\t "
+      renderHeaderLines defaultHeaderSettings valid `shouldBe` Just (" \tALPHA.123-_.~+/==\t " :| [])
+      forM_ ["", "==", "first=second", "first,second", "first second", "proof\r\n"] $ \text -> do
+        let invalid = DP.DPoP text
+        renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+        setHeader invalid previous `shouldBe` previous
+  describe "DPoP-Nonce" $
+    it "checks authored wire values before writing" $ do
+      let previous = fieldLines "DPoP-Nonce" ["example-nonce"]
+          valid = DN.DPoPNonce " \tone,two\t "
+      renderHeaderLines defaultHeaderSettings valid `shouldBe` Just (" \tone,two\t " :| [])
+      forM_ ["", "one two", "one\"two", "one\\two", "example\r\n", "é"] $ \text -> do
+        let invalid = DN.DPoPNonce text
+        renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+        setHeader invalid previous `shouldBe` previous
+  describe "Replay-Nonce" $
+    it "checks authored wire values before writing" $ do
+      let previous = fieldLines "Replay-Nonce" ["AA"]
+          valid = RN.ReplayNonce " \t-_8\t "
+      renderHeaderLines defaultHeaderSettings valid `shouldBe` Just (" \t-_8\t " :| [])
+      forM_ ["", "Z", "Zh", "Zm9", "Zg==", "+/8", "AA\r\n"] $ \text -> do
+        let invalid = RN.ReplayNonce text
+        renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+        setHeader invalid previous `shouldBe` previous
+
+
 -- ---------------------------------------------------------------------------
 -- Hobareg
 -- ---------------------------------------------------------------------------
@@ -212,9 +244,30 @@ unit_hobareg_fields = it "interprets only one valid regok field as the registrat
   let field = fieldLines "Hobareg"
   lookupHeader @H.Hobareg (field []) `shouldBe` Right Nothing
   lookupHeader @H.Hobareg (field ["\t REGOK "]) `shouldBe` Right (Just H.HobaregRegister)
+  lookupHeader @H.Hobareg (field ["\tregok\t \t"]) `shouldBe` Right (Just H.HobaregRegister)
   lookupRawHeader "Hobareg" (setHeader H.HobaregRegister (field [])) `shouldBe` Just ("regok" :| [])
-  forM_ [[""], ["register"], ["regokx"], ["regok, regok"], ["regok", "regok"], ["regok", "reginwork"]] $ \lines' ->
+  forM_ [[""], ["    "], [" rego"], ["\t reGOk\xff"], ["\tregok\n"], ["register"], ["regokx"], ["regok, regok"], ["regok", "regok"], ["regok", "reginwork"]] $ \lines' ->
     lookupHeader @H.Hobareg (field lines') `shouldBe` Right (Just H.HobaregInProgress)
+
+
+unit_hobareg_registration :: Spec
+unit_hobareg_registration = it "checks the final response status and all Hobareg field lines" $ do
+  let field = fieldLines "Hobareg"
+      empty = field []
+      valid = field ["\t ReGoK "]
+      repeated = field ["regok", "regok"]
+      invalid = field ["regok, regok"]
+      succeeds code = H.hobaregRegistrationSucceeded (StatusCode code)
+  forM_ [200, 204, 299] $ \code -> do
+    succeeds code valid empty `shouldBe` True
+    succeeds code empty valid `shouldBe` True
+    succeeds code valid valid `shouldBe` False
+    succeeds code empty repeated `shouldBe` False
+    succeeds code valid invalid `shouldBe` False
+    succeeds code empty empty `shouldBe` False
+  forM_ [199, 300, 304, 401, 500] $ \code -> do
+    succeeds code valid empty `shouldBe` False
+    succeeds code empty valid `shouldBe` False
 
 
 -- ---------------------------------------------------------------------------
@@ -366,10 +419,12 @@ tests =
       , unit_replay_parse
       , unit_replay_render
       , unit_replay_fields
+      , unit_checked_writers
       , unit_hobareg_register
       , unit_hobareg_inprogress
       , unit_hobareg_render
       , unit_hobareg_fields
+      , unit_hobareg_registration
       , unit_owa_parse
       , unit_owa_render
       , unit_owa_fields

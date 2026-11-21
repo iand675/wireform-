@@ -20,6 +20,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.ContentSecurityPolicy (
   CSPPolicy (..),
   Directive,
+  encodePolicyListChecked,
   parsePolicyFieldLines,
   policyListParser,
   renderPolicyList,
@@ -58,6 +59,9 @@ instance KnownHeader ContentSecurityPolicyReportOnly where
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentSecurityPolicyReportOnly
+
+
+  renderToHeadersChecked _ = encodePolicyListChecked . csproPolicies
 
 
   headerName _ = hContentSecurityPolicyReportOnly

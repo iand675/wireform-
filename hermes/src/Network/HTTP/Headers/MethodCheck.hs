@@ -15,8 +15,6 @@ module Network.HTTP.Headers.MethodCheck (
 ) where
 
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Unsafe as BSU
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
@@ -25,7 +23,7 @@ import Network.HTTP.Grammar.Rendering (shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hMethodCheck)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Methods (Method, MethodError, methodToBytes, methodTokenParser, mkMethod)
+import Network.HTTP.Methods (Method, MethodError, methodToBytes, methodTokenParser, mkMethod, mkMethodWithOWS)
 
 
 data MethodCheck
@@ -82,20 +80,27 @@ instance KnownHeader MethodCheck where
   type Direction MethodCheck = 'Request
 
 
-  parseFromHeaders _ (wire :| [])
-    | not (BS.null wire)
-    , fieldSpace (BSU.unsafeHead wire) || fieldSpace (BSU.unsafeLast wire) =
-        checkedMethod (BS.dropWhileEnd fieldSpace (BS.dropWhile fieldSpace wire))
-    | otherwise = checkedMethod wire
-    where
-      fieldSpace byte = byte == 32 || byte == 9
+  parseFromHeaders _ (wire :| []) =
+    either (Left . show) (Right . ParsedMethodCheck) (mkMethodWithOWS wire)
   parseFromHeaders _ _ = Left "Multiple Method-Check field lines"
 
 
   renderToHeaders _ = wireBytes
 
 
+  renderToHeadersChecked _ (ParsedMethodCheck method) = Just (methodToBytes method)
+  renderToHeadersChecked _ (RawMethodCheck text) = renderCheckedLegacyMethod text
+  {-# INLINE renderToHeadersChecked #-}
+
+
   headerName _ = hMethodCheck
+
+
+renderCheckedLegacyMethod :: ST.ShortText -> Maybe ByteString
+renderCheckedLegacyMethod text =
+  let wire = ST.toByteString text
+  in either (const Nothing) (const (Just wire)) (mkMethodWithOWS wire)
+{-# NOINLINE renderCheckedLegacyMethod #-}
 
 
 methodCheckParser :: ParserT st String MethodCheck

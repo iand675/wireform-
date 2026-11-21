@@ -22,6 +22,9 @@ module Network.HTTP.Headers.Date (
   dateParserWith,
   cookieExpiryDateParser,
   renderDate,
+  renderDateBytesChecked,
+  cookieExpiryWriterChecked,
+  renderDateChecked,
 ) where
 
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
@@ -31,7 +34,7 @@ import qualified Data.ByteString.Internal as BS
 import Data.Char (ord)
 import Data.Time
 import Data.Word (Word16, Word32, Word64, Word8)
-import Foreign.Ptr (plusPtr)
+import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (pokeByteOff)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName
@@ -57,7 +60,10 @@ instance KnownHeader Date where
   parseFromHeaders settings = parseSingleFieldLine "Date" (Date <$> dateParserWith settings)
 
 
-  renderToHeaders _ = renderDateWith (BS.unsafeCreate 29 . PI.runF fixedDate) B.toStrictByteString . date
+  renderToHeaders _ = renderDateWith civilEpoch encodeDateParts B.toStrictByteString . date
+
+
+  renderToHeadersChecked _ = renderDateBytesChecked . date
 
 
   headerName _ = hDate
@@ -416,14 +422,38 @@ dateParserUsing use reference = imfFixdate <|> rfc850Date <|> asctimeDate
 
 
 renderDate :: UTCTime -> M.Builder
-renderDate = renderDateWith (B.primFixed fixedDate) id
+renderDate = renderDateWith civilEpoch (B.primFixed fixedDate) id
 
 
-renderDateWith :: (DateParts -> a) -> (M.Builder -> a) -> UTCTime -> a
-renderDateWith fixed variable (UTCTime day time) =
+-- | Render a date within the bounds of the HTTP-date parser.
+renderDateChecked :: UTCTime -> Maybe M.Builder
+renderDateChecked = renderDateWith firstHttpDateDay (Just . B.primFixed fixedDate) (const Nothing)
+
+
+-- | Encode an HTTP-date as exactly 29 bytes when the timestamp is representable.
+renderDateBytesChecked :: UTCTime -> Maybe BS.ByteString
+renderDateBytesChecked = renderDateWith firstHttpDateDay (Just . encodeDateParts) (const Nothing)
+
+
+-- | Write a cookie expiration as 29 bytes of IMF-fixdate. Cookie dates
+-- start at 1601 and use seconds 00 through 59.
+cookieExpiryWriterChecked :: UTCTime -> Maybe (Ptr Word8 -> IO ())
+cookieExpiryWriterChecked time
+  | utctDayTime time < 86_400 =
+      renderDateWith firstCookieExpiryDay (Just . PI.runF fixedDate) (const Nothing) time
+  | otherwise = Nothing
+
+
+encodeDateParts :: DateParts -> BS.ByteString
+encodeDateParts = BS.unsafeCreate 29 . PI.runF fixedDate
+{-# INLINE encodeDateParts #-}
+
+
+renderDateWith :: Integer -> (DateParts -> a) -> (M.Builder -> a) -> UTCTime -> a
+renderDateWith earliest fixed variable (UTCTime day time) =
   let mjd = toModifiedJulianDay day
       picos = diffTimeToPicoseconds time
-  in if mjd >= civilEpoch && mjd <= lastFourDigitDay && picos >= 0 && picos < 86_401_000_000_000_000
+  in if mjd >= earliest && mjd <= lastFourDigitDay && picos >= 0 && picos < 86_401_000_000_000_000
        then
          let seconds = (fromInteger picos :: Word64) `quot` 1_000_000_000_000
          in fixed (dateParts (fromInteger mjd) (fromIntegral seconds))
@@ -460,8 +490,10 @@ data DateParts = DateParts
 
 
 -- Gregorian cycles start in March so the leap day ends the year.
-civilEpoch, lastFourDigitDay :: Integer
+civilEpoch, firstCookieExpiryDay, firstHttpDateDay, lastFourDigitDay :: Integer
 civilEpoch = toModifiedJulianDay (fromGregorian 1600 3 1)
+firstCookieExpiryDay = toModifiedJulianDay (fromGregorian 1601 1 1)
+firstHttpDateDay = toModifiedJulianDay (fromGregorian 1900 1 1)
 lastFourDigitDay = toModifiedJulianDay (fromGregorian 9999 12 31)
 
 

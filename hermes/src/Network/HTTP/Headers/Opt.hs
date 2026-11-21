@@ -69,6 +69,9 @@ instance KnownHeader Opt where
   renderToHeaders _ (OptDeclarations declarations) = NE.toList (declarationsLines declarations)
 
 
+  renderToHeadersChecked _ (OptDeclarations declarations) = NE.toList <$> checkedDeclarationsLines "Opt" declarations
+
+
   headerName _ = hOpt
 
 

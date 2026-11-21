@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Test.Hermes.DefactoCorrelation (tests) where
@@ -255,6 +256,14 @@ unit_requestStartEpoch = do
 tests :: Spec
 tests =
   describe "DefactoCorrelation" $ do
+    it "checks authored X-Request-ID bytes" $ mapM_ (rejectOpaque "X-Request-ID" . XR.XRequestID) invalidOpaque
+    it "checks authored X-Correlation-ID bytes" $ mapM_ (rejectOpaque "X-Correlation-ID" . XC.XCorrelationID) invalidOpaque
+    it "checks authored X-Trace-ID bytes" $ mapM_ (rejectOpaque "X-Trace-ID" . XT.XTraceID) invalidOpaque
+    it "checks authored X-Powered-By bytes" $ mapM_ (rejectOpaque "X-Powered-By" . XP.XPoweredBy) invalidOpaque
+    it "checks legacy request timestamps before replacing the field" $ do
+      forM_ ["", " 123", "1.2.3", "1e+", "1\n", "NaN", "1e999999999999999999999"] $ \stamp ->
+        rejectOpaque "X-Request-Start" (XS.XRequestStart True stamp)
+      renderHeaderLines defaultHeaderSettings (XS.XRequestStart True "-1.2e3") `shouldBe` Just ("t=-1.2e3" :| [])
     unit_opaqueWire
     describe "X-Request-ID" $
       sequence_
@@ -283,3 +292,14 @@ tests =
         , unit_requestStart_render_bare
         , it "round-trip" prop_requestStart
         ]
+
+
+invalidOpaque :: [ST.ShortText]
+invalidOpaque = ["a\r", "a\n", "a\NUL", "a\DEL", "a\x0b"]
+
+
+rejectOpaque :: (KnownHeader a, HeaderRenderingResultToNonEmpty (Cardinality a)) => HeaderFieldName -> a -> Expectation
+rejectOpaque name value = do
+  let fields = setRawHeader name ("old" :| ["other"]) (headerMapFromList [])
+  renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+  setHeader value fields `shouldBe` fields

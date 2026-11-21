@@ -283,11 +283,28 @@ prop_altUsed_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+checkedAltSvcWrites :: Spec
+checkedAltSvcWrites = it "checks all authored protocols, hosts and parameters before replacing Alt-Svc" $ do
+  let old = headerMapFromList [("Alt-Svc", "h2=\":443\""), ("Alt-Svc", "h3=\":8443\"")]
+      good = AS.AltValue "http%2F1.1" (AS.AltAuthority Nothing 443) []
+      invalid = map (\proto -> good {AS.altProtocolId = proto}) ["", "%41", "http%2f1.1", "bad id", "x%"]
+        ++ map (\host -> good {AS.altAuthority = AS.AltAuthority (Just host) 443}) ["", "a:80", "a/b", "[not-ip]", "a%X1"]
+        ++ map (\param -> good {AS.altParameters = [param]})
+          [AS.AltParameter "bad=name" (AS.AltParamToken "ok"), AS.AltParameter "x" (AS.AltParamToken "a b"), AS.AltParameter "x" (AS.AltParamQuoted "a\DEL")]
+  mapM_ (\entry -> do
+    let value = AS.AltSvcValues (good :| [entry])
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value old `shouldBe` old) invalid
+  let valid = AS.AltSvcValues (good {AS.altParameters = [AS.AltParameter "note" (AS.AltParamQuoted "a\t\xff")]} :| [])
+  lookupHeader @AS.AltSvc (setHeader valid old) `shouldBe` Right (Just valid)
+
+
 tests :: Spec
 tests =
   describe "AltSvc" $
     sequence_
-      [ unit_clear
+      [ checkedAltSvcWrites
+      , unit_clear
       , unit_value
       , unit_value_list
       , unit_render_value

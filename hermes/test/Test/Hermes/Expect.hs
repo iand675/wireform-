@@ -2,6 +2,7 @@
 
 module Test.Hermes.Expect (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
@@ -10,7 +11,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.EarlyData as ED
 import qualified Network.HTTP.Headers.Expect as E
 import qualified Network.HTTP.Headers.Mason as M
@@ -53,6 +54,17 @@ unit_expect_continue = it "parses 100-continue" $
       E.expectationValue e `shouldBe` Nothing
       E.expectationParameters e `shouldBe` []
     other -> error (show other)
+
+
+unit_expect_sliced_continue :: Spec
+unit_expect_sliced_continue = it "recognizes a bare continue token at every byte alignment" $ do
+  let canonical = "100-continue"
+      readField wire = lookupHeader @E.Expect (headerMapFromList [("Expect", wire)])
+  forM_ [0 .. 7] $ \offset -> do
+    let slice wire = BS.take (BS.length wire) (BS.drop offset (BS.replicate offset 0 <> wire <> "!"))
+    forM_ [canonical, "100-CoNtInUe", "100-continu", "100-continue!", "100-continue=other"] $ \wire -> do
+      readField (slice wire) `shouldBe` fmap Just (parseExpect wire)
+      E.hasContinueExpectation [slice wire] `shouldBe` (wire == canonical || wire == "100-CoNtInUe")
 
 
 unit_expect_params :: Spec
@@ -164,14 +176,36 @@ unit_earlydata_presence = it "interprets any received Early-Data instance as the
   lookupRawHeader "Early-Data" (setHeader (ED.EarlyData 0) empty) `shouldBe` Just ("1" :| [])
 
 
+unit_expect_checked_write :: Spec
+unit_expect_checked_write = it "rejects malformed or unrepresentable authored expectations" $ do
+  let fields = headerMapFromList [("Expect", "100-continue"), ("Expect", "x=old")]
+      checked entry = E.Expect (E.Expectation "100-continue" Nothing [] :| [entry])
+  forM_
+    [ E.Expectation "x,y" Nothing []
+    , E.Expectation "wait" (Just "\"unterminated") []
+    , E.Expectation "wait" Nothing [("limit", Just "1")]
+    , E.Expectation "wait" (Just "fast") [("bad;name", Just "1")]
+    , E.Expectation "wait" (Just "fast") [("flag", Nothing)]
+    , E.Expectation "wait" (Just "fast") [("param", Just "")]
+    ]
+    $ \entry -> do
+      renderHeaderLines defaultHeaderSettings (checked entry) `shouldBe` Nothing
+      setHeader (checked entry) fields `shouldBe` fields
+  let field = E.Expect (E.Expectation "100-continue" Nothing [] :| [])
+  renderHeaderLines defaultHeaderSettings field `shouldBe` Just ("100-continue" :| [])
+  renderHeaderLines defaultHeaderSettings E.ExpectEmpty `shouldBe` Just ("" :| [])
+
+
 tests :: Spec
 tests =
   describe "Expect" $
     sequence_
       [ unit_expect_continue
+      , unit_expect_sliced_continue
       , unit_expect_params
       , unit_expect_render
       , unit_expect_field_lines
+      , unit_expect_checked_write
       , unit_earlydata_parse
       , unit_earlydata_render
       , it "Expect round-trips" prop_expect_roundtrip

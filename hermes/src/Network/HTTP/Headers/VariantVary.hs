@@ -18,7 +18,7 @@ import Data.Char (isAsciiUpper, toLower)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Network.HTTP.Grammar.Parser
-import Network.HTTP.Grammar.Rendering (shortText)
+import Network.HTTP.Grammar.Rendering (encodeCommaSeparatedTextChecked, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName, hVariantVary, unsafeUnknownHeaderFromBytestring)
 import qualified Network.HTTP.Headers.Mason as M
@@ -38,7 +38,7 @@ variantVaryFieldNames VariantVaryAll = Right Nothing
 variantVaryFieldNames (VariantVaryFields fields) = Just <$> traverse name fields
   where
     name raw
-      | BSC.null bytes || bytes == "*" || not (BSC.all isTokenChar bytes) = Left "Invalid Variant-Vary field name"
+      | not (validVariantName raw) = Left "Invalid Variant-Vary field name"
       | otherwise = Right (unsafeUnknownHeaderFromBytestring folded)
       where
         bytes = ST.toByteString raw
@@ -62,6 +62,10 @@ instance KnownHeader VariantVary where
   renderToHeaders _ fields = M.toStrictByteString (renderVariantVary fields)
 
 
+  renderToHeadersChecked _ VariantVaryAll = Just "*"
+  renderToHeadersChecked _ (VariantVaryFields fields) = encodeCommaSeparatedTextChecked validVariantName fields
+
+
   headerName _ = hVariantVary
 
 
@@ -74,6 +78,11 @@ variantVaryFromList ["*"] = Right VariantVaryAll
 variantVaryFromList fields
   | "*" `elem` fields = Left "Variant-Vary wildcard must stand alone"
   | otherwise = VariantVaryFields <$> requireNonEmptyList "Variant-Vary" fields
+
+
+validVariantName :: ST.ShortText -> Bool
+validVariantName name = name /= "*" && isHttpTokenText name
+{-# INLINE validVariantName #-}
 
 
 renderVariantVary :: VariantVary -> M.Builder

@@ -40,6 +40,9 @@ tests =
     sequence_
       [ requestHeadTests
       , responseHeadTests
+      , it "rejects precomputing a deferred file body" $
+          (() <$ precomputeResponseEither (Response OK HTTP_1_1 [] (BodyFile (FileBody (FileSourcePath "") 0 4)) (pure [])))
+            `shouldBe` Left "file body cannot be precomputed"
       ]
 
 

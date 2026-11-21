@@ -44,6 +44,11 @@ instance KnownHeader RepeatabilityClientID where
   renderToHeaders _ = M.toStrictByteString . renderRepeatabilityClientID
 
 
+  renderToHeadersChecked _ (RepeatabilityClientID identifier)
+    | isHttpTokenText identifier = Just (ST.toByteString identifier)
+    | otherwise = Nothing
+
+
   headerName _ = hRepeatabilityClientID
 
 

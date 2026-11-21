@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 {- |
 The @ALPN@ HTTP request header field, defined by
 [RFC 7639](https://www.rfc-editor.org/rfc/rfc7639).
@@ -43,13 +45,16 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Unsafe as BSU
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import Data.Word (Word8)
+import Network.HTTP.Grammar.Rendering (encodeCommaSeparatedChecked)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hALPN)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.URL.Decode (urlDecode)
 import Network.TLS.Extensions (ALPNProtocol (alpnIdentificationSequence), mkALPNProtocol)
+import Wireform.Encode.Direct (dWord8)
 
 
 -- | A nonempty list of ALPN protocol IDs. Each ID uses 1–255 decoded octets.
@@ -73,6 +78,14 @@ instance KnownHeader ALPN where
 
 
   renderToHeaders _ = M.toStrictByteString . renderALPN
+
+
+  renderToHeadersChecked _ (ALPN ids@(first :| []))
+    | validProtocolSize (BS.length wire), BS.all isRawTokenByte wire = Just wire
+    | otherwise = encodeProtocolsChecked ids
+    where
+      wire = alpnIdentificationSequence first
+  renderToHeadersChecked _ (ALPN ids) = encodeProtocolsChecked ids
 
 
   headerName _ = hALPN
@@ -149,6 +162,35 @@ encodeOctet :: Word8 -> M.Builder
 encodeOctet w = M.char7 '%' <> hexDigit (w `shiftR` 4) <> hexDigit (w .&. 0x0F)
 
 
+validProtocolSize :: Int -> Bool
+validProtocolSize size = size >= 1 && size <= 255
+{-# INLINE validProtocolSize #-}
+
+
+encodeProtocolsChecked :: NonEmpty ALPNProtocol -> Maybe ByteString
+encodeProtocolsChecked = encodeCommaSeparatedChecked bound writeId . NE.toList
+  where
+    bound protocol
+      | validProtocolSize size = 3 * size
+      | otherwise = -1
+      where
+        size = BS.length (alpnIdentificationSequence protocol)
+    writeId ptr start protocol = writeBytes 0 start
+      where
+        bytes = alpnIdentificationSequence protocol
+        size = BS.length bytes
+        writeBytes !i !offset
+          | i == size = pure offset
+          | isRawTokenByte byte = dWord8 ptr offset byte >>= writeBytes (i + 1)
+          | otherwise = do
+              high <- dWord8 ptr offset 37
+              low <- dWord8 ptr high (hexDigitByte (byte `shiftR` 4))
+              end <- dWord8 ptr low (hexDigitByte (byte .&. 0x0F))
+              writeBytes (i + 1) end
+          where
+            byte = BSU.unsafeIndex bytes i
+
+
 {- | Whether an octet may appear verbatim in a @protocol-id@: an ASCII @tchar@
 other than the percent sign (@0x25@).
 -}
@@ -159,6 +201,11 @@ isRawTokenByte w = w /= 0x25 && isTokenChar (toEnum (fromIntegral w))
 
 -- | Render a nibble (0–15) as a single uppercase hex digit.
 hexDigit :: Word8 -> M.Builder
-hexDigit n
-  | n < 10 = M.word8 (0x30 + n)
-  | otherwise = M.word8 (0x41 + n - 10)
+hexDigit = M.word8 . hexDigitByte
+
+
+hexDigitByte :: Word8 -> Word8
+hexDigitByte n
+  | n < 10 = 0x30 + n
+  | otherwise = 0x41 + n - 10
+{-# INLINE hexDigitByte #-}

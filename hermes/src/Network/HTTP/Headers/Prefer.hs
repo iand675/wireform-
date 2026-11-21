@@ -80,7 +80,20 @@ instance KnownHeader Prefer where
   renderToHeaders _ = pure . M.toStrictByteString . renderPrefer
 
 
+  renderToHeadersChecked _ value
+    | all validPreference (preferPreferences value) = Just [M.toStrictByteString (renderPrefer value)]
+    | otherwise = Nothing
+
+
   headerName _ = hPrefer
+
+
+validPreference :: Preference -> Bool
+validPreference (Preference name word parameters) =
+  isHttpTokenText name && all isHttpWordValue word && all validParameter parameters
+  where
+    validParameter (key, value) = isHttpTokenText key && all isHttpWordValue value
+{-# INLINE validPreference #-}
 
 
 -- | Find the first occurrence of a preference name, ignoring ASCII case.

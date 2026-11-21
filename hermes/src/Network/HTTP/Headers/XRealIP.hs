@@ -49,6 +49,10 @@ instance KnownHeader XRealIP where
   renderToHeaders _ = M.toStrictByteString . renderXRealIP
 
 
+  renderToHeadersChecked _ (XRealIP (IPvFuture _)) = Nothing
+  renderToHeadersChecked settings value = Just (renderToHeaders settings value)
+
+
   headerName _ = hXRealIP
 
 

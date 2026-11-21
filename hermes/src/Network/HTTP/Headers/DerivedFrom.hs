@@ -27,7 +27,7 @@ module Network.HTTP.Headers.DerivedFrom (
 
 import qualified Data.ByteString.Short as SBS
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.Rendering (encodeHttpQuotedBytes)
+import Network.HTTP.Grammar.Rendering (encodeHttpQuotedBytes, encodeHttpQuotedBytesChecked)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.ContentVersion (ContentVersion (ContentVersion, ContentVersionBytes), contentVersionParser, renderContentVersion)
 import Network.HTTP.Headers.HeaderFieldName (hDerivedFrom)
@@ -66,6 +66,9 @@ instance KnownHeader DerivedFrom where
 
 
   renderToHeaders _ = encodeHttpQuotedBytes . derivedFromTagBytes
+
+
+  renderToHeadersChecked _ = encodeHttpQuotedBytesChecked . derivedFromTagBytes
 
 
   headerName _ = hDerivedFrom

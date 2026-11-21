@@ -25,6 +25,7 @@ import Data.IORef
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (UTCTime (..), fromGregorian)
 import Network.HTTP
 import Network.HTTP.Client qualified as Client
 import Network.HTTP.Client.Base (baseTransport)
@@ -59,6 +60,7 @@ tests =
       , streamingResponse
       , chunkedRequestWithEmptyTrailers
       , chunkedDigestTrailers
+      , bufferedResponseTrailers
       , clientResponseTrailers
       , clientRequestTrailers
       , requestTrailersRequireFraming
@@ -71,6 +73,7 @@ tests =
       , expectTimeoutWithPartialHead
       , expectClientTransports
       , redirectEmptyQuery
+      , serverPreconditions
       , conditionalRangeAuthoring
       , redirectsConditionalRange
       , compressedRangeResponse
@@ -80,6 +83,63 @@ tests =
 
 
 ------------------------------------------------------------------------
+
+serverPreconditions :: Spec
+serverPreconditions = it "applies origin preconditions before modifying or returning the resource" $ do
+  actions <- newIORef (0 :: Int)
+  let modified = UTCTime (fromGregorian 1994 11 6) 31777
+      validators = Just (RepresentationValidators (Just (Conditional.strongETag "v1")) (Just modified))
+      currentDate = "Sun, 06 Nov 1994 08:49:37 GMT"
+      oldDate = "Sun, 06 Nov 1994 08:49:36 GMT"
+      evaluate method status representation fields =
+        evaluatePreconditions modified status representation (mkRequest method "/" "80" BodyEmpty fields)
+      allowed = Right PreconditionsProceed
+      denied = Right PreconditionsFailed
+      unchanged = Right PreconditionsNotModified
+  evaluate "PUT" S.status200 validators [(hIfMatch, "W/\"v1\""), (hIfUnmodifiedSince, currentDate)] `shouldBe` denied
+  evaluate "PUT" S.status200 validators [(hIfMatch, "\"v1\""), (hIfUnmodifiedSince, oldDate)] `shouldBe` allowed
+  evaluate "PUT" S.status200 validators [(hIfUnmodifiedSince, oldDate)] `shouldBe` denied
+  evaluate "PUT" S.status200 validators [(hIfUnmodifiedSince, oldDate), (hIfUnmodifiedSince, oldDate)] `shouldBe` allowed
+  evaluate "GET" S.status200 validators [(hIfNoneMatch, "\"old\""), (hIfNoneMatch, "W/\"v1\"")] `shouldBe` unchanged
+  evaluate "GET" S.status200 validators
+    [ ("IF-UNMODIFIED-SINCE", oldDate)
+    , ("iF-MaTcH", "\"old\"")
+    , ("If-Modified-Since", oldDate)
+    , ("X-Request-Id", "between validators")
+    , (hIfMatch, "\"v1\"")
+    , (hIfNoneMatch, "W/\"v1\"")
+    ] `shouldBe` unchanged
+  evaluate "GET" S.status200 validators [(hIfModifiedSince, currentDate), ("If-Range", "\"v1\""), (hIfModifiedSince, currentDate)]
+    `shouldBe` allowed
+  evaluate "HEAD" S.status200 validators [(hIfModifiedSince, currentDate)] `shouldBe` unchanged
+  evaluate "GET" S.status200 validators [(hIfNoneMatch, "\"old\""), (hIfModifiedSince, currentDate)] `shouldBe` allowed
+  evaluate "GET" S.status200 validators [(hIfModifiedSince, currentDate <> ", " <> currentDate)] `shouldBe` allowed
+  evaluate "GET" S.status200 validators [(hIfModifiedSince, "not a date")] `shouldBe` allowed
+  evaluate "GET" S.status200 validators [(hIfModifiedSince, "Sunday, 06-Nov-94 08:49:37 GMT")] `shouldBe` unchanged
+  evaluate "PUT" S.status200 validators [(hIfModifiedSince, currentDate)] `shouldBe` allowed
+  evaluate "OPTIONS" S.status200 validators [(hIfMatch, "\"old\"")] `shouldBe` allowed
+  evaluate "GET" S.status404 validators [(hIfMatch, "\"old\"")] `shouldBe` allowed
+  evaluate "PUT" S.status201 Nothing [(hIfNoneMatch, "*")] `shouldBe` allowed
+  evaluate "PUT" S.status200 (Just (RepresentationValidators Nothing Nothing)) [(hIfNoneMatch, "*")] `shouldBe` denied
+  let handler request = case evaluatePreconditions modified S.status200 validators request of
+        Right PreconditionsProceed -> modifyIORef' actions (+ 1) >> pure (resp200 "current")
+        Right PreconditionsNotModified -> pure ((resp200 "") {responseStatus = S.status304})
+        Right PreconditionsFailed -> pure ((resp200 "") {responseStatus = S.status412})
+        Left _ -> pure ((resp200 "") {responseStatus = S.status400})
+  withTestServer http1Only handler $ \port -> do
+    forM_
+      [ ("GET", [(hIfModifiedSince, currentDate)], S.status304)
+      , ("PUT", [(hIfUnmodifiedSince, oldDate)], S.status412)
+      , ("PUT", [(hIfNoneMatch, "W/\"v1\"")], S.status412)
+      , ("GET", [(hIfNoneMatch, "* , \"v1\"")], S.status400)
+      , ("PUT", [(hIfMatch, "\"v1\""), (hIfUnmodifiedSince, oldDate)], S.status200)
+      ] $ \(method, fields, expected) ->
+        runClient http1Only port $ \connection -> do
+          reply <- sendOn connection (mkRequest method "/" port BodyEmpty fields)
+          responseStatus reply `shouldBe` expected
+          drainBody (responseBody reply) `shouldReturn` (if expected == S.status200 then "current" else "")
+  readIORef actions `shouldReturn` 1
+
 
 helloWorld :: Spec
 helloWorld = it "GET hello world (HTTP/1.1)" $
@@ -489,6 +549,53 @@ chunkedDigestTrailers = it "round-trips typed body-derived trailers in both dire
       Typed.renderToHeaders Typed.defaultHeaderSettings value `shouldBe` [digest]
 
     toTypedHeaders = Typed.headerMapFromList
+
+
+bufferedResponseTrailers :: Spec
+bufferedResponseTrailers = it "uses chunked framing for declared trailers on buffered responses" $ do
+  produced <- newIORef (0 :: Int)
+  let encoded = BSL.toStrict (GZip.compress "buffered")
+      handler request
+        | requestTarget request == "/plain" = pure (resp200 "plain")
+        | otherwise = do
+            let payload = case requestTarget request of
+                  "/empty" -> ""
+                  "/coding" -> encoded
+                  _ -> "buffered"
+                outgoing = if BS.null payload then BodyEmpty else BodyBytes payload
+                trailers = modifyIORef' produced (+ 1) >> pure [("X-Result", "done")]
+                framing = case requestTarget request of
+                  "/explicit" -> [("Transfer-Encoding", "chunked")]
+                  "/coding" -> [("Transfer-Encoding", "gzip")]
+                  _ -> [("trailer", ""), ("Trailer", "X-Result")]
+            pure $
+              (resp200 payload)
+                { responseHeaders =
+                    ("Content-Length", BS8.pack (show (BS.length payload))) : framing
+                , responseBody = outgoing
+                , responseTrailers = trailers
+                }
+  withTestServer http1Only handler $ \port ->
+    runClient http1Only port $ \conn -> do
+      let fetch method path = sendOn conn (mkRequest method path port BodyEmpty [("TE", "trailers"), ("Connection", "TE")])
+          cases =
+            [ ("/buffered", "buffered", ["chunked"])
+            , ("/explicit", "buffered", ["chunked"])
+            , ("/coding", encoded, ["gzip", "chunked"])
+            , ("/empty", "", ["chunked"])
+            ]
+      forM_ cases $ \(path, payload, codings) -> do
+        response <- fetch "GET" path
+        responseStatus response `shouldBe` S.status200
+        map snd (filter ((== "Transfer-Encoding") . fst) (responseHeaders response)) `shouldBe` codings
+        lookup "Content-Length" (responseHeaders response) `shouldBe` Nothing
+        drainBody (responseBody response) `shouldReturn` payload
+        responseTrailers response `shouldReturn` [("X-Result", "done")]
+      headResponse <- fetch "HEAD" "/buffered"
+      drainBody (responseBody headResponse) `shouldReturn` ""
+      responseTrailers headResponse `shouldReturn` []
+      (fetch "GET" "/plain" >>= drainBody . responseBody) `shouldReturn` "plain"
+      readIORef produced `shouldReturn` 4
 
 
 clientResponseTrailers :: Spec

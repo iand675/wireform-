@@ -26,14 +26,15 @@ module Network.HTTP.Headers.Upgrade (
   renderUpgrade,
 ) where
 
-import Data.List.NonEmpty (NonEmpty)
+import Data.ByteString (ByteString)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hUpgrade)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (sepByCommas1, shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedTokenPairs, sepByCommas1, shortText)
 
 
 -- | A single protocol token: a name with an optional @\/version@.
@@ -63,9 +64,33 @@ instance KnownHeader Upgrade where
   type Direction Upgrade = 'RequestAndResponse
 
 
-  parseFromHeaders _ = fmap fromProtocols . parseListFieldLines "Upgrade" (httpList protocolParser)
-  renderToHeaders _ = pure . M.toStrictByteString . renderUpgrade
+  parseFromHeaders _ (wire :| [])
+    | wire == "websocket" = Right (Upgrade (Protocol "websocket" Nothing :| []))
+  parseFromHeaders _ fields = parseUpgradeFields fields
+  {-# INLINE parseFromHeaders #-}
+
+
+  renderToHeaders _ UpgradeEmpty = [""]
+  renderToHeaders _ (Upgrade protocols) =
+    [encodeCommaSeparatedTokenPairs "/" protocolName protocolVersion (NE.toList protocols)]
+
+
+  renderToHeadersChecked settings value
+    | Upgrade protocols <- value
+    , not (all validProtocol protocols) = Nothing
+    | otherwise = Just (renderToHeaders settings value)
+    where
+      validProtocol (Protocol name version) = isHttpTokenText name && maybe True isHttpTokenText version
+
+
   headerName _ = hUpgrade
+
+
+parseUpgradeFields :: NonEmpty ByteString -> Either String Upgrade
+parseUpgradeFields fields = case parseListFieldLines "Upgrade" (httpList protocolParser) fields of
+  Right protocols -> Right $! fromProtocols protocols
+  Left problem -> Left problem
+{-# NOINLINE parseUpgradeFields #-}
 
 
 upgradeParser :: ParserT st String Upgrade

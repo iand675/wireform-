@@ -74,9 +74,15 @@ data RefererRootOrigin
 
 
 refererRootOrigin :: RefererRoot -> Either String RefererRootOrigin
-refererRootOrigin (RawRefererRoot raw) =
-  parseSingleFieldLine "Referer-Root" rootParser (ST.toByteString raw :| [])
+refererRootOrigin (RawRefererRoot raw) = parseLegacyRoot raw
 refererRootOrigin (ParsedRefererRoot _ origin) = Right origin
+{-# INLINE refererRootOrigin #-}
+
+
+parseLegacyRoot :: ST.ShortText -> Either String RefererRootOrigin
+parseLegacyRoot raw =
+  parseSingleFieldLine "Referer-Root" (rootParserWith id) (ST.toByteString raw :| [])
+{-# NOINLINE parseLegacyRoot #-}
 
 
 refererRootFromOrigin :: RefererRootOrigin -> Either String RefererRoot
@@ -102,23 +108,30 @@ instance KnownHeader RefererRoot where
 
   parseFromHeaders _ ("null" :| []) = Right nullRoot
   parseFromHeaders _ fields@(wire :| []) =
-    ParsedRefererRoot wire <$> parseSingleFieldLine "Referer-Root" rootParser fields
+    parseSingleFieldLine "Referer-Root" (rootParserWith (ParsedRefererRoot wire)) fields
   parseFromHeaders _ _ = Left "Multiple Referer-Root field lines"
 
 
   renderToHeaders _ = wireBytes
 
 
+  renderToHeadersChecked _ (ParsedRefererRoot wire _) = Just wire
+  renderToHeadersChecked _ (RawRefererRoot text) =
+    let wire = ST.toByteString text
+    in either (const Nothing) (const (Just wire)) $
+         parseSingleFieldLine "Referer-Root" (rootParserWith (const ())) (wire :| [])
+
+
   headerName _ = hRefererRoot
 
 
 refererRootParser :: ParserT st String RefererRoot
-refererRootParser = withByteString (ows *> rootParser <* ows) $ \origin wire ->
+refererRootParser = withByteString (ows *> rootParserWith id <* ows) $ \origin wire ->
   pure (ParsedRefererRoot wire origin)
 
 
-rootParser :: ParserT st String RefererRootOrigin
-rootParser = hostOrigin <|> (RefererRootNull <$ $(string "null"))
+rootParserWith :: (RefererRootOrigin -> a) -> ParserT st String a
+rootParserWith wrap = hostOrigin <|> (wrap RefererRootNull <$ $(string "null"))
   where
     hostOrigin = do
       scheme <-
@@ -128,7 +141,8 @@ rootParser = hostOrigin <|> (RefererRootNull <$ $(string "null"))
       host <- byteStringOf uriHostBytes
       if BS.last host == 46
         then err "Referer-Root host has a trailing dot"
-        else RefererRootHost scheme host <$> ($(char ':') *> portNumber)
+        else (wrap . RefererRootHost scheme host) <$> ($(char ':') *> portNumber)
+{-# INLINE rootParserWith #-}
 
 
 renderRefererRoot :: RefererRoot -> M.Builder

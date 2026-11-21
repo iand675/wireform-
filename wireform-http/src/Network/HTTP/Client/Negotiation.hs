@@ -78,14 +78,10 @@ newtype Quality = Quality {unQuality :: Double}
   deriving stock (Eq, Show)
 
 
-{- | Clamping smart constructor.  Anything outside @[0,1]@ gets
-pinned to the boundary.
+{- | Clamp a quality to @[0,1]@. NaN has quality zero.
 -}
 mkQuality :: Double -> Quality
-mkQuality d
-  | d <= 0 = Quality 0
-  | d >= 1 = Quality 1
-  | otherwise = Quality d
+mkQuality = Quality . HCN.normalizedQuality
 
 
 -- ---------------------------------------------------------------------------
@@ -179,4 +175,4 @@ textShortFromBytes bs = case ST.fromByteString bs of
   -- Accept-* tokens are ASCII by grammar; this branch is only
   -- reached for malformed input. Use lenient UTF-8 so we never
   -- throw at the build boundary.
-  Nothing -> ST.fromText (TE.decodeUtf8With (\_ _ -> Just '\xFFFD') bs)
+  Nothing -> ST.fromText (TE.decodeUtf8With TE.lenientDecode bs)

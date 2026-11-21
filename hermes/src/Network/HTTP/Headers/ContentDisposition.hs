@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
@@ -23,23 +24,27 @@ module Network.HTTP.Headers.ContentDisposition (
 import Data.Bits ((.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
 import qualified Data.ByteString.Short.Internal as SBSI
-import Data.Char (isControl, isHexDigit, toLower)
+import Data.Char (isControl, isHexDigit)
+import Data.Either (isRight)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
+import Data.Word (Word8)
 import Network.HTTP.ContentNegotiation (renderMediaParameterValue)
-import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), decodeExtendedValue, extendedValueBytes, parseExtendedValue, renderExtendedValue)
+import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), decodeExtendedValueText, extendedValueBytes, renderExtendedValue)
+import Network.HTTP.Grammar.Rendering (copyText, shortText, writeParameterValue)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentDisposition)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Encode.Direct (dWord8)
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- | Content-Disposition value consists of a disposition type and optional parameters
@@ -66,9 +71,12 @@ backslashes or percent escapes. The primary name must be free of control
 characters.
 -}
 mkContentDispositionFilename
-  :: ST.ShortText -- ^ Disposition type, such as @attachment@ or @inline@.
-  -> Text -- ^ Preferred filename.
-  -> Maybe Text -- ^ Legacy ASCII fallback.
+  :: ST.ShortText
+  -- ^ Disposition type, such as @attachment@ or @inline@.
+  -> Text
+  -- ^ Preferred filename.
+  -> Maybe Text
+  -- ^ Legacy ASCII fallback.
   -> Either ContentDispositionFilenameError ContentDisposition
 mkContentDispositionFilename disposition filename fallback
   | ST.null disposition || not (ST.all isTokenChar disposition) = Left InvalidDispositionType
@@ -105,7 +113,8 @@ filenameStyle name = case T.uncons (T.dropWhile plainChar name) of
     plainChar c = ' ' <= c && c <= '~' && c /= '%' && c /= '\\'
     startsWithHexPair value
       | Just (hi, rest) <- T.uncons value
-      , Just (lo, _) <- T.uncons rest = isHexDigit hi && isHexDigit lo
+      , Just (lo, _) <- T.uncons rest =
+          isHexDigit hi && isHexDigit lo
       | otherwise = False
     extendedStyle rest
       | T.any isControl rest = InvalidFilename
@@ -124,6 +133,9 @@ instance KnownHeader ContentDisposition where
   renderToHeaders _ = M.toStrictByteString . renderContentDisposition
 
 
+  renderToHeadersChecked _ = encodeContentDispositionChecked
+
+
   headerName _ = hContentDisposition
 
 
@@ -131,9 +143,9 @@ contentDispositionParser :: ParserT st String ContentDisposition
 contentDispositionParser = do
   dtype <- ows *> rfc9110Token
   params <- many (ows *> $(char ';') *> ows *> param) <* ows
-  case params of
-    _ : _ : _ | not (uniqueNames Set.empty params) -> err "Duplicate Content-Disposition parameter name"
-    _ -> pure (ContentDisposition dtype params)
+  if uniqueNames params
+    then pure (ContentDisposition dtype params)
+    else err "Duplicate Content-Disposition parameter name"
   where
     param = do
       name <- rfc9110Token <* ows <* $(char '=') <* ows
@@ -142,10 +154,17 @@ contentDispositionParser = do
           then if name == "*" then failed else shortASCIIFromParser_ extendedValueBytes
           else rfc9110Token <|> (ST.fromText <$> httpQuotedString)
       pure (name, value)
-    uniqueNames _ [] = True
-    uniqueNames seen ((name, _) : rest) =
+
+
+uniqueNames :: [(ST.ShortText, ST.ShortText)] -> Bool
+uniqueNames [(a, _), (b, _)] = not (sameName (ST.toShortByteString a) (ST.toShortByteString b))
+uniqueNames params@(_ : _ : _ : _) = go Set.empty params
+  where
+    go _ [] = True
+    go seen ((name, _) : rest) =
       let key = foldedName name
-      in not (Set.member key seen) && uniqueNames (Set.insert key seen) rest
+      in not (Set.member key seen) && go (Set.insert key seen) rest
+uniqueNames _ = True
 
 
 -- | The advisory filename. A decodable extended value takes precedence.
@@ -154,35 +173,39 @@ contentDispositionFilename (ContentDisposition _ params) = case extended of
   Just value -> Just value
   Nothing -> ST.toText <$> findParam "filename" params
   where
-    extended = do
-      spelling <- findParam "filename*" params
-      value <- either (const Nothing) Just (parseExtendedValue (ST.toByteString spelling))
-      decodeExtendedValue value
+    extended = findParam "filename*" params >>= decodeExtendedValueText . ST.toByteString
 
     findParam _ [] = Nothing
     findParam expected ((name, value) : rest)
-      | matchesName expected (ST.toShortByteString name) = Just value
+      | sameName expected (ST.toShortByteString name) = Just value
       | otherwise = findParam expected rest
 
 
--- The expected filename parameter name is ASCII lowercase.
-matchesName :: SBS.ShortByteString -> SBS.ShortByteString -> Bool
-matchesName expected name = SBS.length name == len && go 0
+sameName :: SBS.ShortByteString -> SBS.ShortByteString -> Bool
+sameName a b = SBS.length b == len && go 0
   where
-    len = SBS.length expected
+    len = SBS.length a
     go i
       | i == len = True
       | otherwise =
-          let byte = SBSI.unsafeIndex name i
-              lower = if 65 <= byte && byte <= 90 then byte .|. 32 else byte
-          in lower == SBSI.unsafeIndex expected i && go (i + 1)
-{-# INLINE matchesName #-}
+          lowerAscii (SBSI.unsafeIndex a i) == lowerAscii (SBSI.unsafeIndex b i) && go (i + 1)
+{-# INLINE sameName #-}
 
 
 foldedName :: ST.ShortText -> ByteString
 foldedName name =
   let bytes = ST.toByteString name
-  in if BS.any (\w -> 65 <= w && w <= 90) bytes then BC.map toLower bytes else bytes
+  in if BS.any isUpperAscii bytes then BS.map lowerAscii bytes else bytes
+
+
+isUpperAscii :: Word8 -> Bool
+isUpperAscii w = 65 <= w && w <= 90
+{-# INLINE isUpperAscii #-}
+
+
+lowerAscii :: Word8 -> Word8
+lowerAscii w = if isUpperAscii w then w .|. 32 else w
+{-# INLINE lowerAscii #-}
 
 
 isExtendedName :: ST.ShortText -> Bool
@@ -197,3 +220,34 @@ renderContentDisposition (ContentDisposition dtype params) =
   where
     renderParam (k, v) =
       M.char7 ';' <> shortText k <> M.char7 '=' <> (if isExtendedName k then shortText v else renderMediaParameterValue v)
+
+
+encodeContentDispositionChecked :: ContentDisposition -> Maybe ByteString
+encodeContentDispositionChecked (ContentDisposition dtype params)
+  | isHttpTokenText dtype, uniqueNames params = measure (width dtype) params
+  | otherwise = Nothing
+  where
+    add = BSI.checkedAdd "Content-Disposition"
+    width = SBS.length . ST.toShortByteString
+    measure !size [] = Just $ BSI.unsafeCreateUptoN size $ \ptr ->
+      copyText ptr 0 dtype >>= write ptr params
+    measure !size ((name, value) : rest)
+      | not (isHttpTokenText name) = Nothing
+      | isExtendedName name =
+          if name /= "*" && isRight (parseByteString (extendedValueBytes <* eof) (ST.toByteString value))
+            then measure (add start (width value)) rest
+            else Nothing
+      | isHttpQuotedText value = measure (add (add start 2) (add (width value) (width value))) rest
+      | otherwise = Nothing
+      where
+        start = add (add size 2) (width name)
+    write _ [] !offset = pure offset
+    write ptr ((name, value) : rest) !offset = do
+      start <- dWord8 ptr offset 59
+      nameEnd <- copyText ptr start name
+      valueStart <- dWord8 ptr nameEnd 61
+      end <-
+        if isExtendedName name
+          then copyText ptr valueStart value
+          else writeParameterValue ptr valueStart value
+      write ptr rest end

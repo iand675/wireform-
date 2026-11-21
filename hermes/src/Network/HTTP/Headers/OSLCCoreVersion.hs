@@ -33,6 +33,7 @@ import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
 import Numeric.Natural (Natural)
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- | An OSLC Core protocol version string (e.g. @2.0@), preserved verbatim.
@@ -78,18 +79,37 @@ instance KnownHeader OSLCCoreVersion where
   renderToHeaders _ = ST.toByteString . oslcCoreVersion
 
 
+  renderToHeadersChecked _ (OSLCCoreVersion version)
+    | version == "3.0" = Just "3.0"
+    | version == "2.0" = Just "2.0"
+    | otherwise = checkedVersionBytes version
+  {-# INLINE renderToHeadersChecked #-}
+
+
   headerName _ = hOSLCCoreVersion
 
 
 oslcCoreVersionParser :: ParserT st String OSLCCoreVersion
-oslcCoreVersionParser = OSLCCoreVersion <$> shortASCIIFromParser_ version
+oslcCoreVersionParser = OSLCCoreVersion <$> shortASCIIFromParser_ versionSpelling
+
+
+checkedVersionBytes :: ST.ShortText -> Maybe BS.ByteString
+checkedVersionBytes version =
+  let wire = ST.toByteString version
+  in either (const Nothing) (const (Just wire)) $
+       parseByteString (versionSpelling <* eof) wire
+{-# NOINLINE checkedVersionBytes #-}
+
+
+versionSpelling :: ParserT st e ()
+versionSpelling = do
+  skipMany $(char '0')
+  branch $(char '1') (skipSome digit) (skipSatisfyAscii (\c -> '2' <= c && c <= '9') *> skipMany digit)
+  $(char '.')
+  skipSome digit
   where
     digit = skipSatisfyAscii isDigit
-    version = do
-      skipMany $(char '0')
-      branch $(char '1') (skipSome digit) (skipSatisfyAscii (\c -> '2' <= c && c <= '9') *> skipMany digit)
-      $(char '.')
-      skipSome digit
+{-# INLINE versionSpelling #-}
 
 
 renderOSLCCoreVersion :: OSLCCoreVersion -> M.Builder

@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
@@ -36,24 +37,31 @@ module Network.HTTP.Headers.TransferEncoding (
   transferParameterParser,
   renderTransferParameter,
   transferCodingSupportsParameters,
+  encodeTransferCodingsChecked,
   transferEncodingParser,
   renderTransferEncoding,
 ) where
 
-import qualified Data.ByteString.Char8 as BC
-import qualified Data.ByteString.Short as SBS
-import Data.Char (isAsciiUpper, toLower)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short.Internal as SBS
+import Data.Char (ord)
 import qualified Data.CharSet as CharSet
+import Data.Either (isRight)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.Text.Internal as T
 import qualified Data.Text.Short as ST
-import qualified Data.Text.Short.Unsafe as STU
+import Foreign.Ptr (plusPtr)
+import Network.HTTP.ContentNegotiation (sameNegotiationToken, writeExplicitWeight)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTransferEncoding)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (renderHttpQuotedString, sepByCommas1, shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedChecked, encodeCommaSeparatedText, foldHttpQuotedText, renderHttpQuotedString, sepByCommas1, shortText)
+import Wireform.Encode.Direct (dWord8)
 
 
 -- | An ordered list of transfer codings, retaining any extension parameters.
@@ -95,6 +103,17 @@ instance KnownHeader TransferEncoding where
 
 
   renderToHeaders _ = M.toStrictByteString . renderTransferEncoding
+
+
+  renderToHeadersChecked _ TransferEncodingEmpty = Just ""
+  renderToHeadersChecked _ (TransferEncoding ("chunked" :| [])) = Just "chunked"
+  renderToHeadersChecked _ (TransferEncoding names)
+    | isRight (validateCodingsWith id (const False) isHttpTokenText (NE.toList names)) = Just (encodeCommaSeparatedText names)
+    | otherwise = Nothing
+  renderToHeadersChecked _ (ParameterizedTransferEncoding codings)
+    | isRight (validateCodings (NE.toList codings)) =
+        encodeTransferCodingsChecked transferCodingName transferCodingParameters (const Nothing) (NE.toList codings)
+    | otherwise = Nothing
 
 
   headerName _ = hTransferEncoding
@@ -149,47 +168,38 @@ fromCodings (first : rest) = do
 
 
 validateCodings :: [TransferCoding] -> Either String ()
-validateCodings = go False
+validateCodings = validateCodingsWith transferCodingName (not . null . transferCodingParameters) (const True)
+
+
+validateCodingsWith :: (a -> ST.ShortText) -> (a -> Bool) -> (ST.ShortText -> Bool) -> [a] -> Either String ()
+validateCodingsWith codingName hasParameters validName = go False
   where
     go _ [] = Right ()
-    go seenChunked (TransferCoding name params : rest)
+    go seenChunked (entry : rest)
+      | not (validName name) = Left "Invalid transfer-coding name"
       | seenChunked && chunked = Left "Transfer-Encoding repeats chunked"
-      | not (null params) && not (transferCodingSupportsParameters name) = Left "Transfer coding does not allow parameters"
+      | hasParameters entry && not (transferCodingSupportsParameters name) = Left "Transfer coding does not allow parameters"
       | otherwise = go (seenChunked || chunked) rest
       where
+        name = codingName entry
         chunked = transferCodingIs "chunked" name
-
-
--- | A transfer-coding or parameter token's case-insensitive comparison key.
-transferCodingKey :: ST.ShortText -> ST.ShortText
-transferCodingKey name
-  | ST.any isAsciiUpper name = STU.fromByteStringUnsafe (BC.map toLower (ST.toByteString name))
-  | otherwise = name
-{-# INLINE transferCodingKey #-}
+{-# INLINE validateCodingsWith #-}
 
 
 -- | Compare a coding name to a known lowercase token.
 transferCodingIs :: ST.ShortText -> ST.ShortText -> Bool
-transferCodingIs expected actual =
-  actual == expected
-    || ( SBS.length (ST.toShortByteString expected) == SBS.length (ST.toShortByteString actual)
-           && transferCodingKey actual == expected
-       )
+transferCodingIs = sameNegotiationToken
 {-# INLINE transferCodingIs #-}
 
 
 transferCodingSupportsParameters :: ST.ShortText -> Bool
-transferCodingSupportsParameters = supportsParameters . transferCodingKey
-
-
-supportsParameters :: ST.ShortText -> Bool
-supportsParameters name =
-  name /= "chunked"
-    && name /= "compress"
-    && name /= "deflate"
-    && name /= "gzip"
-    && name /= "x-compress"
-    && name /= "x-gzip"
+transferCodingSupportsParameters name =
+  not (transferCodingIs "chunked" name
+    || transferCodingIs "compress" name
+    || transferCodingIs "deflate" name
+    || transferCodingIs "gzip" name
+    || transferCodingIs "x-compress" name
+    || transferCodingIs "x-gzip" name)
 
 
 -- | All codings, including parameters, in field order.
@@ -214,6 +224,60 @@ validateRequestTransferEncoding :: TransferEncoding -> Either String ()
 validateRequestTransferEncoding value
   | transferEncodingEndsInChunked value = validateCodings (transferCodings value)
   | otherwise = Left "Request Transfer-Encoding requires a final chunked coding"
+
+
+-- | Check lexical spelling and write a coding list with its explicit weights.
+-- Callers enforce the field-specific rules for coding names and parameters.
+encodeTransferCodingsChecked
+  :: (a -> ST.ShortText)
+  -> (a -> [TransferParameter])
+  -> (a -> Maybe Double)
+  -> [a]
+  -> Maybe ByteString
+encodeTransferCodingsChecked name parameters weight = encodeCommaSeparatedChecked entryBound writeEntry
+  where
+    add = BSI.checkedAdd "HTTP transfer coding"
+    width = SBS.length . ST.toShortByteString
+    entryBound entry
+      | isHttpTokenText token =
+          parameterBound (add (width token) (maybe 0 (const 8) (weight entry))) (parameters entry)
+      | otherwise = -1
+      where
+        token = name entry
+    parameterBound size [] = size
+    parameterBound size (TransferParameter key value : rest)
+      | not (isHttpTokenText key) = -1
+      | otherwise = case value of
+          TransferToken token
+            | isHttpTokenText token -> parameterBound (add start (width token)) rest
+          TransferQuoted text@(T.Text _ _ len)
+            | T.all (isOpaqueByte . fromIntegral . ord) text ->
+                parameterBound (add (add start 2) (add len len)) rest
+          _ -> -1
+      where
+        start = add (add size 2) (width key)
+
+    writeEntry ptr offset entry = do
+      named <- writeText ptr offset (name entry)
+      end <- writeParameters ptr named (parameters entry)
+      case weight entry of
+        Nothing -> pure end
+        Just quality -> writeExplicitWeight ptr end quality
+    writeParameters _ !offset [] = pure offset
+    writeParameters ptr !offset (TransferParameter key value : rest) = do
+      start <- dWord8 ptr offset 59
+      named <- writeText ptr start key
+      payload <- dWord8 ptr named 61
+      end <- case value of
+        TransferToken token -> writeText ptr payload token
+        TransferQuoted text -> foldHttpQuotedText (dWord8 ptr) payload text
+      writeParameters ptr end rest
+    writeText ptr offset text = do
+      let bytes = ST.toShortByteString text
+          len = SBS.length bytes
+      SBS.copyToPtr bytes 0 (ptr `plusPtr` offset) len
+      pure $! offset + len
+{-# INLINE encodeTransferCodingsChecked #-}
 
 
 renderTransferEncoding :: TransferEncoding -> M.Builder

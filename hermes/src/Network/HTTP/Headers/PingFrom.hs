@@ -16,7 +16,7 @@ module Network.HTTP.Headers.PingFrom (
 ) where
 
 import qualified Data.ByteString.Char8 as BSC
-import Network.HTTP.Grammar.URIReference (browserURLBytes)
+import Network.HTTP.Grammar.URIReference (browserURLBytes, checkedBrowserURLField)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPingFrom)
 import qualified Network.HTTP.Headers.Mason as M
@@ -38,6 +38,9 @@ instance KnownHeader PingFrom where
 
 
   renderToHeaders _ = M.toStrictByteString . renderPingFrom
+
+
+  renderToHeadersChecked _ = checkedBrowserURLField . pingFrom
 
 
   headerName _ = hPingFrom

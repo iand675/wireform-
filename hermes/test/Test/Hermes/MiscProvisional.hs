@@ -14,7 +14,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.AMPCacheTransform as AMP
 import qualified Network.HTTP.Headers.ConfigurationContext as CC
 import qualified Network.HTTP.Headers.EDIINTFeatures as ED
@@ -103,6 +103,13 @@ unit_amp_render =
 
 typedAMPTransforms :: Spec
 typedAMPTransforms = describe "AMP-Cache-Transform alternatives" $ do
+  it "validates checked writes from authored text" $ do
+    let previous = headerMapFromList [("AMP-Cache-Transform", "any")]
+        bad = AMP.AMPCacheTransform "google;x=?1, any"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
+    renderHeaderLines defaultHeaderSettings (AMP.AMPCacheTransform "google;v=\"not-a-range\", any")
+      `shouldBe` Just ("google;v=\"not-a-range\", any" :| [])
   let lookupAMP wire = lookupHeader @AMP.AMPCacheTransform (headerMapFromList (fmap ("AMP-Cache-Transform",) wire))
       parseEntries wire = lookupAMP wire >>= traverse AMP.ampTransforms
       noParams name = AMP.AMPTransform name []
@@ -244,6 +251,12 @@ unit_http2_render =
 
 typedHTTP2Settings :: Spec
 typedHTTP2Settings = describe "typed HTTP2-Settings field" $ do
+  it "checks authored payload size before replacing the existing setting" $ do
+    let previous = headerMapFromList [("HTTP2-Settings", "AAMAAABk")]
+    forM_ [0, 1, 5, 7, 11, 13] $ \size -> do
+      let value = H2.HTTP2Settings (BS.replicate size 255)
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous
   it "preserves unknown setting identifiers and duplicate updates in order" $ do
     let entries = H2.HTTP2Setting 3 100 :| [H2.HTTP2Setting 0xaaaa 0xff000001, H2.HTTP2Setting 3 200]
         value = H2.http2SettingsFromEntries entries
@@ -293,6 +306,17 @@ prop_cc_roundtrip = property $ do
   case parseCC (renderCC v) of
     Right v' -> v === v'
     Left err -> error (err <> " on " <> show v)
+
+
+unit_ediint_checked_write :: Spec
+unit_ediint_checked_write = it "checks the restricted alphabet when authoring EDIINT features" $ do
+  let fields = headerMapFromList [("EDIINT-Features", "CEM"), ("EDIINT-Features", "Old")]
+      reject name = do
+        let value = ED.EDIINTFeatures ("CEM" :| [name])
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value fields `shouldBe` fields
+  mapM_ reject ["", "CEM,Old", "new.feature", "x_1", "x\xff"]
+  renderHeaderLines defaultHeaderSettings (ED.EDIINTFeatures ("CeM" :| ["Extension-42"])) `shouldBe` Just ("CeM, Extension-42" :| [])
 
 
 prop_ediint_roundtrip :: Property
@@ -357,6 +381,12 @@ typedOSLCFields = describe "typed OSLC fields" $ do
     forM_ ["", "2", ".0", "2.", "1.0", "0001.0", "00.000", "+2.0", "2.-1", "2.0.1", "2. 0", "2.0, 3.0", "2.0\r"] $ \wire -> do
       lookupVersion wire `shouldSatisfy` isLeft
       OCV.oslcCoreVersionNumbers (OCV.OSLCCoreVersion (ST.fromString (BSC.unpack wire))) `shouldBe` Nothing
+  it "rejects authored invalid OSLC-Core-Version values before replacing existing lines" $ do
+    let original = headerMapFromList [("OSLC-Core-Version", "2.0"), ("OSLC-Core-Version", "3.0")]
+    forM_ ["", "1.0", "0001.0", "00.0", "2.", ".0", "2.0.1", " 2.0", "2.0 ", "2.０"] $ \version -> do
+      let value = OCV.OSLCCoreVersion version
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value original `shouldBe` original
   it "rejects repeated OSLC singleton fields" $ do
     let duplicates name value = headerMapFromList [(name, value), (name, value)]
     lookupHeader @CC.ConfigurationContext (duplicates "Configuration-Context" "https://example.com/context") `shouldSatisfy` isLeft
@@ -379,6 +409,7 @@ tests =
       , unit_ediint_parse
       , unit_ediint_render
       , unit_ediint_field_lines
+      , unit_ediint_checked_write
       , unit_http2_parse
       , unit_http2_render
       , it "AMP-Cache-Transform round-trip" prop_amp_roundtrip

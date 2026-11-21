@@ -20,7 +20,7 @@ module Network.HTTP.Headers.Location (
 ) where
 
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (uriReference)
+import Network.HTTP.Grammar.URIReference (checkedURIField, outboundURIReferenceBytes, uriReference)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hLocation)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,6 +43,9 @@ instance KnownHeader Location where
 
 
   renderToHeaders _ = M.toStrictByteString . renderLocation
+
+
+  renderToHeadersChecked _ = checkedURIField outboundURIReferenceBytes . ST.toByteString . locationUri
 
 
   headerName _ = hLocation

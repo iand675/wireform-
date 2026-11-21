@@ -18,7 +18,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.CaseInsensitive qualified as CI
 import Network.HTTP.Header qualified as HTTP
 import Network.HTTP2.Connection
-  ( Connection, sendEncodedHeaders, sendFrame, sendPeerData, validateTrailerBlock )
+  ( Connection, sendEncodedHeaders, sendFrame, sendPeerData, validateOutboundTrailers )
 import Network.HTTP2.Engine.Types
 import Network.HTTP2.Frame
 import Network.HTTP2.Types (ErrorCode, FrameType (FrameRSTStream), Header, StreamId)
@@ -40,7 +40,7 @@ finishTrailers maker = do
     NextTrailersMaker _ -> fail "trailer maker requested another chunk after end of body"
     Trailers fields -> do
       let headers = ciHeadersToRaw fields
-      case validateTrailerBlock flagEndStream headers of
+      case validateOutboundTrailers headers of
         Nothing -> pure headers
         Just reason -> throwIO (userError (BS8.unpack reason))
 

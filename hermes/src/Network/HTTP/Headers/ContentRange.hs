@@ -30,10 +30,19 @@ module Network.HTTP.Headers.ContentRange (
   RangeResp (..),
   contentRangeParser,
   renderContentRange,
+  renderContentRangeChecked,
 ) where
 
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Builder.Prim as Prim
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
 import qualified Data.Text.Short as ST
-import Data.Word (Word64)
+import Data.Word (Word64, Word8)
+import Foreign.Ptr (minusPtr, plusPtr)
+import Foreign.Storable (poke)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentRange)
 import qualified Network.HTTP.Headers.Mason as M
@@ -57,7 +66,8 @@ data RangeResp
       }
   | {- | For 416 responses, with the complete length in 'Just'.
     'Nothing' remains available for callers constructing legacy @*\\/*@
-    values. The parser requires a complete length.
+    values with the structural builder. Parsing and checked emission require
+    a complete length.
     -}
     RangeRespUnsatisfied {rangeTotal :: !(Maybe Word64)}
   deriving stock (Eq, Show)
@@ -81,6 +91,11 @@ instance KnownHeader ContentRange where
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentRange
+
+
+  renderToHeadersChecked _ value = case invalidContentRange value of
+    Nothing -> Just (encodeContentRange value)
+    Just _ -> Nothing
 
 
   headerName _ = hContentRange
@@ -116,6 +131,7 @@ contentRangeParser = do
 -- Renderer
 -- ---------------------------------------------------------------------------
 
+-- | Render the structural value. For checked emission use 'renderContentRangeChecked'.
 renderContentRange :: ContentRange -> M.Builder
 renderContentRange (ContentRange unit resp) =
   R.shortText unit <> M.char7 ' ' <> renderResp resp
@@ -131,3 +147,53 @@ renderContentRange (ContentRange unit resp) =
         "*/" <> mTotal mTot
     mTotal Nothing = "*"
     mTotal (Just n) = M.word64Dec n
+
+
+-- | Validate the unit, interval, and complete length before emission.
+renderContentRangeChecked :: ContentRange -> Either String M.Builder
+renderContentRangeChecked value = case invalidContentRange value of
+  Nothing -> Right (renderContentRange value)
+  Just message -> Left message
+
+
+invalidContentRange :: ContentRange -> Maybe String
+invalidContentRange (ContentRange unit response)
+  | unit /= "bytes" && not (isHttpTokenText unit) = Just "Invalid Content-Range unit"
+  | otherwise = case response of
+      RangeRespUnsatisfied Nothing -> Just "Unsatisfied Content-Range requires a complete length"
+      RangeRespSatisfied first lastByte total
+        | lastByte < first -> Just "Content-Range ends before it starts"
+        | Just len <- total, len <= lastByte -> Just "Content-Range ends outside the complete length"
+      _ -> Nothing
+{-# INLINE invalidContentRange #-}
+
+
+encodeContentRange :: ContentRange -> ByteString
+encodeContentRange (ContentRange unit response) = BSI.unsafeCreateUptoN capacity $ \start -> do
+  SBSI.copyToPtr unitBytes 0 start unitSize
+  poke (start `plusPtr` unitSize) (32 :: Word8)
+  let rangeStart = start `plusPtr` (unitSize + 1)
+  end <- case response of
+    RangeRespSatisfied first lastByte total -> do
+      dash <- Prim.runB Prim.word64Dec first rangeStart
+      poke dash (45 :: Word8)
+      slash <- Prim.runB Prim.word64Dec lastByte (dash `plusPtr` 1)
+      poke slash (47 :: Word8)
+      writeTotal (slash `plusPtr` 1) total
+    RangeRespUnsatisfied total -> do
+      poke rangeStart (42 :: Word8)
+      poke (rangeStart `plusPtr` 1) (47 :: Word8)
+      writeTotal (rangeStart `plusPtr` 2) total
+  pure (end `minusPtr` start)
+  where
+    unitBytes = ST.toShortByteString unit
+    unitSize = SBS.length unitBytes
+    -- A Word64 has at most 20 digits. Include space and both delimiters.
+    capacity = BSI.checkedAdd "Content-Range" unitSize $ case response of
+      RangeRespSatisfied _ _ _ -> 63
+      RangeRespUnsatisfied _ -> 23
+    writeTotal ptr = \case
+      Just value -> Prim.runB Prim.word64Dec value ptr
+      Nothing -> do
+        poke ptr (42 :: Word8)
+        pure (ptr `plusPtr` 1)

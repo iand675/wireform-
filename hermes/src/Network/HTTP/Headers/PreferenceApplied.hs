@@ -69,7 +69,18 @@ instance KnownHeader PreferenceApplied where
   renderToHeaders _ = pure . M.toStrictByteString . renderPreferenceApplied
 
 
+  renderToHeadersChecked _ value
+    | all validAppliedPreference (appliedPreferences value) = Just [M.toStrictByteString (renderPreferenceApplied value)]
+    | otherwise = Nothing
+
+
   headerName _ = hPreferenceApplied
+
+
+validAppliedPreference :: AppliedPreference -> Bool
+validAppliedPreference (AppliedPreference name word _) =
+  isHttpTokenText name && all isHttpWordValue word
+{-# INLINE validAppliedPreference #-}
 
 
 preferenceAppliedParser :: ParserT st String PreferenceApplied

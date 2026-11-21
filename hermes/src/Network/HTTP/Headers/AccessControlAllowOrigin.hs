@@ -4,7 +4,7 @@
 @Access-Control-Allow-Origin@ (WHATWG Fetch / W3C CORS) response header
 indicating whether the response may be shared with requesting code from the
 given origin. It echoes a single origin, the literal @null@, or the @*@ wildcard
-(the wildcard is forbidden when the request carries credentials). Servers that
+available outside credentials mode @include@. Servers that
 vary this value per request should also emit @Vary: Origin@.
 
 == Grammar
@@ -20,16 +20,21 @@ See also: "Network.HTTP.Headers.Origin", "Network.HTTP.Headers.AccessControlAllo
 -}
 module Network.HTTP.Headers.AccessControlAllowOrigin (
   AccessControlAllowOrigin (..),
+  corsCheck,
   accessControlAllowOriginParser,
   renderAccessControlAllowOrigin,
 ) where
 
+import qualified Data.ByteString.Char8 as BC
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Data.Word (Word16)
-import Network.HTTP.Grammar.Authority (SerializedOrigin (..), renderSerializedOrigin, serializedOriginParser)
+import Network.HTTP.Grammar.Authority (SerializedOrigin (..), corsSerializedOriginParser, encodeCorsOriginsChecked, renderSerializedOrigin)
 import Network.HTTP.Headers
+import Network.HTTP.Headers.AccessControlAllowCredentials (AccessControlAllowCredentials (..), CorsCredentialsMode (..))
 import Network.HTTP.Headers.HeaderFieldName (hAccessControlAllowOrigin)
 import qualified Network.HTTP.Headers.Mason as M
+import Network.HTTP.Headers.Origin (CorsRequestOrigin, corsRequestOriginBytes)
 import Network.HTTP.Headers.Parsing.Util
 
 
@@ -60,6 +65,12 @@ instance KnownHeader AccessControlAllowOrigin where
   renderToHeaders _ = M.toStrictByteString . renderAccessControlAllowOrigin
 
 
+  renderToHeadersChecked _ AllowOriginWildcard = Just "*"
+  renderToHeadersChecked _ AllowOriginNull = Just "null"
+  renderToHeadersChecked _ (AllowOrigin scheme host port) =
+    encodeCorsOriginsChecked (SerializedOrigin scheme host port) []
+
+
   headerName _ = hAccessControlAllowOrigin
 
 
@@ -69,8 +80,28 @@ accessControlAllowOriginParser = wildcard <|> specificOrigin <|> nullOrigin
     wildcard = AllowOriginWildcard <$ $(char '*')
     nullOrigin = AllowOriginNull <$ $(string "null")
     specificOrigin = do
-      SerializedOrigin scheme host port <- serializedOriginParser
+      SerializedOrigin scheme host port <- corsSerializedOriginParser
       pure (AllowOrigin scheme host port)
+
+
+{- | Apply the Fetch CORS check to the response headers using the original
+request's credentials mode and serialized origin, including redirect taint.
+The comparison uses the response field bytes with HTTP OWS removed.
+-}
+corsCheck :: CorsCredentialsMode -> CorsRequestOrigin -> HeaderMap -> Bool
+corsCheck mode requestOrigin headers =
+  case lookupRawHeader hAccessControlAllowOrigin headers of
+    Just (wire :| []) ->
+      (matches wire || matches (BC.dropWhileEnd isOWS (BC.dropWhile isOWS wire)))
+        && (mode /= CorsInclude || allowedCredentials)
+    _ -> False
+  where
+    matches wire =
+      wire == corsRequestOriginBytes requestOrigin || (mode /= CorsInclude && wire == "*")
+    allowedCredentials =
+      case lookupHeader @AccessControlAllowCredentials headers of
+        Right (Just (AccessControlAllowCredentials True)) -> True
+        _ -> False
 
 
 renderAccessControlAllowOrigin :: AccessControlAllowOrigin -> M.Builder

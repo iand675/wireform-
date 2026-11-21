@@ -24,7 +24,7 @@ import qualified Data.ByteString.Short as SBS
 import Data.Char (isAsciiUpper, toLower)
 import qualified Data.Text.Short as ST
 import Network.HTTP.Grammar.Parser
-import Network.HTTP.Grammar.Rendering (renderHttpQuotedString, shortText)
+import Network.HTTP.Grammar.Rendering (encodeHttpParameterList, renderHttpQuotedString, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTCN)
 import qualified Network.HTTP.Headers.Mason as M
@@ -97,6 +97,13 @@ instance KnownHeader TCN where
 
 
   renderToHeaders _ = M.toStrictByteString . renderTCN
+
+
+  renderToHeadersChecked _ (TCN directives)
+    | all valid directives = Just (encodeHttpParameterList tcnName tcnValue directives)
+    | otherwise = Nothing
+    where
+      valid (TCNDirective name value) = isHttpTokenText name && maybe True isHttpQuotedText value
 
 
   headerName _ = hTCN

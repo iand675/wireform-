@@ -11,7 +11,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (HeaderMessage (..), defaultHeaderSettings, headerMapFromList, lookupHeader, lookupHeaderWith, lookupRawHeader, setHeader, withHeaderMessage)
+import Network.HTTP.Headers (HeaderMessage (..), defaultHeaderSettings, headerMapFromList, lookupHeader, lookupHeaderWith, lookupRawHeader, renderHeaderLines, setHeader, withHeaderMessage)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import qualified Network.HTTP.Headers.TTL as TTL
@@ -195,6 +195,15 @@ tests =
       , unit_topic_parse
       , unit_topic_render
       , unit_topic_fields
+      , it "validates authored Topic length and alphabet" $ do
+          let fields = headerMapFromList [("Topic", "previous")]
+              reject :: ST.ShortText -> Expectation
+              reject text = do
+                let value = Topic.Topic text
+                renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+                setHeader value fields `shouldBe` fields
+          mapM_ reject ["", "a=", "a+b", "a/b", "a b", "é", "0123456789ABCDEFGHIJKLMNOPQRSTUVW"]
+          renderHeaderLines defaultHeaderSettings (Topic.Topic "A") `shouldBe` Just ("A" :| [])
       , it "Topic round-trip" prop_topic_roundtrip
       , unit_urgency_parse
       , unit_urgency_render

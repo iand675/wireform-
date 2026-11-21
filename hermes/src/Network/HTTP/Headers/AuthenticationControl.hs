@@ -45,22 +45,38 @@ module Network.HTTP.Headers.AuthenticationControl (
 ) where
 
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short.Internal as SBS
+import qualified Data.CaseInsensitive as CI
+import Data.List (find)
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text.Short (ShortText)
+import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
-import Network.HTTP.Grammar.ExtendedValue (extendedValueBytes)
+import Network.HTTP.ContentNegotiation (sameNegotiationToken)
+import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), extendedValueBytes, parseExtendedValue)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.Authorization (
   AuthScheme (..),
+  CredentialContents (..),
   CredentialParam (..),
+  Credentials (Credentials),
   authParamValueParser,
+  authParamsUnique,
   authParamsUniqueOn,
+  credentialParamBytes,
+  encodeCredentialEntriesChecked,
   renderAuthParam,
  )
 import Network.HTTP.Headers.HeaderFieldName (hAuthenticationControl)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Wireform.FFI (validateUtf8SWAR)
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- ---------------------------------------------------------------------------
@@ -98,6 +114,14 @@ instance KnownHeader AuthenticationControl where
 
 
   renderToHeaders _ ac = [M.toStrictByteString (renderAuthenticationControl ac)]
+
+
+  renderToHeadersChecked _ (AuthenticationControl entries)
+    | null entries || not (all validControlEntry entries && uniqueControlEntries entries) = Nothing
+    | otherwise = pure <$> encodeCredentialEntriesChecked asCredentials entries
+    where
+      asCredentials (AuthControlEntry scheme params) =
+        Credentials scheme (maybe CredentialBare CredentialParams (NE.nonEmpty params))
 
 
   headerName _ = hAuthenticationControl
@@ -138,18 +162,33 @@ entryParser = do
   first <- authParamParser
   rest <- many (commas *> authParamParser)
   let params = first : rest
-  if authParamsUniqueOn baseName params
+  if controlParamsUnique params
     then pure (AuthControlEntry scheme params)
     else err "Duplicate Authentication-Control parameter"
-  where
-    baseName bytes
-      | B.last bytes == 42 = B.take (B.length bytes - 1) bytes
-      | otherwise = bytes
+
+
+parameterBaseName :: B.ByteString -> B.ByteString
+parameterBaseName bytes = case B.unsnoc bytes of
+  Just (base, 42) -> base
+  _ -> bytes
+
+
+controlParamsUnique :: [(ShortText, CredentialParam)] -> Bool
+controlParamsUnique params
+  | any (hasExtendedName . fst) params = authParamsUniqueOn parameterBaseName params
+  | otherwise = authParamsUnique params
+
+
+hasExtendedName :: ShortText -> Bool
+hasExtendedName name =
+  let bytes = ST.toShortByteString name
+      len = SBS.length bytes
+  in len > 0 && SBS.unsafeIndex bytes (len - 1) == 42
 
 
 authParamParser :: ParserT st String (ShortText, CredentialParam)
 authParamParser =
-  withByteString parameterName $ \extended key -> do
+  withByteString controlParameterName $ \extended key -> do
     bws
     $(char '=')
     bws
@@ -158,14 +197,91 @@ authParamParser =
         then CredentialParamToken <$> shortASCIIFromParser_ extendedValueBytes
         else authParamValueParser
     pure (STU.fromByteStringUnsafe key, value)
+
+
+controlParameterName :: ParserT st e Bool
+controlParameterName = do
+  bareToken <|> ($(char '-') *> bareToken *> skipSome ($(char '.') *> bareToken))
+  (True <$ $(char '*')) <|> pure False
   where
-    parameterName = do
-      bareToken <|> ($(char '-') *> bareToken *> skipSome ($(char '.') *> bareToken))
-      (True <$ $(char '*')) <|> pure False
-    bareToken =
-      skipSatisfyAscii alphanumeric
-        *> skipMany (skipSatisfyAscii (\c -> alphanumeric c || c == '-' || c == '_'))
-    alphanumeric c = isLatinLetter c || isDigit c
+    bareToken = skipSatisfyAscii controlNameHead *> skipMany (skipSatisfyAscii controlNameTail)
+{-# INLINE controlParameterName #-}
+
+
+controlNameHead :: Char -> Bool
+controlNameHead c = isLatinLetter c || isDigit c
+{-# INLINE controlNameHead #-}
+
+
+controlNameTail :: Char -> Bool
+controlNameTail c = controlNameHead c || c == '-' || c == '_'
+{-# INLINE controlNameTail #-}
+
+
+validControlEntry :: AuthControlEntry -> Bool
+validControlEntry (AuthControlEntry _ params) =
+  not (null params) && all validControlParam params && uniqueBaseNames
+  where
+    -- The shared credential writer checks plain names.
+    uniqueBaseNames =
+      not (any (hasExtendedName . fst) params) || authParamsUniqueOn parameterBaseName params
+    validControlParam (name, value)
+      | let bytes = ST.toShortByteString name
+      , not (SBS.null bytes)
+      , controlNameHead (BSI.w2c (SBS.unsafeIndex bytes 0))
+      , scanCompactBytes (controlNameTail . BSI.w2c) bytes 1 = True
+      | otherwise = case parseByteString (controlParameterName <* eof) (ST.toByteString name) of
+          Right False -> True
+          Right True -> validExtendedParameter value
+          Left _ -> False
+
+
+validExtendedParameter :: CredentialParam -> Bool
+validExtendedParameter (CredentialParamToken text) =
+  case parseExtendedValue (ST.toByteString text) of
+    Right (ExtendedValue charset Nothing octets) ->
+      sameNegotiationToken "UTF-8" charset && B.any (>= 128) octets && validateUtf8SWAR octets
+    _ -> False
+validExtendedParameter _ = False
+
+
+-- | Parameters are unique across entries for the same scheme and realm.
+uniqueControlEntries :: [AuthControlEntry] -> Bool
+uniqueControlEntries [] = True
+uniqueControlEntries [_] = True
+uniqueControlEntries [first, second] =
+  not (sameScheme first second)
+    || controlRealm first /= controlRealm second
+    || Set.disjoint (parameterKeys first) (parameterKeys second)
+  where
+    sameScheme (AuthControlEntry (AuthScheme a) _) (AuthControlEntry (AuthScheme b) _) =
+      sameNegotiationToken a b
+uniqueControlEntries entries = go Map.empty entries
+  where
+    go _ [] = True
+    go seen (entry@(AuthControlEntry (AuthScheme scheme) _) : rest) =
+      let scope = ControlScope (CI.mk (ST.toByteString scheme)) (controlRealm entry)
+          keys = parameterKeys entry
+      in case Map.lookup scope seen of
+           Nothing -> go (Map.insert scope keys seen) rest
+           Just previous ->
+             Set.disjoint previous keys && go (Map.insert scope (Set.union previous keys) seen) rest
+
+
+data ControlScope = ControlScope !(CI.CI B.ByteString) !(Maybe B.ByteString)
+  deriving stock (Eq, Ord)
+
+
+parameterKeys :: AuthControlEntry -> Set.Set (CI.CI B.ByteString)
+parameterKeys = Set.fromList . map (CI.mk . parameterBaseName . ST.toByteString . fst) . authControlParams
+
+
+controlRealm :: AuthControlEntry -> Maybe B.ByteString
+controlRealm entry = do
+  (_, value) <- find (sameNegotiationToken "realm" . fst) (authControlParams entry)
+  pure $ case value of
+    CredentialParamString text -> M.toStrictByteString (R.renderLatin1ShortText (unsafeToRFC8941String text))
+    _ -> credentialParamBytes value
 
 
 -- ---------------------------------------------------------------------------

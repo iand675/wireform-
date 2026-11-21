@@ -15,15 +15,20 @@ module Network.HTTP.Headers.ScheduleTag (
   ScheduleTag (ScheduleTag, ScheduleTagBytes, scheduleTag, scheduleTagBytes),
   scheduleTagParser,
   renderScheduleTag,
+  encodeScheduleTagChecked,
 ) where
 
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
+import Foreign.Ptr (plusPtr)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hScheduleTag)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Wireform.Encode.Direct (dWord8, directEncode)
 
 
 -- | The bytes between the quotes, including any quoted pairs.
@@ -57,6 +62,7 @@ instance KnownHeader ScheduleTag where
 
   parseFromHeaders _ = parseQuotedWireFieldLine "Schedule-Tag" (ScheduleTagBytes . SBS.toShort)
   renderToHeaders _ = M.toStrictByteString . renderScheduleTag
+  renderToHeadersChecked _ = encodeScheduleTagChecked
   headerName _ = hScheduleTag
 
 
@@ -66,3 +72,21 @@ scheduleTagParser = ScheduleTagBytes . SBS.toShort <$> httpQuotedWireBytes
 
 renderScheduleTag :: ScheduleTag -> M.Builder
 renderScheduleTag (ScheduleTagBytes bytes) = M.char7 '"' <> M.shortByteString bytes <> M.char7 '"'
+
+
+-- | Quote a validated wire body. Existing quoted pairs retain their spelling.
+encodeScheduleTagChecked :: ScheduleTag -> Maybe BSI.ByteString
+encodeScheduleTagChecked (ScheduleTagBytes bytes)
+  | valid 0 = Just $ directEncode (BSI.checkedAdd "Schedule-Tag" size 2) $ \ptr start -> do
+      body <- dWord8 ptr start 34
+      SBSI.copyToPtr bytes 0 (ptr `plusPtr` body) size
+      dWord8 ptr (body + size) 34
+  | otherwise = Nothing
+  where
+    size = SBS.length bytes
+    valid offset
+      | offset == size = True
+      | otherwise = case SBSI.unsafeIndex bytes offset of
+          34 -> False
+          92 -> offset + 1 < size && isOpaqueByte (fromIntegral (SBSI.unsafeIndex bytes (offset + 1))) && valid (offset + 2)
+          byte -> isOpaqueByte (fromIntegral byte) && valid (offset + 1)

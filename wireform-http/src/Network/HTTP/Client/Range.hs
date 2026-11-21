@@ -24,12 +24,14 @@ wireform-flavoured wrapper layer:
 module Network.HTTP.Client.Range (
   -- * Range request header
   ByteRange (..),
+  ResolvedByteRange (..),
   Range,
   byteRange,
   byteRangeFrom,
   byteRangeSuffix,
   rangeHeader,
   parseRange,
+  resolveByteRange,
 
   -- * Content-Range response header
   ContentRange (..),
@@ -68,6 +70,7 @@ import Network.HTTP.Headers.ContentRange qualified as HCR
 import Network.HTTP.Headers.ContentType qualified as HCT
 import Network.HTTP.Headers.Mason qualified as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
+import Network.HTTP.Headers.Range (ResolvedByteRange (..))
 import Network.HTTP.Headers.Range qualified as HR
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Status qualified as S
@@ -115,14 +118,23 @@ byteRangeSuffix = ByteRangeSuffix
 list renders as @bytes=@. Use 'withRange' for checked request authoring.
 -}
 rangeHeader :: Range -> ByteString
-rangeHeader rs = case NE.nonEmpty (map toHermes rs) of
+rangeHeader rs = case NE.nonEmpty (map toHermesByteRange rs) of
   Nothing -> "bytes="
   Just ne -> M.toStrictByteString (HR.renderRange (HR.ByteRanges ne))
-  where
-    toHermes = \case
-      ByteRange a b -> HR.ByteRangeInt a (Just b)
-      ByteRangeFrom a -> HR.ByteRangeInt a Nothing
-      ByteRangeSuffix n -> HR.ByteRangeSuffix n
+
+
+-- | Resolve the range against the selected representation's byte length.
+resolveByteRange :: Word64 -> ByteRange -> Maybe ResolvedByteRange
+resolveByteRange total = HR.resolveByteRange total . toHermesByteRange
+{-# INLINE resolveByteRange #-}
+
+
+toHermesByteRange :: ByteRange -> HR.ByteRange
+toHermesByteRange = \case
+  ByteRange a b -> HR.ByteRangeInt a (Just b)
+  ByteRangeFrom a -> HR.ByteRangeInt a Nothing
+  ByteRangeSuffix n -> HR.ByteRangeSuffix n
+{-# INLINE toHermesByteRange #-}
 
 
 {- | Parse a @Range@ header value. Returns 'Nothing' if the unit

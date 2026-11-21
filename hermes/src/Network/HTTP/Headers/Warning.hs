@@ -44,9 +44,9 @@ import Data.Text.Short (ShortText)
 import Data.Time.Clock (UTCTime)
 import Data.Word (Word8)
 import Foreign.Storable (pokeByteOff)
-import Network.HTTP.Grammar.Authority (warningAgent)
+import Network.HTTP.Grammar.Authority (isWarningAgent, warningAgent)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate, renderDateChecked)
 import Network.HTTP.Headers.HeaderFieldName (hWarning)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -80,6 +80,17 @@ instance KnownHeader Warning where
 
 
   renderToHeaders _ = maybe [] (pure . M.toStrictByteString) . warningBuilder
+
+
+  renderToHeadersChecked _ (Warning (first NE.:| rest)) = do
+    entry <- checkedWarningValue first
+    trailing <- foldr appendWarning (Just mempty) rest
+    pure [M.toStrictByteString (entry <> trailing)]
+    where
+      appendWarning item nextWarning = do
+        entry <- checkedWarningValue item
+        trailing <- nextWarning
+        pure (", " <> entry <> trailing)
 
 
   headerName _ = hWarning
@@ -129,11 +140,23 @@ warningBuilder (Warning entries)
 
 renderWarningValue :: WarningValue -> M.Builder
 renderWarningValue (WarningValue code agent (RFC8941String text) date) =
+  renderWarningPrefix code agent text <> maybe mempty (\d -> M.char7 ' ' <> renderWarnDate d) date
+
+
+checkedWarningValue :: WarningValue -> Maybe M.Builder
+checkedWarningValue (WarningValue code agent (RFC8941String text) date)
+  | code > 999 || not (isWarningAgent agent && isHttpQuotedText text) = Nothing
+  | otherwise = do
+      encodedDate <- traverse renderDateChecked date
+      pure (renderWarningPrefix code agent text <> foldMap (\d -> " \"" <> d <> "\"") encodedDate)
+
+
+renderWarningPrefix :: Word -> ShortText -> ShortText -> M.Builder
+renderWarningPrefix code agent text =
   renderWarnCodePrefix code
     <> R.shortText agent
     <> M.char7 ' '
     <> R.renderHttpQuotedShortText text
-    <> maybe mempty (\d -> M.char7 ' ' <> renderWarnDate d) date
 
 
 -- The checked builder supplies a code in the range 0 through 999.

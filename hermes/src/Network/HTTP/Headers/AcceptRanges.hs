@@ -1,3 +1,5 @@
+{-# LANGUAGE MagicHash #-}
+
 {- |
 @Accept-Ranges@ is a response header by which a server advertises whether
 it supports range requests on the target resource, naming the range units
@@ -10,9 +12,8 @@ Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-14.3>
 == Grammar
 
 @
-Accept-Ranges     = acceptable-ranges
-acceptable-ranges = 1#range-unit / \"none\"
-range-unit        = bytes-unit / other-range-unit
+Accept-Ranges = 1#range-unit
+range-unit    = token
 @
 
 See also: "Network.HTTP.Headers.Range", "Network.HTTP.Headers.ContentRange", "Network.HTTP.Headers.IfRange".
@@ -24,10 +25,17 @@ module Network.HTTP.Headers.AcceptRanges (
 ) where
 
 import Data.Bits ((.|.))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import GHC.ByteOrder (ByteOrder (..), targetByteOrder)
+import GHC.Exts (indexWord8OffAddrAsWord32#)
+import GHC.ForeignPtr (unsafeWithForeignPtr)
+import GHC.Ptr (Ptr (..))
+import GHC.Word (Word32 (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptRanges)
 import qualified Network.HTTP.Headers.Mason as M
@@ -51,14 +59,47 @@ instance KnownHeader AcceptRanges where
   type Direction AcceptRanges = 'Response
 
 
-  parseFromHeaders _ fields =
-    parseListFieldLines "Accept-Ranges" (httpList rfc9110Token) fields >>= classifyRanges
+  parseFromHeaders _ (wire :| [])
+    | wire == "bytes" = Right (AcceptRangesUnits ("bytes" :| []))
+    | isBareNone wire = Right AcceptRangesNone
+  parseFromHeaders _ fields = parseRangeFields fields
+  {-# INLINE parseFromHeaders #-}
 
 
-  renderToHeaders _ = M.toStrictByteString . renderAcceptRanges
+  renderToHeaders _ AcceptRangesNone = "none"
+  renderToHeaders _ (AcceptRangesUnits units) = R.encodeCommaSeparatedText units
+
+
+  renderToHeadersChecked _ AcceptRangesNone = Just "none"
+  renderToHeadersChecked _ (AcceptRangesUnits (unit :| []))
+    | unit == "bytes" = Just "bytes"
+    | isHttpTokenText unit = Just (ST.toByteString unit)
+    | otherwise = Nothing
+  renderToHeadersChecked _ (AcceptRangesUnits units)
+    | all (\unit -> isHttpTokenText unit && not (isNone unit)) units = Just (R.encodeCommaSeparatedText units)
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
 
 
   headerName _ = hAcceptRanges
+
+
+parseRangeFields :: NonEmpty ByteString -> Either String AcceptRanges
+parseRangeFields fields =
+  parseListFieldLines "Accept-Ranges" (httpList rfc9110Token) fields >>= classifyRanges
+{-# NOINLINE parseRangeFields #-}
+
+
+-- Read the exact four-letter token with ASCII case folding.
+isBareNone :: ByteString -> Bool
+isBareNone (BSI.BS input 4) = BSI.accursedUnutterablePerformIO $ unsafeWithForeignPtr input $ \(Ptr ptr) ->
+  pure $! W32# (indexWord8OffAddrAsWord32# ptr 0#) .|. 0x20202020 == none
+  where
+    none = case targetByteOrder of
+      BigEndian -> 0x6e6f6e65
+      LittleEndian -> 0x656e6f6e
+isBareNone _ = False
+{-# INLINE isBareNone #-}
 
 
 acceptRangesParser :: ParserT st String AcceptRanges

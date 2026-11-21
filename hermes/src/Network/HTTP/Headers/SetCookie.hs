@@ -44,7 +44,11 @@ module Network.HTTP.Headers.SetCookie (
 
 import Data.Bits ((.|.))
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Builder.Prim as Prim
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
 import qualified Data.ByteString.Unsafe as BU
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
@@ -52,12 +56,14 @@ import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Data.Time.Clock (UTCTime)
 import Data.Word (Word8)
+import Foreign.Ptr (minusPtr, plusPtr)
+import Network.HTTP.Grammar.Rendering (copyText, encodeCookiePairChecked, shortText, writeCookiePair)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (cookieExpiryDateParser, renderDate)
+import Network.HTTP.Headers.Date (cookieExpiryDateParser, cookieExpiryWriterChecked, renderDate)
 import Network.HTTP.Headers.HeaderFieldName (hSetCookie)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Encode.Direct (dBytes)
 import Wireform.Parser.Driver (parseByteString)
 
 
@@ -153,6 +159,9 @@ instance KnownHeader SetCookies where
 
 
   renderToHeaders _ (SetCookies cookies) = map (M.toStrictByteString . renderSetCookie) cookies
+
+
+  renderToHeadersChecked _ (SetCookies cookies) = traverse encodeSetCookieChecked cookies
 
 
   headerName _ = hSetCookie
@@ -394,3 +403,103 @@ renderSetCookie = \case
     renderSameSite SameSiteStrict = "; SameSite=Strict"
     renderSameSite SameSiteLax = "; SameSite=Lax"
     renderSameSite SameSiteNone = "; SameSite=None"
+
+
+encodeSetCookieChecked :: SetCookie -> Maybe B.ByteString
+encodeSetCookieChecked (SetCookie name value Nothing Nothing Nothing Nothing False False Nothing) =
+  encodeCookiePairChecked name value
+encodeSetCookieChecked cookie
+  | isHttpTokenText name, isCookieValueText value
+  , maybe True validCookieDomain domain, maybe True validCookiePath path = case setCookieExpires cookie of
+      Nothing -> Just (encode Nothing)
+      Just time -> encode . Just <$> cookieExpiryWriterChecked time
+  | otherwise = Nothing
+  where
+    name = setCookieName cookie
+    value = setCookieValue cookie
+    domain = setCookieDomain cookie
+    path = setCookiePath cookie
+    age = setCookieMaxAge cookie
+    extensions = setCookieExtensions cookie
+    secure = if setCookieSecure cookie then "; Secure" else ""
+    httpOnly = if setCookieHttpOnly cookie then "; HttpOnly" else ""
+    sameSite = case setCookieSameSite cookie of
+      Nothing -> ""
+      Just SameSiteStrict -> "; SameSite=Strict"
+      Just SameSiteLax -> "; SameSite=Lax"
+      Just SameSiteNone -> "; SameSite=None"
+    expiryPrefix = "; Expires="
+    agePrefix = "; Max-Age="
+    domainPrefix = "; Domain="
+    pathPrefix = "; Path="
+    add = BSI.checkedAdd "Set-Cookie"
+    width = SBS.length . ST.toShortByteString
+    attributeWidth prefix = maybe 0 (add (B.length prefix) . width)
+    encode expiry = BSI.unsafeCreateUptoN capacity $ \ptr -> do
+      valueEnd <- writeCookiePair ptr 0 name value
+      expiryEnd <- case expiry of
+        Nothing -> pure valueEnd
+        Just writeDate -> do
+          start <- dBytes ptr valueEnd expiryPrefix
+          writeDate (ptr `plusPtr` start)
+          pure (start + 29)
+      ageEnd <- case age of
+        Nothing -> pure expiryEnd
+        Just seconds -> do
+          start <- dBytes ptr expiryEnd agePrefix
+          past <- Prim.runB Prim.intDec seconds (ptr `plusPtr` start)
+          pure (past `minusPtr` ptr)
+      domainEnd <- writeAttribute ptr ageEnd domainPrefix domain
+      pathEnd <- writeAttribute ptr domainEnd pathPrefix path
+      secureEnd <- writeFlag ptr pathEnd secure
+      httpOnlyEnd <- writeFlag ptr secureEnd httpOnly
+      knownEnd <- writeFlag ptr httpOnlyEnd sameSite
+      writeExtensions ptr knownEnd extensions
+      where
+        -- The longest signed decimal of a supported Int needs 20 bytes.
+        fixedWidth =
+          1 + B.length secure + B.length httpOnly + B.length sameSite
+            + maybe 0 (const (B.length expiryPrefix + 29)) expiry
+            + maybe 0 (const (B.length agePrefix + 20)) age
+        pairWidth = add (add fixedWidth (width name)) (width value)
+        knownWidth = add (add pairWidth (attributeWidth domainPrefix domain)) (attributeWidth pathPrefix path)
+        capacity = foldl' (\size ext -> add (add size 2) (width (setCookieExtensionText ext))) knownWidth extensions
+    writeAttribute _ offset _ Nothing = pure offset
+    writeAttribute ptr offset prefix (Just text) = dBytes ptr offset prefix >>= \start -> copyText ptr start text
+    writeFlag ptr offset flag
+      | B.null flag = pure offset
+      | otherwise = dBytes ptr offset flag
+    writeExtensions _ !offset [] = pure offset
+    writeExtensions ptr !offset (ext : rest) = do
+      start <- dBytes ptr offset "; "
+      end <- copyText ptr start (setCookieExtensionText ext)
+      writeExtensions ptr end rest
+
+
+-- A legacy leading dot is kept. Each remaining domain label has DNS
+-- letters, digits, or internal hyphens.
+validCookieDomain :: ST.ShortText -> Bool
+validCookieDomain domain =
+  size > 0 && labelStart (if byteAt 0 == 46 then 1 else 0)
+  where
+    bytes = ST.toShortByteString domain
+    size = SBS.length bytes
+    byteAt = SBSI.unsafeIndex bytes
+    alnum byte = let c = BSI.w2c byte in isLatinLetter c || isDigit c
+    labelStart !offset = offset < size && alnum (byteAt offset) && label offset (offset + 1)
+    label !start !offset
+      | offset - start > 63 = False
+      | offset == size = alnum (byteAt (offset - 1))
+      | byte == 46 = alnum (byteAt (offset - 1)) && labelStart (offset + 1)
+      | otherwise = (alnum byte || byte == 45) && label start (offset + 1)
+      where
+        byte = byteAt offset
+
+
+validCookiePath :: ST.ShortText -> Bool
+validCookiePath path =
+  SBS.null bytes
+    || (SBSI.unsafeIndex bytes 0 /= 32 && SBS.last bytes /= 32
+        && scanCompactBytes (\byte -> byte >= 32 && byte <= 126 && byte /= 59) bytes 0)
+  where
+    bytes = ST.toShortByteString path

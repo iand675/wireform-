@@ -33,15 +33,21 @@ module Network.HTTP.Headers.SecWebSocketExtensions (
   renderSecWebSocketExtensions,
 ) where
 
+import Control.Monad (foldM)
+import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as B8
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short.Internal as SBS
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
+import Foreign.Ptr (plusPtr)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSecWebSocketExtensions)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Encode.Direct (dWord8, directEncode)
 
 
 -- | A single @token [ "=" value ]@ extension parameter.
@@ -78,7 +84,50 @@ instance KnownHeader SecWebSocketExtensions where
   renderToHeaders _ = M.toStrictByteString . renderSecWebSocketExtensions
 
 
+  renderToHeadersChecked _ (SecWebSocketExtensions exts)
+    | all validExtension exts = Just (encodeExtensions exts)
+    | otherwise = Nothing
+    where
+      validExtension (Extension name params) = isHttpTokenText name && all validParam params
+      validParam (ExtensionParam name param) = isHttpTokenText name && maybe True isHttpTokenText param
+
+
   headerName _ = hSecWebSocketExtensions
+
+
+encodeExtensions :: NE.NonEmpty Extension -> ByteString
+encodeExtensions (first NE.:| rest) = directEncode size $ \ptr start -> do
+  end <- writeExtension ptr start first
+  foldM
+    ( \offset extension -> do
+        comma <- dWord8 ptr offset 44
+        space <- dWord8 ptr comma 32
+        writeExtension ptr space extension
+    )
+    end
+    rest
+  where
+    size = foldl' (\n extension -> extensionSize (add n 2) extension) (extensionSize 0 first) rest
+    add = BSI.checkedAdd "WebSocket extensions"
+    tokenLength = SBS.length . ST.toShortByteString
+    extensionSize n (Extension name params) = foldl' parameterSize (add n (tokenLength name)) params
+    parameterSize n (ExtensionParam name value) =
+      let named = add (add n 1) (tokenLength name)
+      in maybe named (\token -> add (add named 1) (tokenLength token)) value
+    writeExtension ptr offset (Extension name params) = do
+      end <- copyToken ptr offset name
+      foldM (writeParam ptr) end params
+    writeParam ptr offset (ExtensionParam name value) = do
+      sep <- dWord8 ptr offset 59
+      end <- copyToken ptr sep name
+      case value of
+        Nothing -> pure end
+        Just token -> dWord8 ptr end 61 >>= \equals -> copyToken ptr equals token
+    copyToken ptr offset token = do
+      let bytes = ST.toShortByteString token
+          len = SBS.length bytes
+      SBS.copyToPtr bytes 0 (ptr `plusPtr` offset) len
+      pure $! offset + len
 
 
 secWebSocketExtensionsParser :: ParserT st String SecWebSocketExtensions

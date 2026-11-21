@@ -10,7 +10,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.ALPN as A
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -106,5 +106,15 @@ tests =
           parseOk (wire <> "a") `shouldSatisfy` isLeft
           parseOk (BS.replicate 255 65) `shouldBe` Right (A.ALPN (E.mkALPNProtocol (BS.replicate 255 65) :| []))
           lookupHeader @A.ALPN (headerMapFromList [("ALPN", BS.replicate 256 65)]) `shouldSatisfy` isLeft
+      , it "validates the decoded size of every authored protocol before replacing field lines" $ do
+          let existing = headerMapFromList [("ALPN", "h2"), ("ALPN", "http%2F1.1")]
+              value wire = A.ALPN (E.alpnHttp2 :| [E.mkALPNProtocol wire])
+          forM_ ["", BS.replicate 256 0xff, BS.replicate 256 65] $ \wire -> do
+            renderHeaderLines defaultHeaderSettings (value wire) `shouldBe` Nothing
+            setHeader (value wire) existing `shouldBe` existing
+          let accepted = value (BS.replicate 255 0xff)
+          lookupRawHeader "ALPN" (setHeader accepted existing)
+            `shouldBe` Just (("h2, " <> BS.concat (replicate 255 "%FF")) :| [])
+          lookupHeader @A.ALPN (setHeader accepted existing) `shouldBe` Right (Just accepted)
       , it "round-trips arbitrary protocol-id octet sequences" prop_roundtrip
       ]

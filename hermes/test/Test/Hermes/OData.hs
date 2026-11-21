@@ -14,13 +14,14 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.Isolation as IS
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.ODataEntityId as OE
 import qualified Network.HTTP.Headers.ODataIsolation as OI
 import qualified Network.HTTP.Headers.ODataMaxVersion as OMV
 import qualified Network.HTTP.Headers.ODataVersion as OV
+import Network.HTTP.Headers.Settings (HeaderSettings (HeaderSettings))
 import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
 import Test.Syd
 import Test.Syd.Hedgehog ()
@@ -229,6 +230,11 @@ typedVersionAndIsolation = describe "typed version and isolation fields" $ do
   it "rejects decimal spellings outside the OData-Version grammar" $
     forM_ ["4.1", "4.00", "4.010", "4.10", "5.0", "04.01", "4.01, 4.0", "4.0\r"] $ \wire ->
       lookupHeader @OV.ODataVersion (headerMapFromList [("OData-Version", wire)]) `shouldSatisfy` isLeft
+  it "rejects malformed authored OData-Version components" $ do
+    let original = headerMapFromList [("OData-Version", "4.0"), ("OData-Version", "4.01")]
+    forM_ [OV.ODataVersion 3 0, OV.ODataVersion 5 1, OV.ODataVersion 4 10, OV.ODataVersion 4 maxBound] $ \value -> do
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value original `shouldBe` original
   it "preserves zero-padded maximum-version fractions including all-zero fractions" $ do
     forM_
       [ ("4.01", OMV.ODataMaxVersionWithLeadingZeros 4 1 1)
@@ -246,6 +252,18 @@ typedVersionAndIsolation = describe "typed version and isolation fields" $ do
     lookupMax (limit <> "." <> limit) `shouldBe` Right (Just (OMV.ODataMaxVersion maxBound maxBound))
     forM_ [limit <> "0.1", "1." <> limit <> "0", "1.", ".1", "4.01, 4.0", "+4.1", "4. 1"] $ \wire ->
       lookupMax wire `shouldSatisfy` isLeft
+  it "rejects malformed authored OData-MaxVersion padding and respects the header size" $ do
+    let original = headerMapFromList [("OData-MaxVersion", "4.0"), ("OData-MaxVersion", "4.01")]
+        invalid = OMV.ODataMaxVersionWithLeadingZeros 4 1 (-1)
+        padded = OMV.ODataMaxVersionWithLeadingZeros 4 1 5
+        -- 17 bytes for the name and colon, followed by the eight-byte value.
+        needed = 25
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid original `shouldBe` original
+    renderHeaderLines (HeaderSettings needed) padded `shouldBe` Just ("4.000001" :| [])
+    renderHeaderLines (HeaderSettings (needed - 1)) padded `shouldBe` Nothing
+    let tooLarge = OMV.ODataMaxVersionWithLeadingZeros 4 1 8192
+    setHeader tooLarge original `shouldBe` original
   it "accepts every ASCII case spelling of snapshot under both field names" $ do
     forM_ (traverse (\c -> [c, toUpper c]) "snapshot") $ \spelling -> do
       let wire = "\t " <> BSC.pack spelling <> " \t"
@@ -254,6 +272,20 @@ typedVersionAndIsolation = describe "typed version and isolation fields" $ do
       lookupHeader @OI.ODataIsolation headers `shouldBe` Right (Just OI.Snapshot)
     lookupRawHeader "Isolation" (setHeader IS.Snapshot (headerMapFromList [])) `shouldBe` Just ("snapshot" :| [])
     lookupRawHeader "OData-Isolation" (setHeader OI.Snapshot (headerMapFromList [])) `shouldBe` Just ("snapshot" :| [])
+  it "rejects authored invalid Isolation tokens before replacing existing lines" $ do
+    let original = headerMapFromList [("Isolation", "snapshot"), ("Isolation", "future")]
+    forM_ ["", " snapshot", "snapshot ", "two words", "snapshot,other", "café"] $ \token -> do
+      let value = IS.IsolationOther token
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value original `shouldBe` original
+    renderHeaderLines defaultHeaderSettings (IS.IsolationOther "future-v2") `shouldBe` Just ("future-v2" :| [])
+  it "rejects authored invalid OData-Isolation tokens before replacing existing lines" $ do
+    let original = headerMapFromList [("OData-Isolation", "snapshot"), ("OData-Isolation", "future")]
+    forM_ ["", " snapshot", "snapshot ", "two words", "snapshot,other", "café"] $ \token -> do
+      let value = OI.ODataIsolationOther token
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value original `shouldBe` original
+    renderHeaderLines defaultHeaderSettings (OI.ODataIsolationOther "future-v2") `shouldBe` Just ("future-v2" :| [])
   it "preserves unsupported isolation tokens and rejects combined values" $ do
     let fields wire = headerMapFromList [("Isolation", wire), ("OData-Isolation", wire)]
     lookupHeader @IS.Isolation (fields "SnApShOt-v2") `shouldBe` Right (Just (IS.IsolationOther "SnApShOt-v2"))
@@ -274,7 +306,7 @@ typedEntityId = describe "typed entity references" $ do
   it "preserves absolute and relative URI references including percent escapes"
     $ forM_
       [ "https://example.com/Customers(17)"
-      , "https://user@[2001:db8::1]:8443/Customers(17)"
+      , "https://[2001:db8::1]:8443/Customers(17)"
       , "//[v1.example]/Customers(17)"
       , "../Customers('Caf%C3%a9')?x=a%20b#item"
       , "urn:example:customer:17"
@@ -288,7 +320,7 @@ typedEntityId = describe "typed entity references" $ do
       lookupRawHeader "OData-EntityId" (setHeader value (headerMapFromList [])) `shouldBe` Just (wire :| [])
   it "retains raw Unicode on receipt and maps its UTF-8 octets to URI escapes on send"
     $ forM_
-      [ ("https://üser@münich.example/Cafés(1)?q=東京#β", "https://%C3%BCser@m%C3%BCnich.example/Caf%C3%A9s(1)?q=%E6%9D%B1%E4%BA%AC#%CE%B2")
+      [ ("https://münich.example/Cafés(1)?q=東京#β", "https://m%C3%BCnich.example/Caf%C3%A9s(1)?q=%E6%9D%B1%E4%BA%AC#%CE%B2")
       , ("https://example.com/é/%e2%84%a2/😀", "https://example.com/%C3%A9/%e2%84%a2/%F0%9F%98%80")
       , ("é/a?query=\xe000", "%C3%A9/a?query=%EE%80%80")
       ]
@@ -298,6 +330,12 @@ typedEntityId = describe "typed entity references" $ do
         `shouldBe` Right (Just value)
       lookupRawHeader "OData-EntityId" (setHeader value (headerMapFromList [])) `shouldBe` Just (wire :| [])
       M.toStrictByteString ("[" <> OE.renderODataEntityId value <> "]") `shouldBe` ("[" <> wire <> "]")
+  it "reads a received entity ID with userinfo and rejects it on checked writes" $ do
+    let input = "https://üser@münich.example/Cafés(1)"
+        value = OE.ODataEntityId (ST.fromText input)
+    lookupHeader @OE.ODataEntityId (headerMapFromList [("OData-EntityId", TE.encodeUtf8 input)])
+      `shouldBe` Right (Just value)
+    lookupRawHeader "OData-EntityId" (setHeader value (headerMapFromList [])) `shouldBe` Nothing
   it "rejects malformed reference syntax and raw Unicode outside its permitted components" $ do
     let malformed = ["", "\t", "x y", "1:x", "a%", "a%0g", "x#y#z", "https://[bad]/x", "https://host:abc/x", "<urn:example:id>", "x\r"]
         invalidUnicode = fmap TE.encodeUtf8 ["a/\x80", "a/\xfffe", "a/\xe000", "a#\xe000", "https://host:é/x", "https://[é]/x", "aé:path"]

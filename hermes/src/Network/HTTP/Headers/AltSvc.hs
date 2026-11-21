@@ -55,21 +55,27 @@ import Control.Monad (unless)
 import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Builder.Prim as Prim
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
 import Data.Char (chr)
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as Text
 import Data.Text.Short (ShortText)
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Data.Word (Word16, Word8)
-import Network.HTTP.Grammar.Authority (portNumber, uriHost)
+import Foreign.Ptr (minusPtr, plusPtr)
+import Network.HTTP.Grammar.Authority (isUriHostText, portNumber, uriHost)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAltSvc)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
 import qualified Wireform.Builder as Builder
+import Wireform.Encode.Direct (dWord8)
 
 
 -- ---------------------------------------------------------------------------
@@ -137,6 +143,50 @@ instance KnownHeader AltSvc where
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderAltSvc
+
+
+  renderToHeadersChecked _ AltSvcClear = Just ["clear"]
+  renderToHeadersChecked _ (AltSvcValues alternatives) =
+    pure <$> R.encodeCommaSeparatedChecked bound write (NE.toList alternatives)
+    where
+      add = BSI.checkedAdd "Alt-Svc"
+      width = SBS.length . ST.toShortByteString
+      bound (AltValue protocol (AltAuthority host _) parameters)
+        | isHttpTokenText protocol
+        , not (SBS.elem 37 (ST.toShortByteString protocol)) || canonicalProtocolId (ST.toByteString protocol)
+        , maybe True isUriHostText host =
+            parameterBound (add (add 9 (width protocol)) (maybe 0 width host)) parameters
+        | otherwise = -1
+      parameterBound size [] = size
+      parameterBound size (AltParameter name value : rest)
+        | isHttpTokenText name
+        , valueWidth >= 0 =
+            parameterBound (add (add (add size 3) (width name)) valueWidth) rest
+        | otherwise = -1
+        where
+          valueWidth = case value of
+            AltParamToken token | isHttpTokenText token -> width token
+            AltParamQuoted quoted | isHttpQuotedText quoted -> let n = width quoted in add 2 (add n n)
+            _ -> -1
+      write ptr start (AltValue protocol (AltAuthority host port) parameters) = do
+        endProtocol <- R.copyText ptr start protocol
+        equals <- dWord8 ptr endProtocol 61
+        opening <- dWord8 ptr equals 34
+        endHost <- maybe (pure opening) (R.copyText ptr opening) host
+        colon <- dWord8 ptr endHost 58
+        endPort <- Prim.runB Prim.word16Dec port (ptr `plusPtr` colon)
+        close <- dWord8 ptr (endPort `minusPtr` ptr) 34
+        writeParameters ptr close parameters
+      writeParameters _ offset [] = pure offset
+      writeParameters ptr offset (AltParameter name value : rest) = do
+        semicolon <- dWord8 ptr offset 59
+        space <- dWord8 ptr semicolon 32
+        endName <- R.copyText ptr space name
+        equals <- dWord8 ptr endName 61
+        end <- case value of
+          AltParamToken token -> R.copyText ptr equals token
+          AltParamQuoted quoted -> R.foldHttpQuotedShortBytes (dWord8 ptr) equals (ST.toShortByteString quoted)
+        writeParameters ptr end rest
 
 
   headerName _ = hAltSvc

@@ -19,6 +19,7 @@ module Network.HTTP.Headers.ContentID (
   ContentID (..),
   contentIDParser,
   drpContentIdentifier,
+  outboundDRPContentIdentifierBytes,
   renderContentID,
 ) where
 
@@ -29,7 +30,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Grammar.Authority (uriSchemeBytes)
-import Network.HTTP.Grammar.URIReference (absoluteURIBytes)
+import Network.HTTP.Grammar.URIReference (absoluteURIBytes, outboundAbsoluteURIBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentID)
 import qualified Network.HTTP.Headers.Mason as M
@@ -49,24 +50,44 @@ instance KnownHeader ContentID where
 
 
   parseFromHeaders _ (wire :| [])
-    | not (BS.null wire) && BSC.all unreserved wire = Right $! ContentID (STU.fromByteStringUnsafe wire)
+    | isBatchIdentifier wire = Right $! ContentID (STU.fromByteStringUnsafe wire)
   parseFromHeaders _ fields = parseSingleFieldLine "Content-ID" contentIDParser fields
 
 
   renderToHeaders _ = ST.toByteString . contentID
 
 
+  renderToHeadersChecked _ (ContentID ident)
+    | isBatchIdentifier wire = Just wire
+    | otherwise =
+        either (const Nothing) (const (Just wire)) $
+          parseSingleFieldLine "Content-ID" (contentIdentifierBytes outboundDRPContentIdentifierBytes) (wire :| [])
+    where
+      wire = ST.toByteString ident
+
+
   headerName _ = hContentID
 
 
 contentIDParser :: ParserT st String ContentID
-contentIDParser = ContentID <$> (shortASCIIFromParser_ mimeMessageId <|> bareIdentifier)
+contentIDParser =
+  ContentID <$> shortASCIIFromParser_ (contentIdentifierBytes (drpIdentifierBytes absoluteURIBytes))
+
+
+contentIdentifierBytes :: ParserT st String () -> ParserT st String ()
+contentIdentifierBytes drp = mimeMessageId <|> bareIdentifier
   where
     bareIdentifier =
       branch
         (lookahead (uriSchemeBytes *> $(char ':')))
-        drpContentIdentifier
-        (shortASCIIFromParser_ (skipSome (skipSatisfyAscii unreserved)))
+        drp
+        (skipSome (skipSatisfyAscii unreserved))
+{-# INLINE contentIdentifierBytes #-}
+
+
+isBatchIdentifier :: BS.ByteString -> Bool
+isBatchIdentifier wire = not (BS.null wire) && BSC.all unreserved wire
+{-# INLINE isBatchIdentifier #-}
 
 
 unreserved :: Char -> Bool
@@ -81,11 +102,21 @@ unreservedBytes = asciiSet (CS.range 'A' 'Z' <> CS.range 'a' 'z' <> CS.range '0'
 
 -- | The DRP content identifier shared by Content-ID and Differential-ID.
 drpContentIdentifier :: ParserT st String ST.ShortText
-drpContentIdentifier = shortASCIIFromParser_ (member *> skipMany ($(char ',') *> member))
+drpContentIdentifier = shortASCIIFromParser_ (drpIdentifierBytes absoluteURIBytes)
+
+
+-- | Validate the outbound DRP list, including each HTTP URI authority.
+outboundDRPContentIdentifierBytes :: ParserT st String ()
+outboundDRPContentIdentifierBytes = drpIdentifierBytes outboundAbsoluteURIBytes
+
+
+drpIdentifierBytes :: ParserT st String () -> ParserT st String ()
+drpIdentifierBytes syntax = member *> skipMany ($(char ',') *> member)
   where
     member = withSpan (skipSome (skipSatisfyAscii uriOctet)) $ \() range ->
-      inSpan range (absoluteURIBytes <* eof)
+      inSpan range (syntax <* eof)
     uriOctet c = '!' <= c && c <= '~' && c /= ','
+{-# INLINE drpIdentifierBytes #-}
 
 
 mimeMessageId :: ParserT st String ()

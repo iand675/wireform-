@@ -27,7 +27,7 @@ module Network.HTTP.Headers.AcceptPost (
 ) where
 
 import qualified Data.List.NonEmpty as NE
-import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType, mediaRangeParser, renderMediaRange, renderMediaType)
+import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType, encodeMediaRangesChecked, mediaRangeParser, renderMediaRange, renderMediaType)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptPost)
 import qualified Network.HTTP.Headers.Mason as M
@@ -69,6 +69,13 @@ instance KnownHeader AcceptPost where
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderAcceptPost
+
+
+  renderToHeadersChecked _ value = pure <$> encodeMediaRangesChecked entryRange (acceptPostEntryList value)
+    where
+      entryRange AcceptPostAny = Nothing
+      entryRange (AcceptPostMediaType media) = Just (MediaRange media [])
+      entryRange (AcceptPostMediaRange range) = Just range
 
 
   headerName _ = hAcceptPost

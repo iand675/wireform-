@@ -7,11 +7,12 @@ module Test.Hermes.Pkp (tests) where
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.ExpectCT as ECT
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -279,11 +280,43 @@ unit_ect_typed = it "combines Expect-CT field lines before validating the requir
     ]
 
 
+checkedTransportPolicyWrites :: Spec
+checkedTransportPolicyWrites = do
+  it "checks the authored Expect-CT report URI before replacing the policy" $ do
+    let old = headerMapFromList [("Expect-CT", "max-age=42")]
+    mapM_ (\uri -> do
+      let value = ECT.ExpectCT 42 True (Just uri)
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old)
+      ["", "/relative", "https://example.net/a#fragment", "https://example.net/%XX", "https://example.net/a\"x"]
+    renderHeaderLines defaultHeaderSettings (ECT.ExpectCT 42 True (Just "https://example.net/a"))
+      `shouldBe` Just ("max-age=42, enforce, report-uri=\"https://example.net/a\"" :| [])
+  it "checks HPKP fingerprint width and canonical padding before replacing the policy" $ do
+    let old = headerMapFromList [("Public-Key-Pins", "max-age=42")]
+        invalid = [PKP.Pin "sha256" "AQ==", PKP.Pin "sha256" (ST.fromString (replicate 42 'A' <> "B=")), PKP.Pin "bad hash" "AQ==", PKP.Pin "future" "AB=="]
+    mapM_ (\pin -> do
+      let value = PKP.PublicKeyPins [pin] 42 False Nothing
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old) invalid
+    renderHeaderLines defaultHeaderSettings (PKP.PublicKeyPins [] 42 False (Just "/relative")) `shouldBe` Nothing
+  it "checks report-only fingerprints and keeps a valid URI fragment" $ do
+    let old = headerMapFromList [("Public-Key-Pins-Report-Only", "max-age=0")]
+        invalid = [ RO.PublicKeyPinsReportOnly [RO.Pin "SHA256" "AQ=="] 0 False Nothing
+                  , RO.PublicKeyPinsReportOnly [] 0 False (Just "https://example.net/%XY#report")
+                  ]
+    mapM_ (\value -> do
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old) invalid
+    let valid = RO.PublicKeyPinsReportOnly [] 0 False (Just "https://example.net/a#report")
+    lookupHeader @RO.PublicKeyPinsReportOnly (setHeader valid old) `shouldBe` Right (Just valid)
+
+
 tests :: Spec
 tests =
   describe "Pkp" $
     sequence_
-      [ unit_pkp_parse
+      [ checkedTransportPolicyWrites
+      , unit_pkp_parse
       , unit_pkp_render
       , unit_ro_parse
       , unit_ro_render

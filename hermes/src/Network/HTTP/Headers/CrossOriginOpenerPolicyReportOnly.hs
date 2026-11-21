@@ -48,6 +48,9 @@ instance KnownHeader CrossOriginOpenerPolicyReportOnly where
   renderToHeaders settings = renderToHeaders settings . getCrossOriginOpenerPolicyReportOnly
 
 
+  renderToHeadersChecked settings = renderToHeadersChecked settings . getCrossOriginOpenerPolicyReportOnly
+
+
   headerName _ = hCrossOriginOpenerPolicyReportOnly
 
 

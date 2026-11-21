@@ -56,6 +56,13 @@ instance KnownHeader Slug where
   renderToHeaders _ = ST.toByteString . slugText
 
 
+  renderToHeadersChecked _ (Slug value)
+    | validSlugWire wire = Just wire
+    | otherwise = Nothing
+    where
+      wire = ST.toByteString value
+
+
   headerName _ = hSlug
 
 
@@ -65,12 +72,16 @@ slugParser = takeRest >>= either err pure . decodeSlug
 
 decodeSlug :: ByteString -> Either String Slug
 decodeSlug wire
-  | BS.all (\byte -> byte == 9 || isLiteralByte byte) wire =
-      Right $! Slug (STU.fromByteStringUnsafe wire)
-  | maybe False BS.isValidUtf8 (decodeWire wire) =
-      Right $! Slug (STU.fromByteStringUnsafe wire)
+  | validSlugWire wire = Right $! Slug (STU.fromByteStringUnsafe wire)
   | otherwise = Left "Invalid percent-encoded UTF-8 in Slug"
 {-# INLINE decodeSlug #-}
+
+
+validSlugWire :: ByteString -> Bool
+validSlugWire wire =
+  BS.all (\byte -> byte == 9 || isLiteralByte byte) wire
+    || maybe False BS.isValidUtf8 (decodeWire wire)
+{-# INLINE validSlugWire #-}
 
 
 isSlugByte :: Word8 -> Bool

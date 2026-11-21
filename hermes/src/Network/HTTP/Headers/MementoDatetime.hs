@@ -28,7 +28,7 @@ module Network.HTTP.Headers.MementoDatetime (
 
 import Data.Time.Clock (UTCTime)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate, renderDateBytesChecked)
 import Network.HTTP.Headers.HeaderFieldName (hMementoDatetime)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -49,6 +49,9 @@ instance KnownHeader MementoDatetime where
 
 
   renderToHeaders _ = M.toStrictByteString . renderMementoDatetime
+
+
+  renderToHeadersChecked _ = renderDateBytesChecked . mementoDatetimeTime
 
 
   headerName _ = hMementoDatetime

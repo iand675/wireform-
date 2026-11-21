@@ -27,7 +27,7 @@ module Network.HTTP.Headers.ContentVersion (
 
 import qualified Data.ByteString.Short as SBS
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.Rendering (encodeHttpQuotedBytes, opaqueShortText)
+import Network.HTTP.Grammar.Rendering (encodeHttpQuotedBytes, encodeHttpQuotedBytesChecked, opaqueShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentVersion)
 import qualified Network.HTTP.Headers.Mason as M
@@ -61,6 +61,9 @@ instance KnownHeader ContentVersion where
 
 
   renderToHeaders _ = encodeHttpQuotedBytes . contentVersionTagBytes
+
+
+  renderToHeadersChecked _ = encodeHttpQuotedBytesChecked . contentVersionTagBytes
 
 
   headerName _ = hContentVersion

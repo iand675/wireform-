@@ -12,7 +12,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (ItemValue (..), RFC8941String (..), RFC8941Token (..), Result (..), StructuredFieldParameter (..), runParser)
 import qualified Network.HTTP.Headers.SaveData as SD
@@ -71,13 +71,34 @@ unit_ua_render :: Spec
 unit_ua_render =
   it "renders engine=mode lists through both APIs" $ do
     let edge = UA.XUACompatible (UA.UACompatDirective "IE" "edge" :| [])
-        longList = UA.XUACompatible (UA.UACompatDirective "iE" "EDGE" :|
-          [UA.UACompatDirective "chrome" "1", UA.UACompatDirective "" (ST.fromString (replicate 4096 'é'))])
+        longList =
+          UA.XUACompatible
+            (UA.UACompatDirective "iE" "EDGE" :| [UA.UACompatDirective "chrome" (ST.fromString (replicate 4096 'x'))])
         typed :: UA.XUACompatible -> Maybe (NonEmpty ByteString)
         typed value = lookupRawHeader "X-UA-Compatible" (setHeader value (headerMapFromList []))
     uaRender edge `shouldBe` "IE=edge"
     typed edge `shouldBe` Just ("IE=edge" :| [])
     typed longList `shouldBe` Just (uaRender longList :| [])
+
+
+unit_ua_checked_write :: Spec
+unit_ua_checked_write = it "rejects invalid authored directives and preserves the previous field" $ do
+  let edge = UA.UACompatDirective "IE" "edge"
+      previous = headerMapFromList [("X-UA-Compatible", "IE=7")]
+      invalid =
+        [ UA.UACompatDirective "" "edge"
+        , UA.UACompatDirective "IE" ""
+        , UA.UACompatDirective "i e" "edge"
+        , UA.UACompatDirective "IE" "edge, chrome=1"
+        , UA.UACompatDirective "IE" "edge\r\n"
+        , UA.UACompatDirective "IE" "élan"
+        ]
+      check :: UA.XUACompatible -> IO ()
+      check value = do
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value previous `shouldBe` previous
+  mapM_ (\bad -> check (UA.XUACompatible (bad :| [])) >> check (UA.XUACompatible (edge :| [bad]))) invalid
+  uaRender (UA.XUACompatible (UA.UACompatDirective "" "edge" :| [])) `shouldBe` "=edge"
 
 
 unit_ua_field_lines :: Spec
@@ -98,16 +119,21 @@ unit_ua_field_lines = it "preserves every browser mode and exposes typed IE decl
   UA.ieDocumentMode (UA.UACompatDirective "iE" "eMuLaTeIe0007") `shouldBe` Just (UA.IEEmulate 7)
   UA.ieDocumentMode (UA.UACompatDirective "IE" "000") `shouldBe` Just (UA.IEVersion 0)
   UA.ieDocumentMode (UA.UACompatDirective "IE" "EmulateIE") `shouldBe` Nothing
+  UA.ieDocumentMode (UA.UACompatDirective "IE" "EmulateI7") `shouldBe` Nothing
+  UA.ieDocumentMode (UA.UACompatDirective "IE" "EmulateIx7") `shouldBe` Nothing
+  UA.ieDocumentMode (UA.UACompatDirective "IE" "EmulatxIE7") `shouldBe` Nothing
   UA.ieDocumentMode (UA.UACompatDirective "IE" "+11") `shouldBe` Nothing
   UA.ieDocumentMode (UA.UACompatDirective "IE" "99999999999999999999999") `shouldBe` Nothing
   let spellings = map ST.fromString . traverse (\c -> [c, toUpper c])
-  mapM_ (\engine -> mapM_ (checkEdge engine) (spellings "edge")) (spellings "ie")
+  mapM_ (\engine -> mapM_ (checkMode (Just UA.IEEdge) engine) (spellings "edge")) (spellings "ie")
+  mapM_ (\engine -> checkMode Nothing engine "edge") ["I", "JE", "IF", "IEE"]
+  mapM_ (checkMode Nothing "IE") ["edg", "xdge", "exge", "edxe", "edgx", "edgex"]
   where
-    checkEdge engine mode = do
+    checkMode expected engine mode = do
       let directive = UA.UACompatDirective engine mode
           value = UA.XUACompatible (directive :| [])
           wire = ST.toByteString engine <> "=" <> ST.toByteString mode
-      UA.ieDocumentMode directive `shouldBe` Just UA.IEEdge
+      UA.ieDocumentMode directive `shouldBe` expected
       lookupRawHeader "X-UA-Compatible" (setHeader value (headerMapFromList [])) `shouldBe` Just (wire :| [])
 
 
@@ -312,14 +338,36 @@ unit_sd_fields = it "preserves token order and parameters and exposes the final 
     [["(on)"], ["\"on\""], ["1"], ["on, ?1"], ["on;\tflag"], ["on;flag="], ["on,"], ["on,, off"], ["on", ""]]
 
 
+checkedRobotsWrites :: Spec
+checkedRobotsWrites = it "checks all authored robots rules and crawler scopes before replacing fields" $ do
+  let old = headerMapFromList [("X-Robots-Tag", "index"), ("X-Robots-Tag", "otherbot: noindex")]
+      flag = XR.RobotsDirective "noindex" Nothing
+      single name value = XR.XRobotsTag Nothing (XR.RobotsDirective name value :| [])
+      bad =
+        [ single "bad name" Nothing
+        , single "noindex" (Just "yes")
+        , single "max-snippet" Nothing
+        , single "max-snippet" (Just "4 5")
+        , single "unavailable_after" (Just "date, noindex")
+        , single "unavailable_after" (Just " 5 Jan 2030")
+        , XR.XRobotsTag (Just "max-snippet") (flag :| [])
+        , XR.xRobotsTagFromGroups (XR.RobotsRuleGroup Nothing (flag :| []) :| [XR.RobotsRuleGroup (Just "bot;other") (flag :| [])])
+        ]
+  mapM_ (\value -> do
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value old `shouldBe` old) bad
+
+
 tests :: Spec
 tests =
   describe "DefactoMisc" $
     sequence_
-      [ describe "X-UA-Compatible" $
+      [ checkedRobotsWrites
+      , describe "X-UA-Compatible" $
           sequence_
             [ unit_ua_parse
             , unit_ua_render
+            , unit_ua_checked_write
             , unit_ua_field_lines
             , it "round-trip" prop_ua_roundtrip
             ]

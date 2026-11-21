@@ -105,21 +105,22 @@ fromEntries :: [WantReprDigestEntry] -> WantReprDigest
 fromEntries = maybe WantReprDigestEmpty WantReprDigest . NE.nonEmpty
 
 
+-- | Render the field value. An invalid dictionary produces no bytes.
 renderWantReprDigest :: WantReprDigest -> M.Builder
 renderWantReprDigest = either (const mempty) id . renderWantReprDigestChecked
 
 
--- | Check the preference range before emitting a dictionary.
+-- | Validate the final dictionary before writing its canonical field value.
 renderWantReprDigestChecked :: WantReprDigest -> Either String M.Builder
-renderWantReprDigestChecked value
-  | all inRange entries = Right (M.intersperse ", " (map renderEntry entries))
-  | otherwise = Left "Want-Repr-Digest preference must be between 0 and 10"
+renderWantReprDigestChecked =
+  R.renderStructuredFieldItemDictionaryChecked
+    wantReprDigestAlgorithm
+    wantReprDigestParameters
+    renderPreference
+    . wantReprDigestEntryList
   where
-    entries = orderedFieldEntries wantReprDigestAlgorithm (wantReprDigestEntryList value)
-    inRange entry = let preference = wantReprDigestPreference entry in preference >= 0 && preference <= 10
-    renderEntry entry =
-      R.shortText (wantReprDigestAlgorithm entry)
-        <> M.char7 '='
-        <> R.rfc8941Integer (wantReprDigestPreference entry)
-        <> foldMap renderParam (orderedFieldEntries fst (wantReprDigestParameters entry))
-    renderParam (key, parameter) = R.renderStructuredFieldParameter key (maybe (Boolean True) id parameter)
+    renderPreference entry
+      | preference >= 0 && preference <= 10 = Right (R.rfc8941Integer preference)
+      | otherwise = Left "Want-Repr-Digest preference must be between 0 and 10"
+      where
+        preference = wantReprDigestPreference entry

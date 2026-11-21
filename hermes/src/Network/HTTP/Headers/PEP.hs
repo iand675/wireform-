@@ -68,6 +68,9 @@ instance KnownHeader PEP where
   renderToHeaders _ (PEPList entries) = NE.toList (R.fieldLines entries)
 
 
+  renderToHeadersChecked _ (PEPList entries) = NE.toList <$> R.checkedFieldLines "PEP" (httpList pepDeclarationParser) entries
+
+
   headerName _ = hPEP
 
 

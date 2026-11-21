@@ -3,17 +3,21 @@
 
 module Test.Hermes.Conditional (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Short as SBS
 import Data.Either (isLeft)
 import Data.List (intercalate)
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.Proxy (Proxy (..))
 import qualified Data.Text.Short as ST
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime (..), addUTCTime)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (HeaderCardinality (ZeroOrOne), KnownHeader (Cardinality, headerName), defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader, setRawHeader)
 import qualified Network.HTTP.Headers.DeltaBase as DB
 import qualified Network.HTTP.Headers.ETag as E
 import qualified Network.HTTP.Headers.From as From
@@ -176,9 +180,83 @@ unit_ifrange_render =
 unit_ifrange_date :: Spec
 unit_ifrange_date = it "parses and renders an HTTP-date validator" $
   case parseWith IR.ifRangeParser "Wed, 21 Oct 2015 07:28:00 GMT" of
-    Right v@(IR.IfRangeDate _) ->
+    Right v@(IR.IfRangeDate _) -> do
       M.toStrictByteString (IR.renderIfRange v) `shouldBe` "Wed, 21 Oct 2015 07:28:00 GMT"
+      renderHeaderLines defaultHeaderSettings v `shouldBe` Just ("Wed, 21 Oct 2015 07:28:00 GMT" :| [])
     other -> error (show other)
+
+
+unit_ifrange_checked_write :: Spec
+unit_ifrange_checked_write = it "rejects invalid typed If-Range writes without replacing existing lines" $ do
+  let fields = headerMapFromList [("If-Range", "\"previous\"")]
+      invalid =
+        [ IR.IfRangeETag (E.WeakETagBytes "weak")
+        , IR.IfRangeETag (E.StrongETagBytes "bad\"tag")
+        , IR.IfRangeETag (E.StrongETagBytes (SBS.pack [0x7f]))
+        , IR.IfRangeDate (UTCTime (fromGregorian 1899 12 31) 0)
+        , IR.IfRangeDate (UTCTime (fromGregorian 10000 1 1) 0)
+        , IR.IfRangeDate (UTCTime (fromGregorian 2024 1 1) 86401)
+        ]
+  forM_ invalid $ \value -> do
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value fields `shouldBe` fields
+  let valid = IR.IfRangeETag (E.StrongETagBytes (SBS.pack [0x80, 0xff]))
+  lookupHeader @IR.IfRange (setHeader valid fields) `shouldBe` Right (Just valid)
+  let writeTag bytes =
+        renderHeaderLines defaultHeaderSettings (IR.IfRangeETag (E.StrongETagBytes (SBS.toShort bytes)))
+  forM_ [0 .. 16] $ \offset -> do
+    let before = BS.replicate offset 0x61
+        after = BS.replicate (16 - offset) 0xff
+    forM_ [0 .. 255] $ \octet -> do
+      let bytes = before <> BS.singleton octet <> after
+          expected
+            | octet >= 0x21 && octet /= 0x22 && octet /= 0x7f = Just (("\"" <> bytes <> "\"") :| [])
+            | otherwise = Nothing
+      writeTag bytes `shouldBe` expected
+  writeTag BS.empty `shouldBe` Just ("\"\"" :| [])
+
+
+unit_ifrange_match :: Spec
+unit_ifrange_match = it "requires strong tag equality or an exact strong date" $ do
+  let field wire = lookupHeader @IR.IfRange (headerMapFromList [("If-Range", wire)])
+      opaque = SBS.pack [0x80, 0xff]
+      tag = E.StrongETagBytes opaque
+      weak = E.WeakETagBytes opaque
+      quoted = "\"" <> SBS.fromShort opaque <> "\""
+  case (field quoted, field ("W/" <> quoted)) of
+    (Right (Just strongField), Right (Just weakField)) -> do
+      IR.ifRangeMatches (Just tag) Nothing strongField `shouldBe` True
+      IR.ifRangeMatches (Just weak) Nothing strongField `shouldBe` False
+      IR.ifRangeMatches (Just tag) Nothing weakField `shouldBe` False
+      IR.ifRangeMatches Nothing Nothing strongField `shouldBe` False
+    other -> expectationFailure (show other)
+  case field "Wed, 21 Oct 2015 07:28:00 GMT" of
+    Right (Just validator@(IR.IfRangeDate date)) -> do
+      IR.ifRangeMatches Nothing (Just date) validator `shouldBe` True
+      IR.ifRangeMatches Nothing (Just (addUTCTime (-1) date)) validator `shouldBe` False
+      IR.ifRangeMatches Nothing (Just (addUTCTime 1 date)) validator `shouldBe` False
+      IR.ifRangeMatches (Just tag) Nothing validator `shouldBe` False
+    other -> expectationFailure (show other)
+
+
+unit_tag_compare_lengths :: Spec
+unit_tag_compare_lengths = it "compares every opaque tag octet across short and long lengths" $
+  forM_ ([0 .. 33] <> [63, 64, 65, 256]) $ \size -> do
+    let wire = BS.replicate size 0xff
+        strong = E.StrongETagBytes (SBS.toShort wire)
+        sameBytes = BS.copy wire
+        longer = BS.snoc wire 0x80
+        field = IR.IfRangeETag . E.StrongETagBytes . SBS.toShort
+        matches = IR.ifRangeMatches (Just strong) Nothing . field
+        weakMatches = E.weakMatch strong . E.WeakETagBytes . SBS.toShort
+    matches sameBytes `shouldBe` True
+    weakMatches sameBytes `shouldBe` True
+    matches longer `shouldBe` False
+    weakMatches longer `shouldBe` False
+    forM_ [0 .. size - 1] $ \position -> do
+      let difference = BS.take position wire <> BS.singleton 0x80 <> BS.drop (position + 1) wire
+      matches difference `shouldBe` False
+      weakMatches difference `shouldBe` False
 
 
 prop_ifrange_roundtrip :: Property
@@ -235,6 +313,44 @@ prop_from_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+checkedTagWrites :: Spec
+checkedTagWrites = describe "rejects invalid authored entity-tags" $ do
+  it "ETag" $ rejectTag E.ETag
+  it "Delta-Base" $ rejectTag DB.DeltaBase
+  it "If-Match" $ rejectTag (\tag -> IM.IfMatchEntityTags (E.StrongETag "first" :| [tag]))
+  it "If-None-Match" $ rejectTag (\tag -> INM.IfNoneMatchTags (E.StrongETag "first" :| [tag]))
+
+
+rejectTag
+  :: forall a. (KnownHeader a, Cardinality a ~ 'ZeroOrOne)
+  => (E.EntityTag -> a)
+  -> IO ()
+rejectTag build = do
+  let previous = setRawHeader (headerName (Proxy @a)) ("\"first\"" :| ["\"second\""]) (headerMapFromList [])
+  forM_ ["has space", "bad\"quote", "del\DEL"] $ \bytes -> do
+    forM_ [E.StrongETagBytes bytes, E.WeakETagBytes bytes] $ \tag -> do
+      let value = build tag
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous
+
+
+checkedFromWrites :: Spec
+checkedFromWrites = it "checks authored From mailbox components before replacing the field" $ do
+  let old = headerMapFromList [("From", "old@example.net")]
+      value display local domain = From.From (MB.Mailbox display (MB.AddrSpec local domain))
+      invalid =
+        [ value Nothing "local" (MB.DomainName "example..net")
+        , value Nothing "local" (MB.DomainLiteral "bad]")
+        , value Nothing "a\NULb" (MB.DomainName "example.net")
+        , value (Just "name 🚲") "local" (MB.DomainName "example.net")
+        ]
+  mapM_ (\authored -> do
+    renderHeaderLines defaultHeaderSettings authored `shouldBe` Nothing
+    setHeader authored old `shouldBe` old) invalid
+  let valid = value (Just "café") "ci ops" (MB.DomainLiteral "192.0.2.4")
+  lookupHeader @From.From (setHeader valid old) `shouldBe` Right (Just valid)
+
+
 tests :: Spec
 tests =
   describe "Conditional" $
@@ -247,11 +363,15 @@ tests =
             , it "round-trips" prop_inm_roundtrip
             ]
       , describe "Entity tag field lines" fieldLines
+      , checkedTagWrites
+      , unit_tag_compare_lengths
       , describe "If-Range" $
           sequence_
             [ unit_ifrange_tag
             , unit_ifrange_render
             , unit_ifrange_date
+            , unit_ifrange_checked_write
+            , unit_ifrange_match
             , it "round-trips entity-tags" prop_ifrange_roundtrip
             ]
       , describe "From" $
@@ -259,6 +379,7 @@ tests =
             [ unit_from_parse
             , unit_from_render
             , unit_from_field_lines
+            , checkedFromWrites
             , it "round-trips" prop_from_roundtrip
             ]
       ]

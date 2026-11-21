@@ -46,11 +46,12 @@ import qualified Data.Text.Short as ST
 import Data.Word (Word8)
 import Foreign.Ptr (plusPtr)
 import Foreign.Storable (pokeByteOff)
-import GHC.Exts (Int (I#), eqAddr#, indexWord8OffAddrAsWord64#, isTrue#, minusAddr#, plusAddr#, (*#), (<=#))
+import GHC.Exts (Int (I#), eqAddr#, indexWord8ArrayAsWord64#, indexWord8OffAddrAsWord64#, isTrue#, minusAddr#, plusAddr#, (*#), (<=#))
 import GHC.Word (Word64 (W64#))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hTraceparent)
 import qualified Network.HTTP.Headers.Mason as M
+import Network.HTTP.Headers.OpaqueField (validOpaqueField)
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
 import Wireform.Builder.Internal.Prim (word8HexFixed)
@@ -89,6 +90,18 @@ instance KnownHeader Traceparent where
   renderToHeaders _ = renderTraceparentField
 
 
+  renderToHeadersChecked _ value
+    | traceparentVersion value /= 255
+    , validIdentifier 32 (traceparentTraceId value)
+    , validIdentifier 16 (traceparentParentId value)
+    , validExtension value = Just (renderTraceparentField value)
+    | otherwise = Nothing
+    where
+      validExtension Traceparent {} = True
+      validExtension TraceparentWithExtension {traceparentVersion = version, traceparentExtension = suffix} =
+        version /= 0 && (BS.null suffix || not (isOWS (BSI.w2c (BS.last suffix)))) && validOpaqueField suffix
+
+
   headerName _ = hTraceparent
 
 
@@ -110,7 +123,7 @@ traceparentParser = do
     extensionBytes = do
       rest <- takeRest
       let suffix = BS.dropWhileEnd (\b -> b == 32 || b == 9) rest
-      if BS.all (\b -> b == 9 || (b >= 32 && b /= 127)) suffix
+      if validOpaqueField suffix
         then pure suffix
         else err "Invalid byte in traceparent extension"
 
@@ -158,6 +171,18 @@ renderTraceparentField value = BSI.unsafeCreate size $ \out -> do
       TraceparentWithExtension {traceparentExtension = suffix} -> addSize (addSize baseSize 1) (BS.length suffix)
     addSize = BSI.checkedAdd "traceparent"
     dash out offset = pokeByteOff out offset (45 :: Word8)
+
+
+validIdentifier :: Int -> ST.ShortText -> Bool
+validIdentifier width identifier = case ST.toShortByteString identifier of
+  bytes@(SBSI.SBS array) ->
+    let scan offset@(I# index) !nonzero
+          | offset == width = nonzero /= 0
+          | otherwise =
+              let word = W64# (indexWord8ArrayAsWord64# array index)
+              in lowercaseHex word && scan (offset + 8) (nonzero .|. (word `xor` 0x3030_3030_3030_3030))
+    in SBS.length bytes == width && scan 0 0
+{-# INLINE validIdentifier #-}
 
 
 -- | Scan a fixed number of eight-byte groups in one bounded identifier.

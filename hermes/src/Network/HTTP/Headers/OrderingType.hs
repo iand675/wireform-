@@ -16,7 +16,7 @@ module Network.HTTP.Headers.OrderingType (
 ) where
 
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (absoluteURI)
+import Network.HTTP.Grammar.URIReference (absoluteURI, checkedURIField, outboundAbsoluteURIBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hOrderingType)
 import qualified Network.HTTP.Headers.Mason as M
@@ -39,6 +39,9 @@ instance KnownHeader OrderingType where
 
 
   renderToHeaders _ = M.toStrictByteString . renderOrderingType
+
+
+  renderToHeadersChecked _ = checkedURIField outboundAbsoluteURIBytes . ST.toByteString . orderingTypeUri
 
 
   headerName _ = hOrderingType

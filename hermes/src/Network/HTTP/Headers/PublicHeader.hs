@@ -23,7 +23,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPublicHeader)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedText, renderSeparated, shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedText, encodeCommaSeparatedTokensChecked, renderSeparated, shortText)
 
 
 -- | A non-empty list of method tokens advertised by the server.
@@ -43,6 +43,9 @@ instance KnownHeader PublicHeader where
 
 
   renderToHeaders _ = encodeCommaSeparatedText . publicMethods
+
+
+  renderToHeadersChecked _ = encodeCommaSeparatedTokensChecked . publicMethods
 
 
   headerName _ = hPublicHeader

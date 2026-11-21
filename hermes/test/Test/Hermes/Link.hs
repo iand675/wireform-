@@ -19,7 +19,9 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+import Network.HTTP.ContentNegotiation (MediaType (..))
 import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers.ContentLanguage (LanguageTag (..))
 import qualified Network.HTTP.Headers.Link as L
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -162,8 +164,11 @@ unit_authored_quotes = it "writes Latin-1, authored Unicode, and escapes into a 
       body = ST.pack (replicate 2048 'a' <> "\xe9\x100\x1f642\t\NUL\DEL\"\\")
       entry = L.LinkValue "/x" [L.LinkParam "title" (Just (L.LinkParamQuoted body)), L.LinkParam "flag" Nothing]
       field = "</x>; title=\"" <> prefix <> BS.pack [0xe9, 0xc4, 0x80, 0xf0, 0x9f, 0x99, 0x82, 9, 63, 63, 92, 34, 92, 92] <> "\"; flag"
+      validBody = ST.pack ("\xe9\x100\x1f642\t\"\\")
+      valid = L.LinkValue "/x" [L.LinkParam "rel" (Just (L.LinkParamToken "next")), L.LinkParam "title" (Just (L.LinkParamQuoted validBody))]
+      validField = "</x>; rel=next; title=\"" <> BS.pack [0xe9, 0xc4, 0x80, 0xf0, 0x9f, 0x99, 0x82, 9, 92, 34, 92, 92] <> "\""
   M.toStrictByteString ("before " <> L.renderLinkValue entry <> " after") `shouldBe` ("before " <> field <> " after")
-  headerMapToList (setHeader (L.Link [entry]) (headerMapFromList [])) `shouldBe` [("link", field)]
+  headerMapToList (setHeader (L.Link [valid]) (headerMapFromList [])) `shouldBe` [("link", validField)]
   render (L.Link []) `shouldBe` ""
 
 
@@ -190,6 +195,57 @@ unit_invalid_parameters = it "reports invalid relation and anchor values and fal
       L.linkTitle value `shouldBe` Just "fallback"
     other -> expectationFailure (show other)
   L.linkRelations (L.LinkValue "/x" []) `shouldSatisfy` isLeft
+
+
+unit_language_and_type_hints :: Spec
+unit_language_and_type_hints = it "projects ordered language hints and the first type through typed field round trips" $ do
+  let wire = "</guide>; rel=alternate; HREFLANG=en-GB; lang=en; hreflang=\"zh-Hant-TW\"; TYPE=\"Application/vnd.example+json\"; hreflang=x-example"
+      parsed = lookupHeader @L.Link (headerMapFromList [("link", wire)])
+  case parsed of
+    Right (Just link@(L.Link [value])) -> do
+      L.linkLanguages value `shouldBe` Right [LanguageTag "en-GB", LanguageTag "zh-Hant-TW", LanguageTag "x-example"]
+      L.linkMediaType value `shouldBe` Right (Just (MediaType "Application" "vnd.example+json"))
+      let fields = setHeader link (headerMapFromList [])
+      headerMapToList fields `shouldBe` [("link", wire)]
+      lookupHeader @L.Link fields `shouldBe` parsed
+    other -> expectationFailure (show other)
+  L.linkLanguages (L.LinkValue "/x" []) `shouldBe` Right []
+  L.linkMediaType (L.LinkValue "/x" []) `shouldBe` Right Nothing
+
+
+unit_invalid_hints :: Spec
+unit_invalid_hints = it "rejects invalid projected hints and honors the media name length limit" $ do
+  let project select wire = do
+        L.Link values <- parseOk wire
+        case values of
+          [value] -> select value
+          _ -> Left "expected a single link"
+      typeHint spelling = "</x>; type=\"" <> spelling <> "\""
+      validName = BS.replicate 127 97
+      longName = BS.replicate 128 97
+  mapM_
+    (\wire -> project L.linkLanguages wire `shouldSatisfy` isLeft)
+    ["</x>; hreflang", "</x>; hreflang=en; hreflang=en--GB", "</x>; hreflang=\"en,fr\"", "</x>; hreflang=*"]
+  project L.linkMediaType "</x>; type; type=\"text/html\"" `shouldSatisfy` isLeft
+  project L.linkMediaType (typeHint (validName <> "/" <> validName))
+    `shouldBe` Right (Just (MediaType (st (replicate 127 'a')) (st (replicate 127 'a'))))
+  mapM_
+    (\spelling -> project L.linkMediaType (typeHint spelling) `shouldSatisfy` isLeft)
+    ["text/*", "text /html", "text/html;charset=utf-8", "text/%html", "!text/html", "text/h%tml", longName <> "/html", "text/" <> longName]
+
+
+unit_extended_title_precedence :: Spec
+unit_extended_title_precedence = it "uses the first extended title and its first plain fallback" $ do
+  let title wire = do
+        L.Link values <- parseOk wire
+        case values of
+          [value] -> Right (L.linkTitle value)
+          _ -> Left "expected a single link"
+  title "</x>; title=plain; TITLE*=\"iSo-8859-1'fr'caf%E9+.txt\"; title*=UTF-8''ignored"
+    `shouldBe` Right (Just "caf\xe9+.txt")
+  title "</x>; title*=UTF-8''bad%z; TITLE=plain; title*=UTF-8''ignored; title=second"
+    `shouldBe` Right (Just "plain")
+  title "</x>; title*; title*=UTF-8''ignored" `shouldBe` Right Nothing
 
 
 -- ---------------------------------------------------------------------------
@@ -274,5 +330,8 @@ tests =
       , unit_authored_quotes
       , unit_parameter_semantics
       , unit_invalid_parameters
+      , unit_language_and_type_hints
+      , unit_invalid_hints
+      , unit_extended_title_precedence
       , it "render/parse round-trips" prop_roundtrip
       ]

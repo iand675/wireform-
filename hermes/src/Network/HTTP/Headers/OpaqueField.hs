@@ -5,6 +5,8 @@ encoding is application-defined. Validated values retain their wire octets.
 -}
 module Network.HTTP.Headers.OpaqueField (
   checkOpaqueField,
+  validOpaqueField,
+  renderOpaqueFieldChecked,
   parseOpaqueFieldLine,
   opaqueFieldParser,
   opaqueFieldText,
@@ -29,6 +31,14 @@ checkOpaqueField name wrap wire
   | validOpaqueField wire = Right (wrap wire)
   | otherwise = Left ("Invalid HTTP field octet in " <> name)
 {-# INLINE checkOpaqueField #-}
+
+
+-- | Return the original bytes after validating HTTP field framing.
+renderOpaqueFieldChecked :: ByteString -> Maybe ByteString
+renderOpaqueFieldChecked wire
+  | validOpaqueField wire = Just wire
+  | otherwise = Nothing
+{-# INLINE renderOpaqueFieldChecked #-}
 
 
 validOpaqueField :: ByteString -> Bool

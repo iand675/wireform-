@@ -11,7 +11,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.LastEventID as LEI
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -132,12 +132,31 @@ prop_refresh_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+checkedRefreshWrites :: Spec
+checkedRefreshWrites = it "checks that authored Refresh targets fit the isomorphic field encoding" $ do
+  let previous = headerMapFromList [("Refresh", "3")]
+  mapM_ (\target -> do
+    let value = R.Refresh 0 (Just target)
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value previous `shouldBe` previous) ["bad\DEL", "bad\npath", "bad\rpath", "path/🚲"]
+  let accepted = R.Refresh 0 (Just " /café ")
+  lookupHeader @R.Refresh (setHeader accepted previous) `shouldBe` Right (Just accepted)
+  renderHeaderLines defaultHeaderSettings (R.Refresh 0 (Just "")) `shouldBe` Just ("0; url=" :| [])
+
+
 tests :: Spec
 tests =
   describe "Sse" $
     sequence_
-      [ unit_last_event_id_parse
+      [ checkedRefreshWrites
+      , unit_last_event_id_parse
       , unit_last_event_id_render
+      , it "checks the HTTP field bytes before writing an SSE cursor" $ do
+          let fields = headerMapFromList [("Last-Event-ID", "previous")]
+          for_ ["a\NUL", "a\r", "a\n", "a\DEL", "a\x0b"] $ \text -> do
+            let value = LEI.LastEventID text
+            renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+            setHeader value fields `shouldBe` fields
       , it "preserves opaque UTF-8, including commas and spaces, through typed lookup" $ do
           let wire = " caf\195\169-\240\159\140\141, next\t"
               value = LEI.LastEventID " café-🌍, next\t"

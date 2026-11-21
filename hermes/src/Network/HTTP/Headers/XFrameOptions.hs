@@ -34,7 +34,7 @@ import qualified Data.ByteString as B
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Network.HTTP.Grammar.Authority (SerializedOrigin (..), serializedOriginParser)
-import Network.HTTP.Grammar.URIReference (uriPathSuffixBytes)
+import Network.HTTP.Grammar.URIReference (uriPathSuffixBytes, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXFrameOptions)
 import qualified Network.HTTP.Headers.Mason as M
@@ -67,6 +67,13 @@ instance KnownHeader XFrameOptions where
   renderToHeaders _ Deny = "DENY"
   renderToHeaders _ SameOrigin = "SAMEORIGIN"
   renderToHeaders _ field = M.toStrictByteString (renderXFrameOptions field)
+
+
+  renderToHeadersChecked _ Deny = Just "DENY"
+  renderToHeadersChecked _ SameOrigin = Just "SAMEORIGIN"
+  renderToHeadersChecked settings value@(AllowFrom address)
+    | validURIText (() <$ allowFromAddress) address = Just (renderToHeaders settings value)
+    | otherwise = Nothing
 
 
   headerName _ = hXFrameOptions

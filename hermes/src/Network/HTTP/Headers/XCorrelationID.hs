@@ -75,6 +75,9 @@ instance KnownHeader XCorrelationID where
   renderToHeaders _ = xCorrelationIDBytes
 
 
+  renderToHeadersChecked _ = renderOpaqueFieldChecked . xCorrelationIDBytes
+
+
   headerName _ = hXCorrelationID
 
 

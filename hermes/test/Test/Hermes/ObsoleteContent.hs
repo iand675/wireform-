@@ -7,6 +7,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Short as SBS
+import Data.Word (Word8)
 import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
@@ -14,7 +15,7 @@ import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.ContentNegotiation (MediaType (..))
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.ContentBase as CB
 import qualified Network.HTTP.Headers.ContentID as CID
 import qualified Network.HTTP.Headers.ContentScriptType as CST
@@ -285,6 +286,18 @@ typedHtmlMetadata = describe "typed HTML metadata" $ do
     forM_ invalid $ \wire -> do
       lookupHeader @CST.ContentScriptType (headers "Content-Script-Type" wire) `shouldSatisfy` isLeft
       lookupHeader @CStyT.ContentStyleType (headers "Content-Style-Type" wire) `shouldSatisfy` isLeft
+  it "rejects invalid authored Content-Script-Type fields" $ do
+    let previous = headerMapFromList [("Content-Script-Type", "text/javascript"), ("Content-Script-Type", "text/tcl")]
+    forM_ ["", "text/*", "text/javascript, text/tcl", "text/javascript; version="] $ \wire -> do
+      let value = CST.ContentScriptType wire
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous
+  it "rejects invalid authored Content-Style-Type fields" $ do
+    let previous = headerMapFromList [("Content-Style-Type", "text/css"), ("Content-Style-Type", "text/dsssl")]
+    forM_ ["", "*/css", "text/css; label=\"open", "text/css; charset="] $ \wire -> do
+      let value = CStyT.ContentStyleType wire
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous
   it "uses the last Default-Style and emits quoted title bytes" $ do
     let selected = DS.DefaultStyleBytes (SBS.pack [32, 65, 44, 32, 9, 255, 34, 32])
         quoted = "\" A, \t" <> BS.pack [255] <> "\\\" \""
@@ -338,6 +351,18 @@ typedVersionTags = describe "typed version tags" $ do
           lookupRawHeader "Content-Version" (setHeader (CV.ContentVersionBytes body) empty) `shouldBe` Just (canonical :| [])
           lookupRawHeader "Derived-From" (setHeader (DF.DerivedFromBytes body) empty) `shouldBe` Just (canonical :| [])
         else assertBad escaped
+  it "rejects authored invalid Content-Version octets before replacing existing lines" $ do
+    let original = headerMapFromList [("Content-Version", "\"a\""), ("Content-Version", "\"b\"")]
+    forM_ ([0 .. 8] <> [10 .. 31] <> [127]) $ \byte -> do
+      let value = CV.ContentVersionBytes (SBS.pack [118, byte, 50])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value original `shouldBe` original
+  it "rejects authored invalid Derived-From octets before replacing existing lines" $ do
+    let original = headerMapFromList [("Derived-From", "\"a\""), ("Derived-From", "\"b\"")]
+    forM_ ([0 .. 8] <> [10 .. 31] <> [127]) $ \byte -> do
+      let value = DF.DerivedFromBytes (SBS.pack [118, byte, 50])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value original `shouldBe` original
   it "accepts an empty quoted tag and rejects malformed or combined fields" $ do
     lookupVersion "\t \"\" \t" `shouldBe` Right (Just (CV.ContentVersionBytes ""))
     lookupDerived "\t \"\" \t" `shouldBe` Right (Just (DF.DerivedFromBytes ""))
@@ -525,6 +550,15 @@ tests =
       , unit_content_version_render
       , unit_default_style_parse
       , unit_default_style_render
+      , it "rejects control octets in authored Default-Style titles" $ do
+          let fields = headerMapFromList [("Default-Style", "\"previous\"")]
+              reject :: Word8 -> Expectation
+              reject byte = do
+                let value = DS.DefaultStyleBytes (SBS.pack [65, byte, 66])
+                renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+                setHeader value fields `shouldBe` fields
+          mapM_ reject [0, 10, 13, 31, 127]
+          renderHeaderLines defaultHeaderSettings (DS.DefaultStyle " A\tB ") `shouldBe` Just ("\" A\tB \"" :| [])
       , unit_derived_from_parse
       , unit_derived_from_render
       , unit_content_id_parse

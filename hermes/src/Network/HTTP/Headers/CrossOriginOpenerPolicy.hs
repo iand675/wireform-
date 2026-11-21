@@ -68,6 +68,11 @@ instance KnownHeader CrossOriginOpenerPolicy where
   renderToHeaders _ value = M.toStrictByteString (renderCrossOriginOpenerPolicy value)
 
 
+  renderToHeadersChecked _ (CrossOriginOpenerPolicy directive Nothing) = Just (coopDirectiveBytes directive)
+  renderToHeadersChecked _ (CrossOriginOpenerPolicy directive (Just endpoint)) =
+    R.encodeReportingPolicyChecked (coopDirectiveBytes directive) endpoint
+
+
   headerName _ = hCrossOriginOpenerPolicy
 
 

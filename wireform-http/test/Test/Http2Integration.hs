@@ -14,7 +14,7 @@ import Codec.Compression.Zlib qualified as Zlib
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
-import Control.Monad (forM_)
+import Control.Monad (forM_, void)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BSL
@@ -30,6 +30,7 @@ import Network.HTTP.Client.Response qualified as Raw
 import Network.HTTP.Connection
 import Network.HTTP.Headers qualified as Typed
 import Network.HTTP.Headers.ContentDigest (ContentDigest)
+import Network.HTTP.Headers.ProxyStatus qualified as ProxyStatus
 import Network.HTTP.Headers.Signature qualified as Signature
 import Network.HTTP.Headers.SignatureInput qualified as SignatureInput
 import Network.HTTP.Server
@@ -51,11 +52,13 @@ tests =
       , streamingResponseBody
       , streamingRequestBody
       , serverEmitsTrailers
+      , deferredBufferedResponseTrailers
       , bodylessResponseLengths
       , connectAuthorityTarget
       , ordinaryAuthority
       , bodyDerivedTrailers
       , splitSignatureFields
+      , proxyStatusTrailerPromotion
       , fixedRequestTrailers
       , trailerActionFailure
       , invalidRequestTrailers
@@ -200,27 +203,67 @@ serverEmitsTrailers =
           }
 
 
+deferredBufferedResponseTrailers :: Spec
+deferredBufferedResponseTrailers =
+  it "publishes empty and buffered responses before running their trailer actions" $
+    forM_ cases $ \(body, expected, trailers) -> do
+      releaseTrailers <- newEmptyMVar
+      let handler _ = pure (resp200 "")
+            { responseBody = body
+            , responseTrailers = readMVar releaseTrailers >> pure trailers
+            }
+      (withTestServer http2Only handler $ \port ->
+        runClient http2Only port $ \conn -> do
+          response <- sendOn conn (mkRequest "GET" "/" port BodyEmpty [])
+          responseStatus response `shouldBe` S.status200
+          BodyStream pop <- pure (responseBody response)
+          case body of
+            BodyBytes _ -> pop `shouldReturn` Just expected
+            _ -> pure ()
+          putMVar releaseTrailers ()
+          pop `shouldReturn` Nothing
+          responseTrailers response `shouldReturn` trailers)
+        `finally` void (tryPutMVar releaseTrailers ())
+  where
+    result = [("X-Result", "done")]
+    cases =
+      [ (BodyEmpty, "", result)
+      , (BodyBytes "hello", "hello", result)
+      , (BodyBytes "hello", "hello", [])
+      ]
+
+
 bodylessResponseLengths :: Spec
 bodylessResponseLengths =
-  it "preserves Content-Length metadata on HEAD and 304 without reading a body" $
+  it "omits bodies and trailers for HEAD, 204, 205, and 304 while preserving length metadata where allowed" $
     withTestServer http2Only handler $ \port ->
       runClient http2Only port $ \conn -> do
-        let check method target status = do
+        let check method target status expectedLength = do
               response <- sendOn conn (mkRequest method target port BodyEmpty [])
               responseStatus response `shouldBe` status
-              lookup "Content-Length" (responseHeaders response) `shouldBe` Just "5"
+              lookup "Content-Length" (responseHeaders response) `shouldBe` expectedLength
               drainBody (responseBody response) `shouldReturn` ""
               responseTrailers response `shouldReturn` []
-        check "HEAD" "/" S.status200
-        check "GET" "/cached" S.status304
+        check "HEAD" "/" S.status200 (Just "5")
+        check "GET" "/cached" S.status304 (Just "5")
+        check "GET" "/no-content" S.status204 Nothing
+        check "GET" "/reset-content" S.status205 (Just "0")
         response <- sendOn conn (mkRequest "GET" "/" port BodyEmpty [])
         drainBody (responseBody response) `shouldReturn` "hello"
   where
     handler req = pure $ case (requestMethod req, requestTarget req) of
-      (_, "/cached") -> (resp200 "") {responseStatus = S.status304, responseHeaders = lengthHeader}
-      (method, _) | method == methodFromBytes "HEAD" -> (resp200 "") {responseHeaders = lengthHeader}
+      (_, "/cached") -> suppressed S.status304 lengthHeader (BodyStream (throwIO (userError "body producer ran")))
+      (_, "/no-content") -> suppressed S.status204 lengthHeader BodyEmpty
+      (_, "/reset-content") -> suppressed S.status205 [("Content-Length", "0")] (BodyBytes "hello")
+      (method, _) | method == methodFromBytes "HEAD" -> suppressed S.status200 lengthHeader (BodyBytes "hello")
       _ -> (resp200 "hello") {responseHeaders = lengthHeader}
     lengthHeader = [("Content-Length", "5")]
+    suppressed status hdrs body = (resp200 "")
+      { responseStatus = status
+      , responseHeaders = hdrs
+      , responseBody = body
+      , responseTrailers = throwIO (userError "trailer producer ran")
+      }
 
 
 connectAuthorityTarget :: Spec
@@ -369,6 +412,33 @@ splitSignatureFields = it "pairs signature headers and trailers over HTTP/1.1 an
         }
 
 
+proxyStatusTrailerPromotion :: Spec
+proxyStatusTrailerPromotion = it "promotes a typed Proxy-Status trailer over HTTP/1.1 and HTTP/2" $
+  forM_ [(http1Only, V.HTTP1_1), (http2Only, V.HTTP2)] $ \(range, version) ->
+    withTestServer range (handler version) $ \port ->
+      runClient range port $ \connection -> do
+        let acceptTrailers = if version == V.HTTP1_1 then [("TE", "trailers"), ("Connection", "TE")] else []
+            request = (mkRequest "GET" "/" port BodyEmpty acceptTrailers) {requestVersion = version}
+        response <- sendOn connection request
+        drainBody (responseBody response) `shouldReturn` "hello"
+        trailers <- Typed.headerMapFromList <$> responseTrailers response
+        let headers = Typed.headerMapFromList (responseHeaders response)
+        case ProxyStatus.lookupProxyStatusWithTrailers headers trailers of
+          Right (Just effective) ->
+            Typed.renderToHeaders Typed.defaultHeaderSettings effective
+              `shouldBe` ["upstream;received-status=200, edge;error=http_response_incomplete"]
+          other -> expectationFailure (show other)
+  where
+    handler version _ = do
+      next <- newIORef (Just "hello")
+      pure (resp200 "")
+        { responseVersion = version
+        , responseHeaders = [("Trailer", "Proxy-Status"), ("Proxy-Status", "upstream;received-status=200, edge;next-protocol=h2")]
+        , responseBody = BodyStream (atomicModifyIORef' next (\chunk -> (Nothing, chunk)))
+        , responseTrailers = pure [("Proxy-Status", "edge;error=http_response_incomplete")]
+        }
+
+
 checkDigestTrailers :: Headers -> Headers -> IO ()
 checkDigestTrailers headers trailers = do
   lookup "trailer" headers `shouldBe` lookup "Trailer" announcement
@@ -415,13 +485,15 @@ invalidRequestTrailers =
   it "rejects invalid fixed and streamed request trailers locally" $
     withTestServer http2Only handler $ \port ->
       runClient http2Only port $ \conn -> do
-        let request body = (mkRequest "POST" "/invalid" port body [])
-              {requestTrailers = pure [("X-Result", " padded")]}
-        forM_ [BodyEmpty, BodyBytes "payload"] $ \body -> do
-          result <- try @ClientStreamError (sendOn conn (request body))
-          (() <$ result) `shouldBe` Left (ClientRequestHeaderError "invalid trailer field value")
-        result <- try @ClientStreamError (sendOn conn (request (BodyStream (pure Nothing))))
-        (() <$ result) `shouldBe` Left (ClientStreamReset Cancel)
+        let request field body = (mkRequest "POST" "/invalid" port body [])
+              {requestTrailers = pure [field]}
+        forM_ [(("X-Result", " padded"), "invalid trailer field value"), (("Content-Type", "text/plain"), "forbidden trailer field")] $
+          \(field, reason) -> do
+            forM_ [BodyEmpty, BodyBytes "payload"] $ \body -> do
+              result <- try @ClientStreamError (sendOn conn (request field body))
+              (() <$ result) `shouldBe` Left (ClientRequestHeaderError reason)
+            result <- try @ClientStreamError (sendOn conn (request field (BodyStream (pure Nothing))))
+            (() <$ result) `shouldBe` Left (ClientStreamReset Cancel)
         response <- sendOn conn (mkRequest "GET" "/" port BodyEmpty [])
         drainBody (responseBody response) `shouldReturn` "ok"
   where
@@ -439,18 +511,19 @@ invalidResponseTrailers =
     withTestServer http2Only handler $ \port ->
       runClient http2Only port $ \conn -> do
         let request path = mkRequest "GET" path port BodyEmpty []
-        forM_ ["/empty", "/fixed"] $ \path -> do
-          result <- try @ClientStreamError (sendOn conn (request path))
-          (() <$ result) `shouldBe` Left (ClientStreamReset InternalError)
-        response <- sendOn conn (request "/stream")
-        result <- try @ClientStreamError (drainBody (responseBody response))
-        result `shouldBe` Left (ClientStreamReset InternalError)
+        forM_ ["/empty", "/fixed", "/stream"] $ \path -> do
+          response <- sendOn conn (request path)
+          responseStatus response `shouldBe` S.status200
+          result <- try @ClientStreamError (drainBody (responseBody response))
+          result `shouldBe` Left (ClientStreamReset InternalError)
+          responseTrailers response `shouldReturn` []
         ok <- sendOn conn (request "/")
         drainBody (responseBody ok) `shouldReturn` "ok"
   where
     handler request = pure $ case requestTarget request of
       "/empty" -> invalid BodyEmpty
-      "/fixed" -> invalid (BodyBytes "payload")
+      "/fixed" ->
+        (resp200 "payload") {responseTrailers = pure [("Content-Type", "text/plain")]}
       "/stream" -> invalid (BodyStream (pure Nothing))
       _ -> resp200 "ok"
     invalid body =

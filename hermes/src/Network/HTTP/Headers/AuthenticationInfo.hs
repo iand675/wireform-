@@ -33,7 +33,7 @@ module Network.HTTP.Headers.AuthenticationInfo (
 
 import Data.Text.Short (ShortText)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Authorization (CredentialParam (..), authParamParser, renderAuthParam)
+import Network.HTTP.Headers.Authorization (CredentialParam (..), authParamParser, encodeAuthParamsChecked, renderAuthParam)
 import Network.HTTP.Headers.HeaderFieldName (hAuthenticationInfo)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -60,6 +60,9 @@ instance KnownHeader AuthenticationInfo where
 
 
   renderToHeaders _ ai = [M.toStrictByteString (renderAuthenticationInfo ai)]
+
+
+  renderToHeadersChecked _ = fmap pure . encodeAuthParamsChecked . authenticationInfoParams
 
 
   headerName _ = hAuthenticationInfo

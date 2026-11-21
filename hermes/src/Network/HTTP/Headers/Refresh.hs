@@ -27,7 +27,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Short as ST
 import Data.Word (Word8)
 import Foreign.Ptr (plusPtr)
-import Network.HTTP.Grammar.Parser (ParserT, shortTextFromLatin1)
+import Network.HTTP.Grammar.Parser (ParserT, isHttpLatin1Text, scanCompactBytes, shortTextFromLatin1)
 import Network.HTTP.Grammar.Rendering (renderLatin1ShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hRefresh)
@@ -61,6 +61,16 @@ instance KnownHeader Refresh where
 
 
   renderToHeaders _ = encodeRefresh
+
+
+  renderToHeadersChecked _ (Refresh 0 (Just target))
+    | let bytes = ST.toShortByteString target
+    , not (needsTargetQuotes bytes)
+    , scanCompactBytes (\byte -> byte == 9 || (byte >= 32 && byte < 127)) bytes 0 =
+        Just (encodeImmediateTarget bytes)
+  renderToHeadersChecked _ value
+    | maybe True isHttpLatin1Text (refreshUrl value) = Just (M.toStrictByteString (renderRefresh value))
+    | otherwise = Nothing
 
 
   headerName _ = hRefresh
@@ -147,14 +157,20 @@ encodeRefresh :: Refresh -> ByteString
 encodeRefresh (Refresh 0 (Just target))
   | let bytes = ST.toShortByteString target
   , not (needsTargetQuotes bytes)
-  , not (SBS.any (>= 128) bytes) =
-      let prefix = "0; url="
-          len = SBS.length bytes
-      in directEncode (BSI.checkedAdd "Refresh" (BS.length prefix) len) $ \ptr start -> do
-           offset <- dBytes ptr start prefix
-           SBSI.copyToPtr bytes 0 (ptr `plusPtr` offset) len
-           pure (offset + len)
+  , not (SBS.any (>= 128) bytes) = encodeImmediateTarget bytes
 encodeRefresh value = M.toStrictByteString (renderRefresh value)
+
+
+encodeImmediateTarget :: SBS.ShortByteString -> ByteString
+encodeImmediateTarget bytes =
+  directEncode (BSI.checkedAdd "Refresh" (BS.length prefix) len) $ \ptr start -> do
+    offset <- dBytes ptr start prefix
+    SBSI.copyToPtr bytes 0 (ptr `plusPtr` offset) len
+    pure (offset + len)
+  where
+    prefix = "0; url="
+    len = SBS.length bytes
+{-# INLINE encodeImmediateTarget #-}
 
 
 renderTarget :: ST.ShortText -> M.Builder

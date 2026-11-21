@@ -32,11 +32,12 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import Data.Char (isAsciiUpper, toLower)
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Data.Word (Word16)
 import Network.HTTP.Grammar.Parser
-import Network.HTTP.Grammar.Rendering (shortText)
+import Network.HTTP.Grammar.Rendering (encodeCommaSeparatedTokenPairs, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hNegotiate)
 import qualified Network.HTTP.Headers.Mason as M
@@ -143,6 +144,13 @@ instance KnownHeader Negotiate where
 
 
   renderToHeaders _ = M.toStrictByteString . renderNegotiate
+
+
+  renderToHeadersChecked _ (Negotiate directives)
+    | all valid directives = Just (encodeCommaSeparatedTokenPairs "=" negName negValue (NE.toList directives))
+    | otherwise = Nothing
+    where
+      valid (NegotiateDirective name value) = isHttpTokenText name && maybe True isHttpTokenText value
 
 
   headerName _ = hNegotiate

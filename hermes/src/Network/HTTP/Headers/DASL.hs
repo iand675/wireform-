@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 {- |
 @DASL@ (RFC 5323 §3.2) — advertises the WebDAV SEARCH grammars supported
@@ -17,7 +18,8 @@ module Network.HTTP.Headers.DASL (
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (codedURL)
+import Network.HTTP.Grammar.Rendering (encodeCommaSeparatedText)
+import Network.HTTP.Grammar.URIReference (codedURL, outboundAbsoluteURIBytes, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hDASL)
 import qualified Network.HTTP.Headers.Mason as M
@@ -51,6 +53,13 @@ instance KnownHeader DASL where
 
 
   renderToHeaders _ = M.toStrictByteString . renderDASL
+
+
+  renderToHeadersChecked _ (DASLGrammars grammars)
+    | all valid grammars = Just (encodeCommaSeparatedText grammars)
+    | otherwise = Nothing
+    where
+      valid = validURIText ($(char '<') *> outboundAbsoluteURIBytes <* $(char '>'))
 
 
   headerName _ = hDASL

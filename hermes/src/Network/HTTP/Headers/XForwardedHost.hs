@@ -24,6 +24,7 @@ module Network.HTTP.Headers.XForwardedHost (
   renderXForwardedHost,
 ) where
 
+import Data.Either (isRight)
 import qualified Data.Text.Short as ST
 import Network.HTTP.Grammar.Authority (hostAndPortListMemberBytes)
 import Network.HTTP.Headers
@@ -31,6 +32,7 @@ import Network.HTTP.Headers.HeaderFieldName (hXForwardedHost)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Parser.Driver (parseByteString)
 
 
 {- | The forwarded host value, preserved verbatim
@@ -52,12 +54,22 @@ instance KnownHeader XForwardedHost where
   renderToHeaders _ = M.toStrictByteString . renderXForwardedHost
 
 
+  renderToHeadersChecked _ (XForwardedHost host)
+    | isRight (parseByteString (authorityList <* eof) wire) = Just wire
+    | otherwise = Nothing
+    where
+      wire = ST.toByteString host
+
+
   headerName _ = hXForwardedHost
 
 
 xForwardedHostParser :: ParserT st String XForwardedHost
-xForwardedHostParser =
-  XForwardedHost <$> shortASCIIFromParser_ (authority *> skipMany (ows *> $(char ',') *> ows *> authority))
+xForwardedHostParser = XForwardedHost <$> shortASCIIFromParser_ authorityList
+
+
+authorityList :: ParserT st String ()
+authorityList = authority *> skipMany (ows *> $(char ',') *> ows *> authority)
   where
     authority = hostAndPortListMemberBytes
 

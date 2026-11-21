@@ -11,7 +11,7 @@ import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType (..))
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.AcceptPatch as APatch
 import qualified Network.HTTP.Headers.AcceptPost as APost
 import qualified Network.HTTP.Headers.Mason as M
@@ -179,6 +179,34 @@ prop_post_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+checkedPatch :: Spec
+checkedPatch = it "rejects invalid authored Accept-Patch media types" $ do
+  let previous = headerMapFromList [("Accept-Patch", "text/plain"), ("Accept-Patch", "application/json")]
+      valid = MediaRange (mt "text" "plain") []
+      wrongTypes = [MediaRange (mt "text" "") [], MediaRange (mt "application" "json") [("bad name", "value")]]
+  mapM_
+    ( \entry -> do
+        let value = APatch.AcceptPatchRanges (valid :| [entry])
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value previous `shouldBe` previous
+    )
+    wrongTypes
+
+
+checkedPost :: Spec
+checkedPost = it "rejects invalid authored Accept-Post media ranges" $ do
+  let previous = headerMapFromList [("Accept-Post", "text/plain"), ("Accept-Post", "*")]
+      valid = mt "application" "json"
+      wrongRanges = [MediaRange (mt "" "plain") [], MediaRange valid [("profile", "one\DELtwo")]]
+  mapM_
+    ( \entry -> do
+        let value = APost.AcceptPost (APost.AcceptPostAny :| [APost.AcceptPostMediaRange entry])
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value previous `shouldBe` previous
+    )
+    wrongRanges
+
+
 tests :: Spec
 tests =
   describe "AcceptPatchPost" $
@@ -188,6 +216,7 @@ tests =
             [ unit_patch_parse
             , unit_patch_render
             , unit_patch_parameters
+            , checkedPatch
             , it "round-trips" prop_patch_roundtrip
             ]
       , describe "Accept-Post" $
@@ -196,6 +225,7 @@ tests =
             , unit_post_parse_star_star
             , unit_post_render
             , unit_post_parameters
+            , checkedPost
             , it "round-trips" prop_post_roundtrip
             ]
       ]

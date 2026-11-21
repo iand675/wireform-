@@ -20,7 +20,7 @@ module Network.HTTP.Headers.Referer (
 ) where
 
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (referrerReference)
+import Network.HTTP.Grammar.URIReference (checkedURIField, outboundReferrerReferenceBytes, referrerReference)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hReferer)
 import qualified Network.HTTP.Headers.Mason as M
@@ -43,6 +43,9 @@ instance KnownHeader Referer where
 
 
   renderToHeaders _ = M.toStrictByteString . renderReferer
+
+
+  renderToHeadersChecked _ = checkedURIField outboundReferrerReferenceBytes . ST.toByteString . refererUri
 
 
   headerName _ = hReferer

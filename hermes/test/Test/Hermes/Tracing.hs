@@ -12,8 +12,9 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderToHeaders, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, renderToHeaders, setHeader)
 import qualified Network.HTTP.Headers.Mason as M
+import Network.HTTP.Headers.Origin (parseCorsRequestOrigin)
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import qualified Network.HTTP.Headers.ServerTiming as STm
 import qualified Network.HTTP.Headers.TimingAllowOrigin as TAO
@@ -162,14 +163,13 @@ unit_ts_parse = it "parses a vendor list" $
 
 
 unit_ts_render :: Spec
-unit_ts_render =
-  it "renders a vendor list" $
-    let v =
-          TSt.Tracestate
-            ( TSt.TracestateMember (ST.fromString "rojo") (ST.fromString "00f067aa0ba902b7")
-                :| [TSt.TracestateMember (ST.fromString "congo") (ST.fromString "t61rcWkgMzE")]
-            )
-    in tsRender v `shouldBe` "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE"
+unit_ts_render = it "renders the same vendor list through the typed field and builder" $ do
+  let v = TSt.Tracestate (TSt.TracestateMember "rojo" "00f067aa0ba902b7" :| [TSt.TracestateMember "congo" "t61rcWkgMzE"])
+      authored = TSt.Tracestate (TSt.TracestateMember "" "" :| [TSt.TracestateMember "café" " ☕ ", TSt.TracestateMember "last" ""])
+  tsRender v `shouldBe` "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE"
+  mapM_
+    (\state -> renderToHeaders defaultHeaderSettings state `shouldBe` tsRender state)
+    [v, authored, TSt.TracestateEmpty]
 
 
 unit_ts_field :: Spec
@@ -196,6 +196,8 @@ unit_ts_limits = it "applies key, value and combined member limits at their boun
       wide = simple <> "=" <> value <> "," <> tenant <> "@" <> system <> "=" <> value
   fmap (fmap tsRender) (readField (wide <> "    ")) `shouldBe` Right (Just wide)
   readField (BS.replicate 31 44) `shouldBe` Right (Just TSt.TracestateEmpty)
+  fmap (fmap tsRender) (readField (BS.replicate 31 44 <> "a=x")) `shouldBe` Right (Just "a=x")
+  fmap (fmap tsRender) (readField ("a=x" <> BS.replicate 31 44)) `shouldBe` Right (Just "a=x")
   lookupHeader @TSt.Tracestate (headerMapFromList [("tracestate", BS.replicate 31 44), ("tracestate", "")])
     `shouldSatisfy` isLeft
   mapM_
@@ -205,6 +207,8 @@ unit_ts_limits = it "applies key, value and combined member limits at their boun
     , tenant <> "@a" <> system <> "=v"
     , "a=" <> value <> "v"
     , BS.replicate 32 44
+    , BS.replicate 31 44 <> "a=x,"
+    , "a=x," <> BS.replicate 29 44 <> "a=y"
     , "1simple=v"
     , "simple@=v"
     , "@system=v"
@@ -388,19 +392,73 @@ unit_tao_field_lines = it "combines origins, null and wildcard without swallowin
         headerMapFromList
           [ ("Timing-Allow-Origin", " \t,https://[2001:db8::1]:8443,null")
           , ("Timing-Allow-Origin", "")
-          , ("Timing-Allow-Origin", ",https://b%2C.example,*\t")
+          , ("Timing-Allow-Origin", ",https://b%2C.example,https://a{b}.test,*\t")
           ]
       expected =
         TAO.TimingAllowOrigin
           ( TAO.TimingAllowOriginOrigin "https://[2001:db8::1]:8443"
-              :| [TAO.TimingAllowOriginOrigin "null", TAO.TimingAllowOriginOrigin "https://b%2C.example", TAO.TimingAllowOriginAny]
+              :| [ TAO.TimingAllowOriginOrigin "null"
+                 , TAO.TimingAllowOriginOrigin "https://b%2C.example"
+                 , TAO.TimingAllowOriginOrigin "https://a{b}.test"
+                 , TAO.TimingAllowOriginAny
+                 ]
           )
   lookupHeader @TAO.TimingAllowOrigin fields `shouldBe` Right (Just expected)
   headerMapToList (setHeader expected (headerMapFromList []))
-    `shouldBe` [("timing-allow-origin", "https://[2001:db8::1]:8443, null, https://b%2C.example, *")]
+    `shouldBe` [("timing-allow-origin", "https://[2001:db8::1]:8443, null, https://b%2C.example, https://a{b}.test, *")]
   mapM_
     (\wire -> lookupHeader @TAO.TimingAllowOrigin (headerMapFromList [("Timing-Allow-Origin", wire)]) `shouldSatisfy` isLeft)
     ["bare-name", "nullx", "https://a.example/", "https://a.example:", "https://a.example:65536", "https://[invalid]", "https://bad%2.example", ", ,"]
+
+
+unit_tao_fetch_members :: Spec
+unit_tao_fetch_members = it "recognizes complete Fetch list members across field lines" $ do
+  let origin = either error id (parseCorsRequestOrigin "https://a.test")
+      opaque = either error id (parseCorsRequestOrigin "null")
+      quotedHost = either error id (parseCorsRequestOrigin "https://a\"b.test")
+      fields = headerMapFromList . map (\wire -> ("Timing-Allow-Origin", wire))
+      allows = TAO.timingAllowOriginMatches origin . fields
+  mapM_
+    (\values -> allows values `shouldBe` True)
+    [ [" \t, https://a.test\t, null"]
+    , ["malformed", " https://a.test"]
+    , ["not an origin, *  "]
+    , ["\"quoted, \\\"*, member\"", "*"]
+    , ["\"quoted", "member\", *"]
+    ]
+  mapM_
+    (\values -> allows values `shouldBe` False)
+    [ []
+    , ["\t , "]
+    , ["\"*\""]
+    , ["prefix\"quoted, *"]
+    , ["\"quoted", "*"]
+    , ["https://a.test:443, https://A.test"]
+    , ["https://a.test\r"]
+    , ["*suffix, https://a.test/"]
+    ]
+  TAO.timingAllowOriginMatches opaque (fields ["null"]) `shouldBe` True
+  TAO.timingAllowOriginMatches quotedHost (fields ["https://a\"b.test"]) `shouldBe` True
+
+
+unit_tao_response_checks :: Spec
+unit_tao_response_checks = it "applies response taint, navigation origins and prior failures" $ do
+  let origin = either error id (parseCorsRequestOrigin "https://a.test")
+      basic = TAO.TimingAllowContext origin False False True
+      response wire = headerMapFromList [("Timing-Allow-Origin", wire)]
+      empty = headerMapFromList []
+      crossNavigation = basic {TAO.timingCrossOriginNavigation = True}
+      tainted = basic {TAO.timingBasicResponse = False}
+  TAO.timingAllowCheck basic empty `shouldBe` True
+  TAO.timingAllowCheck crossNavigation empty `shouldBe` False
+  TAO.timingAllowCheck crossNavigation (response "*") `shouldBe` True
+  TAO.timingAllowCheck tainted empty `shouldBe` False
+  TAO.timingAllowCheck tainted (response "https://a.test") `shouldBe` True
+  TAO.timingAllowCheck (basic {TAO.timingAllowFailed = True}) (response "*") `shouldBe` False
+  TAO.navigationTimingAllowCheck origin [] `shouldBe` True
+  TAO.navigationTimingAllowCheck origin [response "*", empty, response "https://a.test"] `shouldBe` True
+  TAO.navigationTimingAllowCheck origin [response "https://b.test", response "*"] `shouldBe` False
+  TAO.navigationTimingAllowCheck origin [empty, response ""] `shouldBe` False
 
 
 taoGen :: Gen TAO.TimingAllowOrigin
@@ -425,27 +483,108 @@ prop_tao_roundtrip = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+checkedTimingOrigins :: Spec
+checkedTimingOrigins = it "checks authored Timing-Allow-Origin members without changing their spelling" $ do
+  let fields = headerMapFromList [("Timing-Allow-Origin", "https://old.test"), ("Timing-Allow-Origin", "null")]
+      value item = TAO.TimingAllowOrigin (TAO.TimingAllowOriginOrigin "null" :| [item])
+  mapM_ (\name -> do
+    let invalid = value (TAO.TimingAllowOriginOrigin name)
+    renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+    setHeader invalid fields `shouldBe` fields)
+    ["", "*", " https://edge.test", "https://edge.test/path", "https://a,b.test", "https://a\"b.test", "https://[:::]", "https://host:65536"]
+  renderHeaderLines defaultHeaderSettings (value (TAO.TimingAllowOriginOrigin "https://edge.test:00080"))
+    `shouldBe` Just ("null, https://edge.test:00080" :| [])
+
+
+checkedServerTimingWrites :: Spec
+checkedServerTimingWrites = it "validates authored Server-Timing names and quoted values before writing" $ do
+  let previous = headerMapFromList [("Server-Timing", "old;dur=1")]
+      value metric = STm.ServerTiming [STm.ServerTimingMetric "db" [], metric]
+      bad =
+        [ STm.ServerTimingMetric "bad metric" []
+        , STm.ServerTimingMetric "cache" [STm.ServerTimingParam "" "value"]
+        , STm.ServerTimingMetric "cache" [STm.ServerTimingParam "desc" "a\DEL"]
+        ]
+  mapM_ (\metric -> do
+    renderHeaderLines defaultHeaderSettings (value metric) `shouldBe` Nothing
+    setHeader (value metric) previous `shouldBe` previous) bad
+  let valid = value (STm.ServerTimingMetric "cache" [STm.ServerTimingParam "desc" "café\tread"])
+  renderHeaderLines defaultHeaderSettings valid `shouldBe` Just ("db, cache;desc=\"caf\xe9\tread\"" :| [])
+
+
+checkedTraceparentWrites :: Spec
+checkedTraceparentWrites = it "rejects malformed identifiers, reserved versions and invalid authored extensions" $ do
+  let traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+      parentID = "00f067aa0ba902b7"
+      previous = headerMapFromList [("traceparent", "00" <> traceparentIds <> "01")]
+      invalid =
+        [ TP.Traceparent 255 traceID parentID 0
+        , TP.Traceparent 0 "4Bf92f3577b34da6a3ce929d0e0e4736" parentID 0
+        , TP.Traceparent 0 traceID "00f067Aa0ba902b7" 0
+        , TP.Traceparent 0 traceID "0000000000000000" 0
+        , TP.Traceparent 0 "00000000000000000000000000000000" parentID 0
+        , TP.Traceparent 1 "a" parentID 0
+        , TP.TraceparentWithExtension 0 traceID parentID 0 ""
+        ] ++ map (TP.TraceparentWithExtension 1 traceID parentID 0) ["a\DEL", "a\NULb", "a\r\nb", "ends-in-space ", "ends-in-tab\t"]
+  mapM_ (\value -> do
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value previous `shouldBe` previous) invalid
+  let base = "fe" <> traceparentIds <> "ff-"
+  renderHeaderLines defaultHeaderSettings (TP.TraceparentWithExtension 254 traceID parentID 255 "")
+    `shouldBe` Just (base :| [])
+  renderHeaderLines defaultHeaderSettings (TP.TraceparentWithExtension 254 traceID parentID 255 " \t\xff/a")
+    `shouldBe` Just ((base <> " \t\xff/a") :| [])
+
+
+checkedTracestateWrites :: Spec
+checkedTracestateWrites = it "checks authored members, exact key bounds and list uniqueness" $ do
+  let first = TSt.TracestateMember "good" "first"
+      measure n c = ST.fromString (replicate n c)
+      previous = headerMapFromList [("tracestate", "existing=one"), ("tracestate", "previous=two")]
+      value rest = TSt.Tracestate (first :| rest)
+      invalidNames = ["", "No", "1without", "tenant@1system", "tenant@", "@system", "tenant@sys@more", "space here",
+                      measure 257 'a', measure 242 '1' <> "@a", "a@" <> measure 15 'a']
+      invalidValues = ["", " ", "trailing ", "with\ttab", "with,comma", "with=equals", "é", measure 257 'a']
+      invalidMembers = map (`TSt.TracestateMember` "valid") invalidNames ++ map (TSt.TracestateMember "valid") invalidValues
+      many = map (\i -> TSt.TracestateMember (ST.fromString ("k" ++ show i)) "v") [1..32 :: Int]
+      invalid = map (value . pure) invalidMembers ++ [value [first], value (take 10 many ++ [first]), value many]
+  mapM_ (\candidate -> do
+    renderHeaderLines defaultHeaderSettings candidate `shouldBe` Nothing
+    setHeader candidate previous `shouldBe` previous) invalid
+  let accepted = value (take 31 many)
+      boundary = value [TSt.TracestateMember (measure 241 '1' <> "@" <> measure 14 'a') (" " <> measure 255 'v')]
+  lookupHeader @TSt.Tracestate (setHeader accepted previous) `shouldBe` Right (Just accepted)
+  lookupHeader @TSt.Tracestate (setHeader boundary previous) `shouldBe` Right (Just boundary)
+  renderHeaderLines defaultHeaderSettings TSt.TracestateEmpty `shouldBe` Just ("" :| [])
+
+
 tests :: Spec
 tests =
   describe "Tracing" $
     sequence_
-      [ unit_tp_parse
+      [ checkedTimingOrigins
+      , unit_tp_parse
       , unit_tp_render
       , unit_tp_field
       , unit_tp_future
+      , checkedTraceparentWrites
       , it "traceparent round-trip" prop_tp_roundtrip
       , unit_ts_parse
       , unit_ts_render
       , unit_ts_field
       , unit_ts_limits
+      , checkedTracestateWrites
       , it "tracestate round-trip" prop_ts_roundtrip
       , unit_st_parse
       , unit_st_render
       , unit_st_field_lines
+      , checkedServerTimingWrites
       , it "server-timing round-trip" prop_st_roundtrip
       , unit_tao_wildcard
       , unit_tao_list
       , unit_tao_render
       , unit_tao_field_lines
+      , unit_tao_fetch_members
+      , unit_tao_response_checks
       , it "timing-allow-origin round-trip" prop_tao_roundtrip
       ]

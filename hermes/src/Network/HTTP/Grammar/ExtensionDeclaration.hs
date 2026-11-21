@@ -12,6 +12,7 @@ module Network.HTTP.Grammar.ExtensionDeclaration (
   rawDeclarations,
   declarationsText,
   declarationsLines,
+  checkedDeclarationsLines,
   decodeDeclarations,
   declarationsEntries,
   declarationsFromEntries,
@@ -90,6 +91,10 @@ declarationsText = R.legacyText
 
 declarationsLines :: ExtensionDeclarations -> NonEmpty ByteString
 declarationsLines = R.fieldLines
+
+
+checkedDeclarationsLines :: String -> ExtensionDeclarations -> Maybe (NonEmpty ByteString)
+checkedDeclarationsLines name = R.checkedFieldLines name (httpList extensionDeclarationParser)
 
 
 decodeDeclarations :: String -> NonEmpty ByteString -> Either String ExtensionDeclarations

@@ -16,7 +16,7 @@ module Network.HTTP.Headers.IfModifiedSince (
 
 import Data.Time.Clock (UTCTime)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate, renderDateBytesChecked)
 import Network.HTTP.Headers.HeaderFieldName (hIfModifiedSince)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -36,6 +36,9 @@ instance KnownHeader IfModifiedSince where
 
 
   renderToHeaders _ = M.toStrictByteString . renderIfModifiedSince
+
+
+  renderToHeadersChecked _ = renderDateBytesChecked . ifModifiedSince
 
 
   headerName _ = hIfModifiedSince

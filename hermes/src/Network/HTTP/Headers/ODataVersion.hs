@@ -27,6 +27,7 @@ module Network.HTTP.Headers.ODataVersion (
 ) where
 
 import Data.List.NonEmpty (NonEmpty (..))
+import Network.HTTP.Grammar.Rendering (encodeDecimalVersion)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hODataVersion)
 import qualified Network.HTTP.Headers.Mason as M
@@ -55,6 +56,14 @@ instance KnownHeader ODataVersion where
   renderToHeaders _ (ODataVersion 4 0) = "4.0"
   renderToHeaders _ (ODataVersion 4 1) = "4.01"
   renderToHeaders _ value = M.toStrictByteString (renderODataVersion value)
+
+
+  renderToHeadersChecked _ (ODataVersion 4 0) = Just "4.0"
+  renderToHeadersChecked _ (ODataVersion 4 1) = Just "4.01"
+  renderToHeadersChecked _ (ODataVersion 4 minor)
+    | minor <= 9 = Just (encodeDecimalVersion 1 4 minor)
+  renderToHeadersChecked _ _ = Nothing
+  {-# INLINE renderToHeadersChecked #-}
 
 
   headerName _ = hODataVersion

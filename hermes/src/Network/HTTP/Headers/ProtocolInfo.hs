@@ -69,6 +69,9 @@ instance KnownHeader ProtocolInfo where
   renderToHeaders _ (ProtocolInfoList entries) = NE.toList (R.fieldLines entries)
 
 
+  renderToHeadersChecked _ (ProtocolInfoList entries) = NE.toList <$> R.checkedFieldLines "Protocol-Info" entriesParser entries
+
+
   headerName _ = hProtocolInfo
 
 

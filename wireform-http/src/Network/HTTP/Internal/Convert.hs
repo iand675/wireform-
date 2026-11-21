@@ -264,10 +264,6 @@ toHttp1Response r =
 block.  'Network.HTTP1.Connection' already reads them and parks
 them on an 'MVar'; we surface that as 'responseTrailers'.
 
-Note: this is the /client-receive/ side. The 'Network.HTTP1.Types'
-'Response' record does not yet carry trailers (the H1 encoder
-doesn't emit them), so server-emitted H1 trailers still need
-wiring through the 'wireform-http1' encoder.
 -}
 fromHttp1Response :: H1.Response -> Response
 fromHttp1Response r =
@@ -342,23 +338,21 @@ fromHttp2Request r =
     }
 
 
--- | Adapt the unified response, retaining the trailer action for
--- evaluation at the end of a streaming body.
-toHttp2Response :: Response -> IO H2S.Response
-toHttp2Response r = case responseBody r of
-  U.BodyEmpty -> makeResponse H2S.ResponseBodyEmpty <$> produceTrailers
-  U.BodyBytes bs -> makeResponse (H2S.ResponseBodyBS bs) <$> produceTrailers
-  U.BodyStream produce ->
-    pure (makeResponse (H2S.ResponseBodyStreamWithTrailers produce produceTrailers) [])
+-- | Adapt the unified response, retaining the trailer action for the
+-- response writer to evaluate after sending the body.
+toHttp2Response :: Response -> H2S.Response
+toHttp2Response r =
+  H2S.Response
+    { H2S.responseStatus = fromIntegral (U.statusCode (responseStatus r))
+    , H2S.responseHeaders = toHttp2Headers (responseHeaders r)
+    , H2S.responseBody = case responseBody r of
+        U.BodyEmpty -> H2S.ResponseBodyEmptyWithTrailers produceTrailers
+        U.BodyBytes bs -> H2S.ResponseBodyBSWithTrailers bs produceTrailers
+        U.BodyStream produce -> H2S.ResponseBodyStreamWithTrailers produce produceTrailers
+    , H2S.responseTrailers = []
+    }
   where
     produceTrailers = toHttp2Headers <$> responseTrailers r
-    makeResponse body trailers =
-      H2S.Response
-        { H2S.responseStatus = fromIntegral (U.statusCode (responseStatus r))
-        , H2S.responseHeaders = toHttp2Headers (responseHeaders r)
-        , H2S.responseBody = body
-        , H2S.responseTrailers = trailers
-        }
 
 
 fromHttp2Response :: H2S.Response -> Response
@@ -372,8 +366,12 @@ fromHttp2Response r =
         H2S.ResponseBodyBS bs -> U.BodyBytes bs
         H2S.ResponseBodyStream p -> U.BodyStream p
         H2S.ResponseBodyStreamWithTrailers p _ -> U.BodyStream p
+        H2S.ResponseBodyEmptyWithTrailers _ -> U.BodyEmpty
+        H2S.ResponseBodyBSWithTrailers bs _ -> U.BodyBytes bs
     , responseTrailers = fromHttp2Headers <$> case H2S.responseBody r of
         H2S.ResponseBodyStreamWithTrailers _ produce -> (H2S.responseTrailers r <>) <$> produce
+        H2S.ResponseBodyEmptyWithTrailers produce -> (H2S.responseTrailers r <>) <$> produce
+        H2S.ResponseBodyBSWithTrailers _ produce -> (H2S.responseTrailers r <>) <$> produce
         _ -> pure (H2S.responseTrailers r)
     , responseH2StreamId = 0
     , responseCancel = pure ()

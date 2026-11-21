@@ -57,7 +57,7 @@ import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Data.Word (Word8)
 import Foreign.Storable (peekByteOff, pokeByteOff)
-import GHC.Exts (Char (C#), Int (I#), Word (W#), eqAddr#, eqWord64#, gtWord#, indexCharOffAddr#, indexWord8OffAddr#, indexWord8OffAddrAsWord64#, isTrue#, leWord64#, ltWord64#, minusAddr#, minusWord#, plusAddr#, plusWord64#, timesWord64#, word8ToWord#, wordToWord64#, (<=#))
+import GHC.Exts (Char (C#), Int (I#), Word (W#), eqAddr#, eqWord64#, gtWord#, indexCharOffAddr#, indexWord8ArrayAsWord64#, indexWord8OffAddr#, indexWord8OffAddrAsWord64#, isTrue#, leWord64#, ltWord64#, minusAddr#, minusWord#, plusAddr#, plusWord64#, timesWord64#, word8ToWord#, wordToWord64#, (<=#))
 import GHC.IO (IO (..))
 import GHC.Ptr (Ptr (..))
 import GHC.Word (Word64 (W64#))
@@ -211,18 +211,32 @@ This range fits in Int on both 32-bit and 64-bit hosts. The fallback
 handles other lengths and any whitespace allowed by the field grammar.
 -}
 withShortDecimal :: ByteString -> (Int -> a) -> a -> a
-withShortDecimal wire success fallback
-  | let size = BS.length wire
-  , size > 0 && size <= 9
-  , let result = BS.foldl' addDigit 0 wire
+withShortDecimal wire = withDecimalResult (BS.length wire) (BS.foldl' addShortDecimalDigit 0 wire)
+{-# INLINE withShortDecimal #-}
+
+
+-- | Decode bare decimal digits directly from compact text.
+withShortTextDecimal :: ST.ShortText -> (Int -> a) -> a -> a
+withShortTextDecimal text = withDecimalResult (SBS.length bytes) (SBS.foldl' addShortDecimalDigit 0 bytes)
+  where
+    bytes = ST.toShortByteString text
+{-# INLINE withShortTextDecimal #-}
+
+
+withDecimalResult :: Int -> Int -> (Int -> a) -> a -> a
+withDecimalResult size result success fallback
+  | size > 0 && size <= 9
   , result >= 0 =
       success result
   | otherwise = fallback
-  where
-    addDigit n byte
-      | let digit = byte - 48, digit <= 9, n >= 0 = n * 10 + fromIntegral digit
-      | otherwise = -1
-{-# INLINE withShortDecimal #-}
+{-# INLINE withDecimalResult #-}
+
+
+addShortDecimalDigit :: Int -> Word8 -> Int
+addShortDecimalDigit n byte
+  | let digit = byte - 48, digit <= 9, n >= 0 = n * 10 + fromIntegral digit
+  | otherwise = -1
+{-# INLINE addShortDecimalDigit #-}
 
 
 shortASCIIFromParser_ :: ParserT st e a -> ParserT st e ST.ShortText
@@ -243,10 +257,47 @@ shortASCIIFromParser_ (Parser p) = Parser $ \env end start state ->
 cookieValueBytes :: ParserT st e ()
 cookieValueBytes = branch $(char '"') (octets *> $(char '"')) octets
   where
-    octets = skipMany (skipSatisfyAscii cookieOctet)
-    cookieOctet c =
-      '!' <= c && c <= '~' && c /= '"' && c /= ',' && c /= ';' && c /= '\\'
+    octets = skipMany (skipSatisfyAscii isCookieOctet)
 {-# INLINE cookieValueBytes #-}
+
+
+-- | Check a complete compact cookie-value, retaining any literal quotes.
+isCookieValueText :: ST.ShortText -> Bool
+isCookieValueText value = case ST.toShortByteString value of
+  bytes@(SBS.SBS array) ->
+    let size = SBS.length bytes
+        at = SBS.unsafeIndex bytes
+        scan start end
+          | end - start >= 8 = packed start
+          | otherwise = short start
+          where
+            lastWord = end - 8
+            packed i
+              | i >= lastWord = wordAt lastWord
+              | otherwise = wordAt i && packed (i + 8)
+            wordAt (I# i) = cookieOctetWord (W64# (indexWord8ArrayAsWord64# array i))
+            short !i = i == end || (isCookieOctet (BSI.w2c (at i)) && short (i + 1))
+    in size == 0 || if at 0 == 34
+         then size >= 2 && at (size - 1) == 34 && scan 1 (size - 1)
+         else scan 0 size
+{-# INLINE isCookieValueText #-}
+
+
+isCookieOctet :: Char -> Bool
+isCookieOctet c = '!' <= c && c <= '~' && c /= '"' && c /= ',' && c /= ';' && c /= '\\'
+{-# INLINE isCookieOctet #-}
+
+
+-- ASCII range checks and delimiter exclusions in eight independent lanes.
+cookieOctetWord :: Word64 -> Bool
+cookieOctetWord bytes = coversAsciiLanes bytes
+  (((low .|. asciiHighBits) - 0x2121212121212121) .&. (0xfefefefefefefefe - low)
+    .&. differs 0x2222222222222222 .&. differs 0x2c2c2c2c2c2c2c2c
+    .&. differs 0x3b3b3b3b3b3b3b3b .&. differs 0x5c5c5c5c5c5c5c5c)
+  where
+    low = bytes .&. 0x7f7f7f7f7f7f7f7f
+    differs delimiter = (low `xor` delimiter) + 0x7f7f7f7f7f7f7f7f
+{-# INLINE cookieOctetWord #-}
 
 
 tokenCharSet :: CharSet
@@ -334,14 +385,39 @@ asciiAlnumWord bytes = coversAsciiLanes bytes (asciiAlnumMask (bytes .&. 0x7f7f7
 
 
 asciiBase64UrlWord :: Word64 -> Bool
-asciiBase64UrlWord bytes = coversAsciiLanes bytes (asciiAlnumMask low .|. equalMask dash .|. equalMask underscore)
+asciiBase64UrlWord = asciiBase64WordWith 0x2d2d2d2d2d2d2d2d 0x5f5f5f5f5f5f5f5f
+{-# INLINE asciiBase64UrlWord #-}
+
+
+asciiBase64WordWith :: Word64 -> Word64 -> Word64 -> Bool
+asciiBase64WordWith first second bytes = coversAsciiLanes bytes (asciiAlnumMask low .|. equalMask first .|. equalMask second)
   where
     low = bytes .&. 0x7f7f7f7f7f7f7f7f
-    dash = 0x2d2d2d2d2d2d2d2d
-    underscore = 0x5f5f5f5f5f5f5f5f
     -- Zero difference leaves the lane's high bit clear after adding 127.
     equalMask byte = complement ((low `xor` byte) + 0x7f7f7f7f7f7f7f7f)
-{-# INLINE asciiBase64UrlWord #-}
+{-# INLINE asciiBase64WordWith #-}
+
+
+-- | Check the standard Base64 alphabet in the prefix before any padding.
+validBase64Prefix :: SBS.ShortByteString -> Int -> Bool
+validBase64Prefix bytes@(SBS.SBS array) digits
+  | digits < 0 || digits > SBS.length bytes = False
+  | digits < 8 = shortPrefix 0
+  | otherwise = scan 0
+  where
+    shortPrefix offset
+      | offset == digits = True
+      | otherwise =
+          let byte = SBS.unsafeIndex bytes offset
+              c = BSI.w2c byte
+          in (isLatinLetter c || isDigit c || byte == 43 || byte == 47) && shortPrefix (offset + 1)
+    lastWord = digits - 8
+    scan offset
+      | offset >= lastWord = check lastWord
+      | otherwise = check offset && scan (offset + 8)
+    check (I# offset) =
+      asciiBase64WordWith 0x2b2b2b2b2b2b2b2b 0x2f2f2f2f2f2f2f2f (W64# (indexWord8ArrayAsWord64# array offset))
+{-# INLINE validBase64Prefix #-}
 
 
 coversAsciiLanes :: Word64 -> Word64 -> Bool
@@ -402,6 +478,28 @@ isTokenChar :: Char -> Bool
 isTokenChar c = case tokenAsciiSet of
   AsciiSet low high -> asciiMember low high c
 {-# INLINE isTokenChar #-}
+
+
+-- | Check a nonempty compact token before emitting it as an HTTP field value.
+isHttpTokenText :: ST.ShortText -> Bool
+isHttpTokenText = isHttpTokenBytes . ST.toShortByteString
+{-# INLINE isHttpTokenText #-}
+
+
+-- | Check a nonempty token in compact byte storage.
+isHttpTokenBytes :: SBS.ShortByteString -> Bool
+isHttpTokenBytes input = case input of
+  bytes@(SBS.SBS array) ->
+    let size = SBS.length bytes
+        -- Alphanumeric bytes, dash, and underscore cover common tokens.
+        -- Use the complete HTTP token alphabet for the remaining bytes.
+        scan offset@(I# index)
+          | offset <= size - 8
+          , asciiBase64UrlWord (W64# (indexWord8ArrayAsWord64# array index)) =
+              scan (offset + 8)
+          | otherwise = scanCompactBytes (isTokenChar . BSI.w2c) bytes offset
+    in size > 0 && scan 0
+{-# INLINE isHttpTokenBytes #-}
 
 
 fieldName :: ParserT st e ST.ShortText
@@ -566,6 +664,91 @@ scanOpaqueBody close nested = Parser $ \_ end start st ->
 isOpaqueByte :: Word -> Bool
 isOpaqueByte byte = byte == 9 || (byte >= 32 && byte /= 127)
 {-# INLINE isOpaqueByte #-}
+
+
+-- | Check a decoded quoted body carried as compact text.
+isHttpQuotedText :: ST.ShortText -> Bool
+isHttpQuotedText value =
+  scanCompactBytes (isOpaqueByte . fromIntegral) (ST.toShortByteString value) 0
+{-# INLINE isHttpQuotedText #-}
+
+
+-- | Check text whose code points are emitted as individual HTTP field octets.
+isHttpLatin1Text :: ST.ShortText -> Bool
+isHttpLatin1Text value = go 0
+  where
+    bytes = ST.toShortByteString value
+    end = SBS.length bytes
+    go offset
+      | offset >= end = True
+      | byte < 128 = isOpaqueByte (fromIntegral byte) && go (offset + 1)
+      -- ShortText guarantees valid UTF-8. These are the two lead bytes for Latin-1.
+      | otherwise = (byte == 0xc2 || byte == 0xc3) && go (offset + 2)
+      where
+        byte = SBS.unsafeIndex bytes offset
+{-# INLINE isHttpLatin1Text #-}
+
+
+isDecimalText :: ST.ShortText -> Bool
+isDecimalText text = not (SBS.null bytes) && scanCompactBytes isDecimalByte bytes 0
+  where
+    bytes = ST.toShortByteString text
+{-# INLINE isDecimalText #-}
+
+
+-- | A nonempty decimal, a delimiter, and a nonempty decimal.
+isDecimalPairText :: Word8 -> ST.ShortText -> Bool
+isDecimalPairText delimiter text = end > 2 && isDecimalByte (SBS.unsafeIndex bytes 0) && first 1
+  where
+    bytes = ST.toShortByteString text
+    end = SBS.length bytes
+    first offset
+      | offset >= end - 1 = False
+      | byte == delimiter = scanCompactBytes isDecimalByte bytes (offset + 1)
+      | otherwise = isDecimalByte byte && first (offset + 1)
+      where
+        byte = SBS.unsafeIndex bytes offset
+{-# INLINE isDecimalPairText #-}
+
+
+isDecimalByte :: Word8 -> Bool
+isDecimalByte byte = byte >= 48 && byte <= 57
+{-# INLINE isDecimalByte #-}
+
+
+-- | Check the complete wire body between two HTTP quoting delimiters.
+isHttpQuotedWireBody :: SBS.ShortByteString -> Bool
+isHttpQuotedWireBody bytes = validQuotedBody bytes (SBS.length bytes) 0
+{-# INLINE isHttpQuotedWireBody #-}
+
+
+-- | Check the complete spelling of a token or a quoted string. Non-ASCII
+-- text becomes obs-text when rendered, including after a quoting backslash.
+isHttpWordValue :: ST.ShortText -> Bool
+isHttpWordValue value
+  | size > 0 && SBS.unsafeIndex bytes 0 == 34 =
+      end > 0 && SBS.unsafeIndex bytes end == 34 && validQuotedBody bytes end 1
+  | otherwise = isHttpTokenBytes bytes
+  where
+    bytes = ST.toShortByteString value
+    size = SBS.length bytes
+    end = size - 1
+{-# INLINE isHttpWordValue #-}
+
+
+validQuotedBody :: SBS.ShortByteString -> Int -> Int -> Bool
+validQuotedBody bytes end = quoted
+  where
+    allowed = isOpaqueByte . fromIntegral
+    quoted offset
+      | offset == end = True
+      | otherwise = case SBS.unsafeIndex bytes offset of
+          34 -> False
+          92 -> next < end && allowed (SBS.unsafeIndex bytes next) && quoted (next + 1)
+          byte -> allowed byte && quoted next
+      where
+        next = offset + 1
+{-# INLINE validQuotedBody #-}
 
 
 unquotePairs :: ByteString -> ByteString
@@ -861,9 +1044,26 @@ rfc8941Token :: ParserT st e RFC8941Token
 rfc8941Token = RFC8941Token <$> shortASCIIFromParser_ scanToken
   where
     scanToken = do
-      skipSatisfyAscii (\c -> c == '*' || isLatinLetter c)
+      skipSatisfyAscii structuredTokenStart
       optional_ (asciiAlnumSetBytes structuredTokenTail)
 {-# INLINE rfc8941Token #-}
+
+
+structuredTokenStart :: Char -> Bool
+structuredTokenStart c = c == '*' || isLatinLetter c
+{-# INLINE structuredTokenStart #-}
+
+
+-- | Check a compact token payload before serializing it.
+isStructuredFieldToken :: RFC8941Token -> Bool
+isStructuredFieldToken (RFC8941Token token) =
+  not (SBS.null bytes)
+    && structuredTokenStart (BSI.w2c (SBS.unsafeIndex bytes 0))
+    && case structuredTokenTail of
+      AsciiSet low high -> scanCompactBytes (asciiMember low high . BSI.w2c) bytes 1
+  where
+    bytes = ST.toShortByteString token
+{-# INLINE isStructuredFieldToken #-}
 
 
 structuredTokenTail :: AsciiSet
@@ -958,11 +1158,38 @@ structuredFieldKey = shortASCIIFromParser_ scanStructuredFieldKey
 
 
 scanStructuredFieldKey :: ParserT st e ()
-scanStructuredFieldKey = skipSatisfyAscii firstKeyChar *> skipMany (skipSatisfyAscii keyChar)
-  where
-    firstKeyChar c = ('a' <= c && c <= 'z') || c == '*'
-    keyChar c = firstKeyChar c || isDigit c || c == '_' || c == '-' || c == '.'
+scanStructuredFieldKey = skipSatisfyAscii structuredFieldKeyStart *> skipMany (skipSatisfyAscii structuredFieldKeyChar)
 {-# INLINE scanStructuredFieldKey #-}
+
+
+structuredFieldKeyStart :: Char -> Bool
+structuredFieldKeyStart c = ('a' <= c && c <= 'z') || c == '*'
+{-# INLINE structuredFieldKeyStart #-}
+
+
+structuredFieldKeyChar :: Char -> Bool
+structuredFieldKeyChar c = structuredFieldKeyStart c || isDigit c || c == '_' || c == '-' || c == '.'
+{-# INLINE structuredFieldKeyChar #-}
+
+
+-- | Check an authored key against the same ASCII grammar as the parser.
+isStructuredFieldKey :: ST.ShortText -> Bool
+isStructuredFieldKey key =
+  not (SBS.null bytes)
+    && structuredFieldKeyStart (BSI.w2c (SBS.unsafeIndex bytes 0))
+    && scanCompactBytes (structuredFieldKeyChar . BSI.w2c) bytes 1
+  where
+    bytes = ST.toShortByteString key
+{-# INLINE isStructuredFieldKey #-}
+
+
+-- | Check the compact bytes from a nonnegative offset to the end.
+scanCompactBytes :: (Word8 -> Bool) -> SBS.ShortByteString -> Int -> Bool
+scanCompactBytes accepts bytes start = start >= 0 && go start
+  where
+    size = SBS.length bytes
+    go offset = offset >= size || (accepts (SBS.unsafeIndex bytes offset) && go (offset + 1))
+{-# INLINE scanCompactBytes #-}
 
 
 knownRfc8941Parameter :: Q Exp -> ItemValueType t -> Q Exp
@@ -1015,6 +1242,13 @@ structuredFieldString =
     <$> ($(char '"') *> withByteString scanStructuredString decodeOpaqueBody)
 
 
+-- | Check a decoded string payload. The renderer escapes quotes and backslashes.
+isStructuredFieldString :: RFC8941String -> Bool
+isStructuredFieldString (RFC8941String value) =
+  scanCompactBytes (\byte -> byte >= 32 && byte <= 126) (ST.toShortByteString value) 0
+{-# INLINE isStructuredFieldString #-}
+
+
 scanStructuredString :: ParserT st e Bool
 scanStructuredString = Parser $ \_ end start st ->
   let step cur !escaped
@@ -1061,6 +1295,23 @@ structuredFieldBareItem =
     , DateValue <$> ($(char '@') *> rfc8941Integer)
     , DisplayString <$> structuredFieldDisplayString
     ]
+
+
+-- | Check the constraints on a bare item's wire representation.
+isStructuredFieldBareItem :: ItemValue -> Bool
+isStructuredFieldBareItem = \case
+  Integer value -> validInteger value
+  Decimal (MkFixed thousandths) ->
+    thousandths >= -999_999_999_999_999 && thousandths <= 999_999_999_999_999
+  String value -> isStructuredFieldString value
+  Token value -> isStructuredFieldToken value
+  DateValue value -> validInteger value
+  Binary _ -> True
+  Boolean _ -> True
+  DisplayString _ -> True
+  where
+    validInteger value = value >= -999_999_999_999_999 && value <= 999_999_999_999_999
+{-# INLINE isStructuredFieldBareItem #-}
 
 
 structuredFieldSpaces :: ParserT st e ()

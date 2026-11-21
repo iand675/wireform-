@@ -31,6 +31,7 @@ import Data.Text.Encoding qualified as TE
 import GHC.Generics (Generic)
 import Network.HTTP.Client
 import Network.HTTP.Client.Compression qualified as Compression
+import Network.HTTP.Client.Negotiation qualified as Negotiation
 import Network.HTTP.Client.Request (Request (headers))
 import Network.HTTP.Client.Request qualified as WReq
 import Network.HTTP.Client.Response (RawResponse (headers))
@@ -99,6 +100,17 @@ mediaTypeTests =
               mtSubType m `shouldBe` "json"
               lookup "charset" (mtParameters m) `shouldBe` Just "utf-8"
             Left err -> expectationFailure err
+      , it "projects media names within the field's byte bounds" $ do
+          let wire = " \tX-New/Vnd.Example+JSON\t "
+              field = BS.take (BS.length wire) (BS.drop 4 ("bad/" <> wire <> "/bad"))
+              expected = MediaType "x-new" "vnd.example+json" []
+          parseMediaType field `shouldBe` Right expected
+          contentTypeOf [(H.hContentType, field)] `shouldBe` expected
+      , it "validates the entire field and retains its parse diagnostics" $ do
+          map (isLeft . parseMediaType) ["text /plain", "text/plain, image/png", "text/pl*ain", "text/plain\0"]
+            `shouldBe` replicate 4 True
+          parseMediaType " \ttext/plain junk" `shouldBe` Left "trailing input after Content-Type: \" junk\""
+          parseMediaType " \ttext/" `shouldBe` Left "malformed Content-Type: \" \\ttext/\""
       , it "wildcard matches" $ do
           matches "application/json" "*/*" `shouldBe` True
           matches "application/json" "application/*" `shouldBe` True
@@ -115,8 +127,8 @@ mediaTypeTests =
             `shouldBe` replicate 2 (MediaType "application" "octet-stream" [])
       , it "round-trips quoted parameter delimiters and opaque bytes" $ do
           let opaque = BS.pack [0x80, 0xff]
-              parsed = MediaType "application" "example" [("profile", "a,b"), ("opaque", opaque)]
-              canonical = "application/example; profile=\"a,b\"; opaque=\"" <> opaque <> "\""
+              parsed = MediaType "application" "example" [("profile", "a,b"), ("opaque", opaque), ("quoted", "\"\\")]
+              canonical = "application/example; profile=\"a,b\"; opaque=\"" <> opaque <> "\"; quoted=\"\\\"\\\\\""
           parseMediaType canonical `shouldBe` Right parsed
           renderMediaType parsed `shouldBe` canonical
       , it "Accept header rendering omits q=1" $ do
@@ -125,6 +137,19 @@ mediaTypeTests =
             , ("text/plain", Quality 0.5)
             ]
             `shouldBe` "application/json, text/plain; q=0.5"
+      , it "Accept renders rounded and out-of-range qualities as valid qvalues" $ do
+          let authored = [0.0004, 0.001, 0.825, 0.99949, 0.9995, 1 / 0, -1 / 0, 0 / 0]
+              expected = [0, 0.001, 0.825, 0.999, 1, 1, 0, 0]
+              field = acceptHeaderValue (map (\q -> ("text/plain", Quality q)) authored)
+          fmap (map Negotiation.mediaWeight . Negotiation.accept) (Negotiation.parseAccept field) `shouldBe` Just expected
+      , it "normalizes authored qualities for the other negotiation fields" $ do
+          let excluded = Negotiation.mkQuality (0 / 0)
+              preferred = Negotiation.mkQuality (1 / 0)
+          Negotiation.unQuality excluded `shouldBe` 0
+          Negotiation.unQuality preferred `shouldBe` 1
+          Negotiation.acceptLanguageValue [("en-GB", excluded), ("en", preferred)] `shouldBe` "en-GB;q=0, en"
+          Negotiation.acceptCharsetValue [("utf-8", preferred), ("*", excluded)] `shouldBe` "utf-8, *;q=0"
+          Negotiation.acceptEncodingValue [(Just Coding.GZip, preferred), (Nothing, excluded)] `shouldBe` "gzip, *;q=0"
       ]
 
 
@@ -190,6 +215,12 @@ sendTests =
           assertLog log_ (requestCount 1)
           assertLog log_ (anyRequest (hasMethod M.mGet <> hasURI "/users/1"))
           assertLog log_ (anyRequest (hasURIPath "/users/1"))
+      , it "sends the correct Accept preference at the upper rounding boundary" $ do
+          (transport, log_) <- withRequestLog (stubStatus S.status200)
+          _ <-
+            sendRawIO transport (get (compileTemplate "/x"))
+              [("application/json", Quality 0.9995), ("text/plain", Quality 0.8)]
+          assertLog log_ (anyRequest (hasHeaderEq H.hAccept "application/json; q=1, text/plain; q=0.8"))
       , it "decode failure throws DecodeFailure" $ do
           let transport = stub S.status200 "not json at all"
           result <-
@@ -591,6 +622,63 @@ decoderAltTests =
           Response {responseBody = t} <-
             sendIO transport (get (compileTemplate "/x")) decoder
           t `shouldBe` "plain bytes"
+      , it "routes a prepared bare decoder by both names and ignores supplied parameters" $ do
+          let offers = [("application/json", minQuality)]
+              primary = ResponseDecoder offers (\_ _ _ -> Right ("primary" :: Text))
+              fallback = ResponseDecoder [("*/*", maxQuality)] (\_ _ _ -> Right "fallback")
+              combined = primary <!> fallback
+              choose actual = either (const "decode error") id (decodeBody combined S.status200 actual "")
+          acceptable combined `shouldBe` (offers <> acceptable fallback)
+          forM_
+            [ ("Application/JSON; charset=utf-8; profile=\"a,b\"", "primary")
+            , ("application/xml", "fallback")
+            , ("text/json", "fallback")
+            ]
+            (\(actual, expected) -> choose actual `shouldBe` expected)
+      , it "dispatches between profiles of the same Content-Type" $ do
+          let profiled range result = ResponseDecoder [(range, maxQuality)] (\_ _ _ -> Right (result :: Text))
+              v1 = profiled "application/example; profile=\"urn:Example,v1\"" "v1"
+              v2 = profiled "application/example; profile=\"urn:Example,v2\"; charset=utf-8" "v2"
+              fallback = profiled "*/*" "fallback"
+              req = get (compileTemplate "/x")
+              cases =
+                [ ("application/example; profile=\"urn:Example,v1\"", "v1")
+                , ("Application/Example; PROFILE=\"urn:Example,v2\"; CHARSET=\"UTF-8\"; version=2", "v2")
+                , ("application/example; profile=\"urn:example,v1\"", "fallback")
+                , ("application/example; profile=\"urn:Example,v2\"; charset=latin1", "fallback")
+                , ("application/example", "fallback")
+                ]
+          forM_ cases $ \(field, expected) -> do
+            let transport = stubBytes S.status200 [(H.hContentType, field)] "body"
+            Response {responseBody = result} <- sendIO transport req ((v1 <!> v2) <!> fallback)
+            result `shouldBe` expected
+      , it "keeps charset-less JSON and plain text eligible for their UTF-8 decoders" $ do
+          let fallback = ResponseDecoder [("*/*", maxQuality)] (\_ _ _ -> Right ("fallback" :: Text))
+              req = get (compileTemplate "/x")
+              examples =
+                [ ("application/json", as @JSON @Text, "\"json\"", "json")
+                , ("text/plain", as @PlainText @Text, "plain", "plain")
+                , ("text/plain; charset=latin1", as @PlainText @Text, "plain", "fallback")
+                ]
+          forM_ examples $ \(field, decoder, body, expected) -> do
+            let transport = stubBytes S.status200 [(H.hContentType, field)] body
+            Response {responseBody = result} <- sendIO transport req (decoder <!> fallback)
+            result `shouldBe` expected
+      , it "compares parameter slices through each short comparison width" $ do
+          let slice prefix suffix value = BS.take (BS.length value) (BS.drop (BS.length prefix) (prefix <> value <> suffix))
+              media value = MediaType "application" "example" [("profile", value)]
+              choose authored received =
+                let primary = ResponseDecoder [(media authored, maxQuality)] (\_ _ _ -> Right True)
+                    fallback = ResponseDecoder [] (\_ _ _ -> Right False)
+                in either (const False) id (decodeBody (primary <!> fallback) S.status200 (media received) "")
+          forM_ [0 .. 32] $ \width -> do
+            let value = BS.take width (BS.pack [128 .. 159])
+                required = slice "p" "q" value
+                supplied = slice "rs" "tu" value
+            choose required supplied `shouldBe` True
+            forM_ [0 .. width - 1] $ \offset -> do
+              let changed = BS.take offset supplied <> "X" <> BS.drop (offset + 1) supplied
+              choose required changed `shouldBe` False
       ]
 
 

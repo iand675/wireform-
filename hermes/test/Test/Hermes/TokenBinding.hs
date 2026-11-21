@@ -11,7 +11,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import Network.HTTP.Headers.HeaderFieldName (hIncludeReferredTokenBindingID, hOSCORE, hSecTokenBinding)
 import qualified Network.HTTP.Headers.IncludeReferredTokenBindingID as IR
 import qualified Network.HTTP.Headers.Mason as M
@@ -113,6 +113,14 @@ tests = describe "TokenBinding" $ do
         check wire `shouldSatisfy` isLeft
       lookupHeader @STB.SecTokenBinding (headerMapFromList [(name, bindingWire), (name, bindingWire)])
         `shouldSatisfy` isLeft
+    it "checks authored wire values before writing" $ do
+      let previous = headerMapFromList [(name, bindingWire)]
+          authored = STB.SecTokenBinding . maybe (error "invalid fixture ASCII") id . ST.fromByteString
+          padded = "\t " <> bindingWire <> " \t"
+      renderHeaderLines defaultHeaderSettings (authored padded) `shouldBe` Just (padded :| [])
+      forM_ ["AA", bindingWire <> "=", bindingWire <> "AA", BS.init bindingWire <> "B", "!" <> BS.drop 1 bindingWire] $ \wire -> do
+        renderHeaderLines defaultHeaderSettings (authored wire) `shouldBe` Nothing
+        setHeader (authored wire) previous `shouldBe` previous
     it "checks vector boundaries, key sizes and required bindings" $ do
       let provided = p256Binding
           referred = provided {STB.bindingType = STB.ReferredTokenBinding}
@@ -163,4 +171,11 @@ tests = describe "TokenBinding" $ do
       forM_ ["", "A", "AAAAA", "AB", "AAF", "+/8", "-_8=", "A\tA", "AA, AA", "AA\r\n"] $ \wire ->
         check wire `shouldSatisfy` isLeft
       lookupHeader @OSC.OSCORE (headerMapFromList [(name, "AA"), (name, "CSU")]) `shouldSatisfy` isLeft
+    it "checks authored wire values before writing" $ do
+      let previous = headerMapFromList [(name, "AA")]
+      renderHeaderLines defaultHeaderSettings (OSC.OSCORE " \tCQUl\t ") `shouldBe` Just (" \tCQUl\t " :| [])
+      forM_ ["", "A", "AB", "-_8=", "A A", "AA\r\n"] $ \text -> do
+        let invalid = OSC.OSCORE text
+        renderHeaderLines defaultHeaderSettings invalid `shouldBe` Nothing
+        setHeader invalid previous `shouldBe` previous
     it "round-trips arbitrary CoAP option octets through HeaderMap" propOSCORERoundTrip

@@ -17,6 +17,7 @@ module Network.HTTP.Headers.ContentEncoding (
 ) where
 
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.Text.Short as ST
 import qualified Data.List.NonEmpty as NE
 import Network.HTTP.ContentCoding
 import Network.HTTP.ContentNegotiation (negotiationList, parseNegotiationHeaders)
@@ -24,7 +25,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentEncoding)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (sepByCommas1)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedBytes, sepByCommas1)
 
 
 {- | A present @Content-Encoding@ field, possibly with no applied codings.
@@ -52,6 +53,16 @@ instance KnownHeader ContentEncoding where
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentEncoding
+
+
+  renderToHeadersChecked _ ContentEncodingEmpty = Just ""
+  renderToHeadersChecked _ (ContentEncoding coding)
+    | isValidContentCoding coding = Just (ST.toByteString (contentCodingText coding))
+    | otherwise = Nothing
+  renderToHeadersChecked _ (ContentEncodingChain first rest)
+    | isValidContentCoding first && all isValidContentCoding rest =
+        Just (encodeCommaSeparatedBytes (ST.toShortByteString . contentCodingText) (first :| NE.toList rest))
+    | otherwise = Nothing
 
 
   headerName _ = hContentEncoding

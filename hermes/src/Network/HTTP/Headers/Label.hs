@@ -22,8 +22,10 @@ module Network.HTTP.Headers.Label (
   renderLabel,
 ) where
 
+import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.CharSet.Posix.Ascii (alnum)
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
@@ -55,6 +57,12 @@ instance KnownHeader Label where
   renderToHeaders _ = M.toStrictByteString . renderLabel
 
 
+  renderToHeadersChecked _ (Label name) =
+    let wire = ST.toByteString name
+    in either (const Nothing) (const (Just wire)) $
+         parseSingleFieldLine "Label" labelSpelling (wire :| [])
+
+
   headerName _ = hLabel
 
 
@@ -63,9 +71,13 @@ labelParser = ows *> labelValue <* ows
 
 
 labelValue :: ParserT st String Label
-labelValue = withByteString escapedLabel $ \() bytes ->
+labelValue = Label . STU.fromByteStringUnsafe <$> labelSpelling
+
+
+labelSpelling :: ParserT st String ByteString
+labelSpelling = withByteString escapedLabel $ \() bytes ->
   if not (BS.elem 37 bytes) || maybe False validateUtf8SWAR (urlDecodeMaybe bytes)
-    then pure (Label (STU.fromByteStringUnsafe bytes))
+    then pure bytes
     else err "Invalid percent-encoded UTF-8 in Label"
 
 

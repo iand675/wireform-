@@ -10,7 +10,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.DNT as DNT
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
@@ -292,12 +292,24 @@ unit_dnt_field_lines = it "retains a valid extension suffix on either preference
   mapM_ (\suffixBytes -> DNT.dntWithExtension True suffixBytes `shouldBe` Nothing) ["\t", "\"", "\\", ",", "é"]
 
 
+checkedXXSSWrites :: Spec
+checkedXXSSWrites = it "checks authored X-XSS-Protection reporting references" $ do
+  let old = headerMapFromList [("X-XSS-Protection", "0")]
+  mapM_ (\endpoint -> do
+    let value = XX.XXSSEnabled True (Just endpoint)
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value old `shouldBe` old) ["", "report path", "/x;mode=block", "/bad%XZ"]
+  renderHeaderLines defaultHeaderSettings (XX.XXSSEnabled True (Just "../r%3B#here"))
+    `shouldBe` Just ("1; mode=block; report=../r%3B#here" :| [])
+
+
 tests :: Spec
 tests =
   describe "DefactoSecurity" $ do
     describe "X-XSS-Protection" $
       sequence_
-        [ unit_xxss_disabled
+        [ checkedXXSSWrites
+        , unit_xxss_disabled
         , unit_xxss_enabled_bare
         , unit_xxss_mode_block
         , unit_xxss_full

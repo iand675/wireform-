@@ -12,7 +12,7 @@ import Data.Time.Clock (UTCTime (..), secondsToDiffTime)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupHeaderWith, setHeader, withHeaderDateReference)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupHeaderWith, renderHeaderLines, setHeader, withHeaderDateReference)
 import qualified Network.HTTP.Headers.CacheControl as CC
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (RFC8941String (..), Result (..), runParser)
@@ -147,6 +147,26 @@ cacheControlTests = describe "Cache-Control" $ do
       , "only-if-cached=\"true\""
       , "public no-store"
       ]
+  it "validates qualified fields and extension directives before replacing any lines" $ do
+    let fields = headerMapFromList [("Cache-Control", "public"), ("Cache-Control", "max-age=60")]
+        reject directive = do
+          let value = CC.CacheControl (CC.MaxAge 10 :| [directive])
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value fields `shouldBe` fields
+    mapM_ reject
+      [ CC.Private (Just "")
+      , CC.Private (Just " , \t, ")
+      , CC.Private (Just "a:b")
+      , CC.NoCache (Just "X Access")
+      , CC.Unknown "x,public" Nothing
+      , CC.Unknown "x\xff" Nothing
+      , CC.Unknown "MAX-AGE" (Just "12")
+      , CC.Unknown "private" Nothing
+      , CC.Unknown "extension" (Just "x\DEL")
+      ]
+    let value = CC.CacheControl (CC.Private (Just " , Set-Cookie, , ") :| [CC.Unknown "max-age-hint" (Just "30")])
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Just ("private=\" , Set-Cookie, , \",max-age-hint=30" :| [])
+    lookupHeader @CC.CacheControl (setHeader value fields) `shouldBe` Right (Just value)
 
 
 -- Pragma --------------------------------------------------------------------
@@ -307,6 +327,36 @@ warningGen = W.Warning <$> Gen.nonEmpty (Range.linear 1 4) valueGen
 
 legacyFieldTests :: Spec
 legacyFieldTests = describe "legacy cache fields" $ do
+  it "checks authored Pragma names, tokens, and quoted text before replacing field lines" $ do
+    let fields = headerMapFromList [("Pragma", "no-cache"), ("Pragma", "a=b")]
+        reject directive = do
+          let value = P.Pragma (P.PragmaDirective "no-cache" Nothing :| [directive])
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value fields `shouldBe` fields
+    mapM_ reject
+      [ P.PragmaDirective "bad, name" Nothing
+      , P.PragmaDirective "x" (Just (P.PragmaToken ""))
+      , P.PragmaDirective "x" (Just (P.PragmaToken "\"ok\""))
+      , P.PragmaDirective "x" (Just (P.PragmaToken "a b"))
+      , P.PragmaDirective "x" (Just (P.PragmaQuoted (RFC8941String "a\DEL")))
+      ]
+  it "rejects authored Warning agents, text, and dates that do not fit the grammar" $ do
+    let fields = headerMapFromList [("Warning", "112 - \"stale\""), ("Warning", "199 - \"old\"")]
+        valid = W.WarningValue 112 "-" (RFC8941String "new") Nothing
+        reject entry = do
+          let value = W.Warning (valid :| [entry])
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value fields `shouldBe` fields
+    mapM_ reject
+      [ valid {W.warnAgent = "edge node"}
+      , valid {W.warnAgent = "[:::1]:80"}
+      , valid {W.warnAgent = "host:fast"}
+      , valid {W.warnAgent = "edge "}
+      , valid {W.warnText = RFC8941String "a\DEL"}
+      , valid {W.warnDate = Just (mkTime 1899 12 31 0)}
+      , valid {W.warnDate = Just (mkTime 10000 1 1 0)}
+      , valid {W.warnDate = Just (mkTime 2020 1 1 86401)}
+      ]
   it "combines Pragma directives and preserves HTTP quoted octets" $ do
     let fields = headerMapFromList . map (\wire -> ("Pragma", wire))
         readPragma = lookupHeader @P.Pragma . fields

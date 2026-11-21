@@ -14,9 +14,9 @@ import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.Grammar.PICS
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (Cardinality, HeaderRenderingResultToNonEmpty, KnownHeader, defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader, setRawHeader)
 import qualified Network.HTTP.Headers.GetProfile as GP
-import Network.HTTP.Headers.HeaderFieldName (hGetProfile, hP3P, hPICSLabel, hProfileObject, hSetProfile)
+import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName, hGetProfile, hP3P, hPICSLabel, hProfileObject, hSetProfile)
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.P3P as P3
 import qualified Network.HTTP.Headers.PICSLabel as PL
@@ -173,6 +173,11 @@ unit_picsLabel = describe "PICS-Label" $ do
   let readLabel wire = lookupHeader @PL.PICSLabel (headerMapFromList [("PICS-Label", wire)])
       readLabelList wire = readLabel wire >>= traverse PL.picsLabelList
       number = either error id . parsePicsNumber
+  it "validates checked writes from the legacy text pattern" $ do
+    let previous = headerMapFromList [("PICS-Label", picsExample)]
+        bad = PL.PICSLabel "(PICS-1.1 \"relative\" labels ratings (s 0))"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
   it "parses the response field and retains the accepted spelling through setHeader" $ do
     let emptyRating = PicsRating "s" (PicsScalar (number "0"))
         expected = PicsLabelList (PicsServiceLabels "http://www.gcf.org/v2.5" [] [PicsLabel (PicsSingleLabel [] (emptyRating :| []))] :| [])
@@ -307,6 +312,11 @@ prop_picsLabel = property $ do
 
 unit_p3p :: Spec
 unit_p3p = describe "P3P" $ do
+  it "validates checked writes from authored text" $ do
+    let previous = headerMapFromList [("P3P", "CP=\"NON\"")]
+        bad = P3.P3P "CP=NON"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
   let readPolicy wire = lookupHeader @P3.P3P (headerMapFromList [("P3P", wire)])
       resolve wire = readPolicy wire >>= traverse P3.p3pDirectives
       known claim = P3.P3PKnownCompact claim Nothing
@@ -406,11 +416,25 @@ prop_p3p = property $ do
   (P3.p3pFromDirectives entries >>= P3.p3pDirectives) === Right entries
 
 
+badProfileText :: [ST.ShortText]
+badProfileText = ["a\n", "a\r", "a\NUL", "a\DEL", "a\x0b"]
+
+
+rejectProfile :: (KnownHeader a, HeaderRenderingResultToNonEmpty (Cardinality a)) => HeaderFieldName -> a -> Expectation
+rejectProfile name value = do
+  let fields = setRawHeader name ("old" :| ["other"]) (headerMapFromList [])
+  renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+  setHeader value fields `shouldBe` fields
+
+
 tests :: Spec
 tests =
   describe "ObsoleteProfile" $
     sequence_
-      [ unit_getProfile_parse
+      [ it "checks authored GetProfile framing" $ mapM_ (rejectProfile hGetProfile . GP.GetProfile) badProfileText
+      , it "checks authored SetProfile framing" $ mapM_ (rejectProfile hSetProfile . SP.SetProfile) badProfileText
+      , it "checks authored ProfileObject framing" $ mapM_ (rejectProfile hProfileObject . PO.ProfileObject) badProfileText
+      , unit_getProfile_parse
       , unit_getProfile_render
       , it "GetProfile round-trip" prop_getProfile
       , unit_setProfile_parse

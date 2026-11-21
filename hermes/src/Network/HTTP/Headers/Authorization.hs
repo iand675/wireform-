@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
@@ -36,10 +37,16 @@ module Network.HTTP.Headers.Authorization (
   renderAuthParam,
   credentialsParser,
   renderCredentials,
+  encodeCredentialsChecked,
+  encodeCredentialEntriesChecked,
+  encodeAuthParamsChecked,
 ) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short.Internal as SBS
+import qualified Data.ByteString.Unsafe as BSU
 import qualified Data.CaseInsensitive as CI
 import qualified Data.CharSet as CharSet
 import qualified Data.List.NonEmpty as NE
@@ -49,11 +56,16 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Short (ShortText)
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
+import Data.Word (Word8)
+import Foreign.Ptr (Ptr, plusPtr)
+import Foreign.Storable (peekByteOff)
+import Network.HTTP.ContentNegotiation (sameNegotiationToken)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Wireform.Encode.Direct (dBytes, dWord8)
 
 
 newtype AuthScheme = AuthScheme ShortText
@@ -154,7 +166,8 @@ authParamValueParser =
 
 
 authParamsUnique :: [(ShortText, CredentialParam)] -> Bool
-authParamsUnique = authParamsUniqueOn id
+authParamsUnique [(first, _), (second, _)] = not (sameNegotiationToken first second)
+authParamsUnique params = authParamsUniqueOn id params
 
 
 -- | Check parameter names case-insensitively after any field-specific normalization.
@@ -188,6 +201,142 @@ renderAuthParam (key, val) =
     CredentialParamOpaque bytes -> R.renderHttpQuotedString (TextEncoding.decodeLatin1 bytes)
 
 
+encodeCredentialsChecked :: Credentials -> Maybe ByteString
+encodeCredentialsChecked value
+  | bound < 0 = Nothing
+  | otherwise = Just (BSI.unsafeCreateUptoN bound (\ptr -> writeCredentials ptr 0 value))
+  where
+    bound = credentialsBound value
+
+
+encodeCredentialEntriesChecked :: (a -> Credentials) -> [a] -> Maybe ByteString
+encodeCredentialEntriesChecked credentials =
+  R.encodeCommaSeparatedChecked (credentialsBound . credentials) (\ptr offset -> writeCredentials ptr offset . credentials)
+{-# INLINE encodeCredentialEntriesChecked #-}
+
+
+encodeAuthParamsChecked :: [(ShortText, CredentialParam)] -> Maybe ByteString
+encodeAuthParamsChecked = R.encodeCommaSeparatedChecked authParamBound writeAuthParam
+
+
+credentialsBound :: Credentials -> Int
+credentialsBound (Credentials (AuthScheme name) payload)
+  | not (isHttpTokenText name) = -1
+  | otherwise = case payload of
+      CredentialBare -> width
+      CredentialToken token
+        | validToken68 token -> addAuthSize (addAuthSize width 1) (BS.length token)
+        | otherwise -> -1
+      CredentialParams params
+        | authParamsUnique entries -> sizeParams (addAuthSize width 1) entries
+        | otherwise -> -1
+        where
+          entries = NE.toList params
+  where
+    width = shortWidth name
+    sizeParams !total [] = total
+    sizeParams !total (param : later)
+      | size < 0 = -1
+      | null later = addAuthSize total size
+      | otherwise = sizeParams (addAuthSize (addAuthSize total size) 2) later
+      where
+        size = authParamBound param
+{-# INLINE credentialsBound #-}
+
+
+validToken68 :: ByteString -> Bool
+validToken68 wire = case token68Chars of
+  AsciiSet low high ->
+    size /= 0 && allowedByte low high 0 && body low high 1
+  where
+    size = BS.length wire
+    allowedByte low high i = asciiMember low high (BSI.w2c (BSU.unsafeIndex wire i))
+    body low high !i
+      | i == size = True
+      | allowedByte low high i = body low high (i + 1)
+      | otherwise = padding i
+    padding !i =
+      i == size || (BSU.unsafeIndex wire i == 61 && padding (i + 1))
+
+
+authParamBound :: (ShortText, CredentialParam) -> Int
+authParamBound (key, value)
+  | not (isHttpTokenText key) = -1
+  | otherwise = case value of
+      CredentialParamToken token
+        | isHttpTokenText token -> addAuthSize start (shortWidth token)
+      CredentialParamString str
+        | let text = unsafeToRFC8941String str
+        , isHttpQuotedText text -> quotedBound (shortWidth text)
+      CredentialParamOpaque bytes
+        | BS.all (isOpaqueByte . fromIntegral) bytes -> quotedBound (BS.length bytes)
+      _ -> -1
+  where
+    start = addAuthSize 1 (shortWidth key)
+    quotedBound len = addAuthSize (addAuthSize start 2) (addAuthSize len len)
+
+
+shortWidth :: ShortText -> Int
+shortWidth = SBS.length . ST.toShortByteString
+{-# INLINE shortWidth #-}
+
+
+addAuthSize :: Int -> Int -> Int
+addAuthSize = BSI.checkedAdd "HTTP authentication field"
+{-# INLINE addAuthSize #-}
+
+
+writeCredentials :: Ptr Word8 -> Int -> Credentials -> IO Int
+writeCredentials ptr offset (Credentials (AuthScheme name) payload) = do
+  end <- writeAuthText ptr offset name
+  case payload of
+    CredentialBare -> pure end
+    CredentialToken token -> dWord8 ptr end 32 >>= \start -> dBytes ptr start token
+    CredentialParams (first NE.:| rest) -> do
+      start <- dWord8 ptr end 32
+      writeAuthParam ptr start first >>= writeRest rest
+  where
+    writeRest [] !start = pure start
+    writeRest (param : later) !start = do
+      afterComma <- dWord8 ptr start 44
+      next <- dWord8 ptr afterComma 32
+      writeAuthParam ptr next param >>= writeRest later
+{-# INLINE writeCredentials #-}
+
+
+writeAuthParam :: Ptr Word8 -> Int -> (ShortText, CredentialParam) -> IO Int
+writeAuthParam ptr offset (key, value) = do
+  end <- writeAuthText ptr offset key
+  start <- dWord8 ptr end 61
+  case value of
+    CredentialParamToken token -> writeAuthText ptr start token
+    CredentialParamString str ->
+      R.foldHttpQuotedShortBytes (dWord8 ptr) start (ST.toShortByteString (unsafeToRFC8941String str))
+    CredentialParamOpaque bytes -> writeOpaqueQuoted ptr start bytes
+
+
+writeAuthText :: Ptr Word8 -> Int -> ShortText -> IO Int
+writeAuthText ptr offset text = do
+  let bytes = ST.toShortByteString text
+      len = SBS.length bytes
+  SBS.copyToPtr bytes 0 (ptr `plusPtr` offset) len
+  pure $! offset + len
+{-# INLINE writeAuthText #-}
+
+
+writeOpaqueQuoted :: Ptr Word8 -> Int -> ByteString -> IO Int
+writeOpaqueQuoted ptr offset bytes =
+  BSU.unsafeUseAsCStringLen bytes $ \(source, size) ->
+    let write !readOffset !out
+          | readOffset == size = dWord8 ptr out 34
+          | otherwise = do
+              byte <- peekByteOff source readOffset
+              unescaped <- if byte == 34 || byte == 92 then dWord8 ptr out 92 else pure out
+              next <- dWord8 ptr unescaped byte
+              write (readOffset + 1) next
+    in dWord8 ptr offset 34 >>= write 0
+
+
 newtype Authorization = Authorization {authorizationCredentials :: Credentials}
   deriving stock (Eq, Show)
 
@@ -202,6 +351,9 @@ instance KnownHeader Authorization where
 
 
   renderToHeaders _ = M.toStrictByteString . renderCredentials . authorizationCredentials
+
+
+  renderToHeadersChecked _ = encodeCredentialsChecked . authorizationCredentials
 
 
   headerName _ = hAuthorization

@@ -25,7 +25,7 @@ module Network.HTTP.Headers.StatusURI (
 
 import Data.Char (ord)
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (codedURL)
+import Network.HTTP.Grammar.URIReference (codedURL, outboundAbsoluteURIBytes, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hStatusURI)
 import qualified Network.HTTP.Headers.Mason as M
@@ -58,6 +58,14 @@ instance KnownHeader StatusURI where
 
 
   renderToHeaders _ = M.toStrictByteString . renderStatusURI
+
+
+  renderToHeadersChecked settings value@(StatusURI entries)
+    | all valid entries = Just (renderToHeaders settings value)
+    | otherwise = Nothing
+    where
+      valid (StatusURIEntry code uri) =
+        code >= 100 && code <= 599 && validURIText outboundAbsoluteURIBytes uri
 
 
   headerName _ = hStatusURI

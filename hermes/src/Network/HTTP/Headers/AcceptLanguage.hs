@@ -27,16 +27,18 @@ module Network.HTTP.Headers.AcceptLanguage (
 import Data.Bits ((.|.))
 import qualified Data.ByteString.Short as SBS
 import qualified Data.ByteString.Short.Internal as SBSI
+import Data.Either (isRight)
 import Data.Maybe (listToMaybe)
 import qualified Data.Text.Short as ST
 import GHC.Exts (eqAddr#, eqChar#, indexCharOffAddr#, isTrue#, leChar#, plusAddr#, (+#), (==#))
-import Network.HTTP.ContentNegotiation (negotiationList, normalizedQuality, parseNegotiationHeaders, preferredByQuality, renderWeight, weightParser)
+import Network.HTTP.ContentNegotiation (encodeWeightedTokensChecked, negotiationList, normalizedQuality, parseNegotiationHeaders, preferredByQuality, renderWeight, weightParser)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.ContentLanguage (LanguageTag (..))
 import Network.HTTP.Headers.HeaderFieldName (hAcceptLanguage)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Parser.Driver (parseByteString)
 import Wireform.Parser.Internal (Parser (..), pattern Fail#, pattern OK#)
 
 
@@ -123,6 +125,12 @@ instance KnownHeader AcceptLanguage where
 
 
   renderToHeaders _ = M.toStrictByteString . renderAcceptLanguage
+
+
+  renderToHeadersChecked _ =
+    encodeWeightedTokensChecked valid languageTag languageWeight . languages
+    where
+      valid = isRight . parseByteString (languageRange <* eof) . ST.toByteString . languageTag
 
 
   headerName _ = hAcceptLanguage

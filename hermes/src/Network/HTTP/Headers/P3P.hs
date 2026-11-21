@@ -212,6 +212,9 @@ instance KnownHeader P3P where
   renderToHeaders _ (P3PDirectives entries) = NE.toList (R.fieldLines entries)
 
 
+  renderToHeadersChecked _ (P3PDirectives entries) = NE.toList <$> R.checkedFieldLines "P3P" directiveList entries
+
+
   headerName _ = hP3P
 
 

@@ -3,8 +3,7 @@
 {- |
 @Access-Control-Allow-Credentials@ (WHATWG Fetch / W3C CORS) response header
 telling the browser whether the response may be exposed when the request's
-credentials mode is @include@ (i.e. cookies, TLS client certificates, or HTTP
-authentication were sent). Fetch defines the case-sensitive wire value
+credentials mode is @include@. Fetch defines the case-sensitive wire value
 @true@. To withhold permission, omit the field.
 
 Spec: <https://fetch.spec.whatwg.org/#http-access-control-allow-credentials>
@@ -12,15 +11,25 @@ Spec: <https://fetch.spec.whatwg.org/#http-access-control-allow-credentials>
 See also: "Network.HTTP.Headers.AccessControlAllowOrigin", "Network.HTTP.Headers.Origin", "Network.HTTP.Headers.AccessControlExposeHeaders", "Network.HTTP.Headers.AccessControlAllowMethods", "Network.HTTP.Headers.AccessControlAllowHeaders".
 -}
 module Network.HTTP.Headers.AccessControlAllowCredentials (
+  CorsCredentialsMode (..),
   AccessControlAllowCredentials (..),
   accessControlAllowCredentialsParser,
   renderAccessControlAllowCredentials,
 ) where
 
+import Data.List.NonEmpty (NonEmpty (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAccessControlAllowCredentials)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+
+
+-- | The original request's Fetch credentials mode.
+data CorsCredentialsMode
+  = CorsOmit
+  | CorsSameOrigin
+  | CorsInclude
+  deriving stock (Eq, Show)
 
 
 {- | Value of the @Access-Control-Allow-Credentials@ header. @True@ renders as
@@ -37,7 +46,8 @@ instance KnownHeader AccessControlAllowCredentials where
   type Direction AccessControlAllowCredentials = 'Response
 
 
-  parseFromHeaders _ = parseSingleFieldLine "Access-Control-Allow-Credentials" accessControlAllowCredentialsParser
+  parseFromHeaders _ ("true" :| []) = Right (AccessControlAllowCredentials True)
+  parseFromHeaders _ fields = parseSingleFieldLine "Access-Control-Allow-Credentials" accessControlAllowCredentialsParser fields
 
 
   renderToHeaders _ (AccessControlAllowCredentials True) = ["true"]

@@ -24,6 +24,7 @@ module Network.HTTP.Headers.SecWebSocketKey (
 ) where
 
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSecWebSocketKey)
 import qualified Network.HTTP.Headers.Mason as M
@@ -46,6 +47,12 @@ instance KnownHeader SecWebSocketKey where
 
 
   renderToHeaders _ = encodeBase64 . secWebSocketKeyBytes
+
+
+  renderToHeadersChecked _ (SecWebSocketKey bytes)
+    | BS.length bytes == 16 = Just (encodeBase64 bytes)
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
 
 
   headerName _ = hSecWebSocketKey

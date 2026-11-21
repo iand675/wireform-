@@ -29,14 +29,19 @@ module Network.HTTP.Headers.ClearSiteData (
 ) where
 
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
 import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import Foreign.Ptr (plusPtr)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hClearSiteData)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Wireform.Encode.Direct (dBytes, dWord8)
 
 
 -- | A single @Clear-Site-Data@ directive (the unquoted value).
@@ -76,6 +81,27 @@ instance KnownHeader ClearSiteData where
 
 
   renderToHeaders _ = M.toStrictByteString . renderClearSiteData
+
+
+  renderToHeadersChecked _ = R.encodeCommaSeparatedChecked memberBound writeMember . NE.toList . clearSiteDataDirectives
+    where
+      memberBound (SiteDataOther value)
+        | isHttpQuotedText value, extensionBody (ST.toShortByteString value) =
+            let size = SBS.length (ST.toShortByteString value)
+            in add 2 (add size size)
+        | otherwise = -1
+      memberBound (SiteDataOtherWireBytes body)
+        | isHttpQuotedWireBody body, extensionBody body = add 2 (SBS.length body)
+        | otherwise = -1
+      memberBound directive = B.length (registeredSiteDataBytes directive)
+      writeMember ptr offset (SiteDataOther value) = R.writeHttpQuotedBytes ptr offset (ST.toShortByteString value)
+      writeMember ptr offset (SiteDataOtherWireBytes body) = do
+        start <- dWord8 ptr offset 34
+        let size = SBS.length body
+        SBSI.copyToPtr body 0 (ptr `plusPtr` start) size
+        dWord8 ptr (start + size) 34
+      writeMember ptr offset directive = dBytes ptr offset (registeredSiteDataBytes directive)
+      add = BSI.checkedAdd "Clear-Site-Data"
 
 
   headerName _ = hClearSiteData
@@ -125,11 +151,28 @@ renderClearSiteData (ClearSiteData ds) =
   R.sepByCommas1 (fmap renderSiteData ds)
   where
     renderSiteData = \case
-      SiteDataCache -> "\"cache\""
-      SiteDataCookies -> "\"cookies\""
-      SiteDataStorage -> "\"storage\""
-      SiteDataExecutionContexts -> "\"executionContexts\""
-      SiteDataClientHints -> "\"clientHints\""
-      SiteDataWildcard -> "\"*\""
       SiteDataOther t -> M.byteString (R.encodeHttpQuotedBytes (ST.toShortByteString t))
       SiteDataOtherWireBytes body -> M.char7 '"' <> M.shortByteString body <> M.char7 '"'
+      directive -> M.byteString (registeredSiteDataBytes directive)
+
+
+extensionBody :: SBS.ShortByteString -> Bool
+extensionBody body = case SBS.length body of
+  1 -> body /= "*"
+  5 -> body /= "cache"
+  7 -> body /= "cookies" && body /= "storage"
+  11 -> body /= "clientHints"
+  17 -> body /= "executionContexts"
+  _ -> True
+
+
+registeredSiteDataBytes :: SiteData -> B.ByteString
+registeredSiteDataBytes = \case
+  SiteDataCache -> "\"cache\""
+  SiteDataCookies -> "\"cookies\""
+  SiteDataStorage -> "\"storage\""
+  SiteDataExecutionContexts -> "\"executionContexts\""
+  SiteDataClientHints -> "\"clientHints\""
+  SiteDataWildcard -> "\"*\""
+  SiteDataOther _ -> ""
+  SiteDataOtherWireBytes _ -> ""

@@ -24,6 +24,7 @@ import Network.HTTP.Grammar.Parser (ParserT)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hLastEventID)
 import qualified Network.HTTP.Headers.Mason as M
+import Network.HTTP.Headers.OpaqueField (renderOpaqueFieldChecked)
 import Network.HTTP.Headers.Rendering.Util (shortText)
 import Wireform.Parser (err, takeRest)
 
@@ -44,6 +45,9 @@ instance KnownHeader LastEventID where
 
 
   renderToHeaders _ = ST.toByteString . lastEventID
+
+
+  renderToHeadersChecked _ = renderOpaqueFieldChecked . ST.toByteString . lastEventID
 
 
   headerName _ = hLastEventID

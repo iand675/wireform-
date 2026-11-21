@@ -24,6 +24,7 @@ module Network.HTTP.Headers.ContentDigest (
   contentDigestEntryList,
   contentDigestParser,
   renderContentDigest,
+  renderContentDigestChecked,
 ) where
 
 import Data.ByteString (ByteString)
@@ -77,7 +78,7 @@ instance KnownHeader ContentDigest where
 
   parseFromHeaders _ fields = parseStructuredFieldDictionary "Content-Digest" fields >>= fromDictionary
   renderToHeaders _ ContentDigestEmpty = []
-  renderToHeaders _ value = [M.toStrictByteString (renderContentDigest value)]
+  renderToHeaders _ value = either (const []) (pure . M.toStrictByteString) (renderContentDigestChecked value)
 
 
   omitHeaderValue ContentDigestEmpty = True
@@ -103,12 +104,16 @@ fromEntries :: [ContentDigestEntry] -> ContentDigest
 fromEntries = maybe ContentDigestEmpty ContentDigest . NE.nonEmpty
 
 
+-- | Render the field value. An invalid dictionary produces no bytes.
 renderContentDigest :: ContentDigest -> M.Builder
-renderContentDigest = M.intersperse ", " . map renderEntry . orderedFieldEntries contentDigestAlgorithm . contentDigestEntryList
-  where
-    renderEntry entry =
-      R.shortText (contentDigestAlgorithm entry)
-        <> M.char7 '='
-        <> R.rfc8941Binary (contentDigestValue entry)
-        <> foldMap renderParam (orderedFieldEntries fst (contentDigestParameters entry))
-    renderParam (key, parameter) = R.renderStructuredFieldParameter key (maybe (Boolean True) id parameter)
+renderContentDigest = either (const mempty) id . renderContentDigestChecked
+
+
+-- | Validate the final dictionary before writing its canonical field value.
+renderContentDigestChecked :: ContentDigest -> Either String M.Builder
+renderContentDigestChecked =
+  R.renderStructuredFieldItemDictionaryChecked
+    contentDigestAlgorithm
+    contentDigestParameters
+    (Right . R.rfc8941Binary . contentDigestValue)
+    . contentDigestEntryList

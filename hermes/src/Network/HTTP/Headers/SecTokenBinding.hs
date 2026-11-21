@@ -148,6 +148,12 @@ instance KnownHeader SecTokenBinding where
   renderToHeaders _ = wireBytes
 
 
+  renderToHeadersChecked _ (ParsedSecTokenBinding wire _ _) = Just wire
+  renderToHeadersChecked _ (RawSecTokenBinding text) =
+    let wire = ST.toByteString text
+    in either (const Nothing) (const (Just wire)) (decodeField wire)
+
+
   headerName _ = hSecTokenBinding
 
 

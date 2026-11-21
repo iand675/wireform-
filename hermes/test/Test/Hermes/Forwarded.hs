@@ -18,7 +18,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader, setRawHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader, setRawHeader)
 import qualified Network.HTTP.Headers.AuthenticationControl as AC
 import qualified Network.HTTP.Headers.AuthenticationInfo as AI
 import qualified Network.HTTP.Headers.Forwarded as F
@@ -263,6 +263,25 @@ forwardedTests = describe "Forwarded" $ do
         headerMapToList (setHeader value (headerMapFromList [])) `shouldBe` [("forwarded", wire)]
       other -> expectationFailure (show other)
 
+  it "rejects invalid authored Forwarded pairs and duplicate names" $ do
+    let previous = headerMapFromList [("Forwarded", "for=192.0.2.1"), ("Forwarded", "proto=https")]
+        tok = F.ForwardedToken
+        quoted = F.ForwardedQuoted
+    mapM_
+      ( \pairs -> do
+          let value = F.Forwarded [F.ForwardedElement [("for", tok "192.0.2.1")], F.ForwardedElement pairs]
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      [ [("bad name", tok "x")]
+      , [("for", tok "192.0.2.1"), ("FoR", tok "192.0.2.2")]
+      , [("test", tok "one"), ("Test", tok "two")]
+      , [("test", tok "x,y")]
+      , [("test", quoted "bad\DEL")]
+      , [("for", tok "[2001:db8::1]")]
+      , [("host", quoted "user@host.example")]
+      , [("proto", quoted "https://example")]
+      ]
   it "round-trips" prop_forwarded
 
 
@@ -310,6 +329,62 @@ proxyStatusTests = describe "Proxy-Status" $ do
 
   it "round-trips" prop_proxyStatus
 
+  it "preserves the existing field when any authored intermediary identifier is invalid" $ do
+    let existing =
+          headerMapFromList
+            [ ("Proxy-Status", "origin;received-status=204")
+            , ("Proxy-Status", "edge")
+            ]
+        upstream = PS.ProxyInfo (Token (RFC8941Token "upstream")) []
+        check identifier = do
+          let authored = PS.ProxyStatus [upstream, PS.ProxyInfo identifier []]
+          setHeader authored existing `shouldBe` existing
+          setHeader authored (headerMapFromList []) `shouldBe` headerMapFromList []
+          render PS.renderProxyStatus authored `shouldBe` ""
+    mapM_
+      check
+      [ Integer 1
+      , Decimal 1.5
+      , Binary "edge"
+      , Boolean True
+      , DateValue 100
+      , DisplayString "edge"
+      , Token (RFC8941Token "")
+      , Token (RFC8941Token "1edge")
+      , Token (RFC8941Token "edge, injected")
+      , Token (RFC8941Token "café")
+      , String (RFC8941String "edge\twest")
+      , String (RFC8941String "café")
+      ]
+    let quoted = PS.ProxyInfo (String (RFC8941String "edge, \"west\"\\")) []
+        authored = PS.ProxyStatus [upstream, quoted]
+        rendered = setHeader authored existing
+    headerMapToList rendered `shouldBe` [("proxy-status", "upstream, \"edge, \\\"west\\\"\\\\\"")]
+    lookupHeader @PS.ProxyStatus rendered `shouldBe` Right (Just authored)
+
+  it "checks authored parameter keys and values after retaining the last value" $ do
+    let existing = headerMapFromList [("Proxy-Status", "origin")]
+        authored params = PS.ProxyStatus [PS.ProxyInfo (Token (RFC8941Token "edge")) params]
+        checkInvalid param = do
+          let value = authored [("flag", Nothing), param]
+          setHeader value existing `shouldBe` existing
+          render PS.renderProxyStatus value `shouldBe` ""
+    mapM_
+      checkInvalid
+      [ ("Not-A-Key", Nothing)
+      , ("", Nothing)
+      , ("ext", Just (Integer 1_000_000_000_000_000))
+      , ("ext", Just (DateValue (-1_000_000_000_000_000)))
+      , ("ext", Just (Decimal 1_000_000_000_000))
+      , ("ext", Just (Token (RFC8941Token "two tokens")))
+      , ("ext", Just (String (RFC8941String "line\nbreak")))
+      ]
+    let params = [("ext", Just (Integer 999_999_999_999_999)), ("flag", Nothing)]
+        stacked = ("ext", Just (Token (RFC8941Token "invalid value"))) : params
+        rendered = setHeader (authored stacked) existing
+    headerMapToList rendered `shouldBe` [("proxy-status", "edge;ext=999999999999999;flag")]
+    lookupHeader @PS.ProxyStatus rendered `shouldBe` Right (Just (authored params))
+
   it "keeps member order across lines and parameter positions across replacements" $ do
     let validFields =
           headerMapFromList
@@ -340,6 +415,53 @@ proxyStatusTests = describe "Proxy-Status" $ do
       , [("error", Just (String (RFC8941String "http_protocol_error")))]
       ]
 
+  it "authors registered Proxy-Status parameters and canonical extensions" $ do
+    let identifier = Right (RFC8941String "edge west")
+        params =
+          PS.ProxyStatusParameters
+            (Just (RFC8941Token "connection_timeout"))
+            (Just (Left (RFC8941Token "backend.example:8443")))
+            (Just (Right "h2"))
+            (Just 504)
+            (Just (RFC8941String "quoted \"detail\""))
+        extensions = [("attempt", Just (Integer maxBound)), ("flag", Nothing), ("attempt", Just (Integer 2))]
+        canonical = params {PS.proxyNextProtocol = Just (Left (RFC8941Token "h2"))}
+        expected = "\"edge west\";error=connection_timeout;next-hop=backend.example:8443;next-protocol=h2;received-status=504;details=\"quoted \\\"detail\\\"\";attempt=2;flag"
+    case PS.proxyInfoFromParameters identifier params extensions of
+      Left err -> expectationFailure err
+      Right info -> do
+        let value = PS.ProxyStatus [info]
+            emitted = setHeader value (headerMapFromList [("Proxy-Status", "old"), ("Proxy-Status", "older")])
+        headerMapToList emitted `shouldBe` [("proxy-status", expected)]
+        lookupHeader @PS.ProxyStatus emitted `shouldBe` Right (Just value)
+        PS.proxyInfoParameters info `shouldBe` Right canonical
+        (PS.proxyInfoFromParameters identifier (params {PS.proxyNextProtocol = Just (Right "1h")}) [] >>= PS.proxyInfoParameters)
+          `shouldBe` Right (params {PS.proxyNextProtocol = Just (Right "1h")})
+        let updated = info {PS.proxyParams = PS.proxyParams info <> [("received-status", Just (Integer 502))]}
+        fmap PS.proxyReceivedStatus (PS.proxyInfoParameters updated) `shouldBe` Right (Just 502)
+        render PS.renderProxyStatus (PS.ProxyStatus [updated])
+          `shouldBe` "\"edge west\";error=connection_timeout;next-hop=backend.example:8443;next-protocol=h2;received-status=502;details=\"quoted \\\"detail\\\"\";attempt=2;flag"
+
+  it "rejects invalid typed Proxy-Status values and reserved extension names" $ do
+    let identifier = Left (RFC8941Token "edge")
+        params = PS.ProxyStatusParameters Nothing Nothing Nothing Nothing Nothing
+        invalid =
+          [ params {PS.proxyError = Just (RFC8941Token "bad error")}
+          , params {PS.proxyNextHop = Just (Right (RFC8941String "bad\nhop"))}
+          , params {PS.proxyNextProtocol = Just (Left (RFC8941Token "1h"))}
+          , params {PS.proxyNextProtocol = Just (Right "")}
+          , params {PS.proxyNextProtocol = Just (Right (BS.replicate 256 0))}
+          , params {PS.proxyReceivedStatus = Just 99}
+          , params {PS.proxyReceivedStatus = Just 600}
+          , params {PS.proxyDetails = Just (RFC8941String "café")}
+          ]
+    mapM_ (\value -> PS.proxyInfoFromParameters identifier value [] `shouldSatisfy` isLeft) invalid
+    PS.proxyInfoFromParameters (Left (RFC8941Token "1edge")) params [] `shouldSatisfy` isLeft
+    mapM_
+      (\name -> PS.proxyInfoFromParameters identifier params [(name, Nothing)] `shouldSatisfy` isLeft)
+      ["error", "next-hop", "next-protocol", "received-status", "details", "Upper"]
+    PS.proxyInfoFromParameters identifier params [("time", Just (DateValue maxBound))] `shouldSatisfy` isLeft
+
   it "uses the token form for ALPN identifiers that fit the Structured Fields token grammar" $ do
     let fields =
           headerMapFromList
@@ -355,6 +477,35 @@ proxyStatusTests = describe "Proxy-Status" $ do
         render PS.renderProxyStatus value `shouldBe` expected
         headerMapToList (setHeader value fields) `shouldBe` [("proxy-status", expected)]
       result -> expectationFailure (show result)
+
+  it "promotes Proxy-Status trailers in header order using the last update for the first match" $ do
+    let headers =
+          headerMapFromList
+            [ ("Proxy-Status", "upstream, \"edge\";received-status=201;old")
+            , ("Proxy-Status", "edge;received-status=202, Cache;received-status=204")
+            ]
+        trailers =
+          headerMapFromList
+            [ ("Proxy-Status", "edge;error=read_timeout, Edge;ignored, \"Cache\";received-status=500")
+            , ("Proxy-Status", "\"edge\";received-status=504, orphan;ignored")
+            ]
+        expected = "upstream, \"edge\";received-status=504, edge;received-status=202, \"Cache\";received-status=500"
+    fmap (fmap (render PS.renderProxyStatus)) (PS.lookupProxyStatusWithTrailers headers trailers)
+      `shouldBe` Right (Just expected)
+    let single = headerMapFromList [("Proxy-Status", "edge;error=read_timeout")]
+    fmap (fmap (render PS.renderProxyStatus)) (PS.lookupProxyStatusWithTrailers headers single)
+      `shouldBe` Right (Just "upstream, edge;error=read_timeout, edge;received-status=202, Cache;received-status=204")
+
+  it "returns the header chain for unmatched trailers and reports malformed field sections" $ do
+    let headers = headerMapFromList [("Proxy-Status", "edge;received-status=200")]
+        unmatched = headerMapFromList [("Proxy-Status", "Edge;received-status=500")]
+        malformed = headerMapFromList [("Proxy-Status", "(edge)")]
+        empty = headerMapFromList []
+    PS.lookupProxyStatusWithTrailers headers unmatched `shouldBe` lookupHeader @PS.ProxyStatus headers
+    PS.lookupProxyStatusWithTrailers headers empty `shouldBe` lookupHeader @PS.ProxyStatus headers
+    PS.lookupProxyStatusWithTrailers empty unmatched `shouldBe` Right Nothing
+    PS.lookupProxyStatusWithTrailers malformed empty `shouldSatisfy` isLeft
+    PS.lookupProxyStatusWithTrailers headers malformed `shouldSatisfy` isLeft
 
 
 prop_proxyStatus :: Property
@@ -536,6 +687,44 @@ authenticationControlTests = describe "Authentication-Control" $ do
       , "Basic title*=UTF-8''caf%C3,%A9"
       ]
 
+  it "rejects invalid authored Authentication-Control entries as a whole" $ do
+    let fields = headerMapFromList [("Authentication-Control", "Basic realm=old")]
+        basic = AC.AuthScheme "Basic"
+        known = ("realm", AC.CredentialParamToken "new")
+        ext = AC.CredentialParamToken "UTF-8''caf%C3%A9"
+        entry names = AC.AuthControlEntry basic (known : names)
+        reject :: AC.AuthenticationControl -> Expectation
+        reject value = do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value fields `shouldBe` fields
+    reject (AC.AuthenticationControl [])
+    mapM_ (\e -> reject (AC.AuthenticationControl [entry [], e]))
+      [ AC.AuthControlEntry basic []
+      , AC.AuthControlEntry (AC.AuthScheme "bad scheme") [known]
+      , entry [("_name", AC.CredentialParamToken "new")]
+      , entry [("a.b", AC.CredentialParamToken "new")]
+      , entry [("title*", AC.CredentialParamToken "UTF-8''caf%XZ")]
+      , entry [("title*", AC.CredentialParamToken "UTF-8''%FE")]
+      , entry [("title*", AC.CredentialParamToken "UTF-8'en'caf%C3%A9")]
+      , entry [("title*", AC.CredentialParamToken "UTF-8''plain")]
+      , entry [("title*", AC.CredentialParamToken "ISO-8859-1''caf%E9")]
+      , entry [("title*", AC.CredentialParamOpaque "UTF-8''caf%C3%A9")]
+      , entry [("Realm", AC.CredentialParamToken "other")]
+      , entry [("title", AC.CredentialParamToken "new"), ("Title*", ext)]
+      ]
+    let allowed = AC.AuthenticationControl [entry [("-label.example.org*", ext)]]
+    renderHeaderLines defaultHeaderSettings allowed `shouldBe` Just ("Basic realm=new, -label.example.org*=UTF-8''caf%C3%A9" :| [])
+    let scoped token raw = AC.AuthControlEntry (AC.AuthScheme token) raw
+        withoutRealm = scoped "Example" [("no-auth", AC.CredentialParamToken "true")]
+        duplicate = scoped "eXaMplE" [("No-Auth", AC.CredentialParamToken "false")]
+        separate = scoped "Example" [("auth-style", AC.CredentialParamToken "modal")]
+        utf8Realm = scoped "Basic" [("realm", AC.CredentialParamString (RFC8941String "café"))]
+        byteRealm = scoped "basic" [("REALM", AC.CredentialParamOpaque "caf\xe9")]
+    reject (AC.AuthenticationControl [withoutRealm, duplicate])
+    reject (AC.AuthenticationControl [withoutRealm, separate, duplicate])
+    reject (AC.AuthenticationControl [utf8Realm, byteRealm])
+    renderHeaderLines defaultHeaderSettings (AC.AuthenticationControl [withoutRealm, separate])
+      `shouldBe` Just ("Example no-auth=true, Example auth-style=modal" :| [])
   it "round-trips" prop_authControl
 
 

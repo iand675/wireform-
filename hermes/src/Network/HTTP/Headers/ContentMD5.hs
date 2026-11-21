@@ -65,6 +65,12 @@ instance KnownHeader ContentMD5 where
   renderToHeaders _ = encodeBase64 . contentMD5Digest
 
 
+  renderToHeadersChecked _ (ContentMD5 bytes)
+    | BS.length bytes == 16 = Just (encodeBase64 bytes)
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
+
+
   headerName _ = hContentMD5
 
 

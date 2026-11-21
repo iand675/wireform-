@@ -13,7 +13,7 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import Network.HTTP.Headers.HeaderFieldName (hReportingEndpoints)
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Network.HTTP.Headers.NEL as NEL
@@ -130,6 +130,18 @@ unit_nel_authoring = it "renders checked authored policies with JSON escapes and
     `shouldBe` Right (NEL.NELRegister (NEL.NELRegistration 1 "default" False 0 1 [] []))
 
 
+checkedNelWrites :: Spec
+checkedNelWrites = it "validates raw authoring and preserves accepted NEL field spelling" $ do
+  let previous = headerMapFromList [("NEL", "{\"max_age\":0}")]
+      wire = "{\"max_age\":10}, {\"report_to\":\"é\", \"max_age\":20}"
+      accepted = NEL.NEL wire
+  forM_ ["", "{", "{\"max_age\":1}", "{\"max_age\":0}\n", "{\"max_age\":0}, {", "{\"report_to\":\"r\",\"max_age\":-1}"] $ \raw -> do
+    let value = NEL.NEL raw
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value previous `shouldBe` previous
+  renderHeaderLines defaultHeaderSettings accepted `shouldBe` Just (ST.toByteString wire :| [])
+
+
 unit_nel_large_lifetime :: Spec
 unit_nel_large_lifetime = it "round-trips integer lifetimes expressed with large exponents" $
   forM_ [10_000, maxBound - 200] $ \power -> do
@@ -206,6 +218,7 @@ tests =
       , unit_nel_field_lines
       , unit_nel_invalid
       , unit_nel_authoring
+      , checkedNelWrites
       , unit_nel_large_lifetime
       , unit_re_parse
       , unit_re_render

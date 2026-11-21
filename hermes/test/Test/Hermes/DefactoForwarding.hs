@@ -13,7 +13,7 @@ import qualified GHC.Generics as G
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
 import qualified Network.HTTP.Headers.XForwardedFor as XFF
@@ -307,6 +307,16 @@ unit_xmo_field_lines = it "validates a single complete, case-sensitive override 
           runFully XMO.xHttpMethodOverrideParser wire `shouldSatisfy` isLeft
 
 
+checkedOverrideWrites :: Spec
+checkedOverrideWrites = it "checks authored override method tokens exactly as supplied" $ do
+  let previous = headerMapFromList [("X-Http-Method-Override", "PATCH")]
+      value = XMO.XHttpMethodOverride . methodFromBytes
+  for_ ["", " PUT", "GET ", "GET\tPOST", "PATCH, PUT", "X\NUL", "G\xff"] $ \bytes -> do
+    renderHeaderLines defaultHeaderSettings (value bytes) `shouldBe` Nothing
+    setHeader (value bytes) previous `shouldBe` previous
+  renderHeaderLines defaultHeaderSettings (value "patch!") `shouldBe` Just ("patch!" :| [])
+
+
 unit_xmo_extension_compatibility :: Spec
 unit_xmo_extension_compatibility = it "preserves the extension symbol view and generic representation" $ do
   let wire = "CuStOm-Verb!"
@@ -396,6 +406,47 @@ forwardingFieldTests = describe "typed forwarding fields" $ do
     typed [field "0000065535"] `shouldBe` Right (Just (XFP.XForwardedPort 65535))
     typed [field "443", field "80"] `shouldSatisfy` isLeft
     mapM_ (\wire -> typed [field wire] `shouldSatisfy` isLeft) ["65536", "18446744073709551616", "+443", "443,80", ""]
+  it "rejects invalid authored X-Forwarded-For nodes" $ do
+    let previous = headerMapFromList [("X-Forwarded-For", "first"), ("X-Forwarded-For", "second")]
+    mapM_
+      ( \node -> do
+          let value = XFF.XForwardedFor ("first" :| [node])
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      ["", "two nodes", "first,second", "café"]
+  it "rejects invalid authored X-Forwarded-Host authorities" $ do
+    let previous = headerMapFromList [("X-Forwarded-Host", "one.example"), ("X-Forwarded-Host", "two.example")]
+    mapM_
+      ( \host -> do
+          let value = XFH.XForwardedHost host
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      ["", "user@one.example", "one.example, [bad]", "one.example:65536"]
+  it "rejects invalid authored X-Forwarded-Proto schemes" $ do
+    let previous = headerMapFromList [("X-Forwarded-Proto", "http"), ("X-Forwarded-Proto", "https")]
+    mapM_
+      ( \scheme -> do
+          let value = XFPr.XForwardedProtoOther scheme
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      ["", "1h", "http_https", "http://host"]
+  it "rejects invalid authored X-Real-IP address kinds" $ do
+    let previous = headerMapFromList [("X-Real-IP", "192.0.2.1"), ("X-Real-IP", "2001:db8::1")]
+        value = XRI.XRealIP (IPvFuture "v1.node")
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value previous `shouldBe` previous
+  it "rejects malformed authored X-Forwarded-Port values above the port range" $ do
+    let original = headerMapFromList [("X-Forwarded-Port", "443"), ("X-Forwarded-Port", "80")]
+    mapM_
+      ( \value -> do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value original `shouldBe` original
+      )
+      [XFP.XForwardedPort 65_536, XFP.XForwardedPort maxBound]
+    renderHeaderLines defaultHeaderSettings (XFP.XForwardedPort 65_535) `shouldBe` Just ("65535" :| [])
 
   it "accepts only a single IPv4 or IPv6 address for X-Real-IP" $ do
     let field wire = ("X-Real-IP", wire)
@@ -453,6 +504,7 @@ tests =
             [ unit_xmo_parse
             , unit_xmo_render
             , unit_xmo_field_lines
+            , checkedOverrideWrites
             , unit_xmo_extension_compatibility
             , it "round-trip" prop_xmo_roundtrip
             ]

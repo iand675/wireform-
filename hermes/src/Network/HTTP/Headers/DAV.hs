@@ -28,7 +28,7 @@ module Network.HTTP.Headers.DAV (
 
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (codedURL)
+import Network.HTTP.Grammar.URIReference (codedURL, outboundAbsoluteURIBytes, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hDAV)
 import qualified Network.HTTP.Headers.Mason as M
@@ -68,6 +68,15 @@ instance KnownHeader DAV where
 
 
   renderToHeaders _ = M.toStrictByteString . renderDAV
+
+
+  renderToHeadersChecked _ DAVEmpty = Just ""
+  renderToHeadersChecked settings value@(DAV classes)
+    | all valid classes = Just (renderToHeaders settings value)
+    | otherwise = Nothing
+    where
+      valid (ComplianceToken token) = isHttpTokenText token
+      valid (ComplianceURL uri) = validURIText outboundAbsoluteURIBytes uri
 
 
   headerName _ = hDAV

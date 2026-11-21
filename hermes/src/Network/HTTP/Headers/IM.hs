@@ -21,16 +21,23 @@ module Network.HTTP.Headers.IM (
   imParameterParser,
   imParameterSeparator,
   renderIMParameter,
+  imParameterBound,
+  writeIMParameter,
 ) where
 
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
 import Data.Maybe (isNothing)
 import qualified Data.Text.Short as ST
+import Data.Word (Word8)
+import Foreign.Ptr (Ptr)
+import Network.HTTP.ContentNegotiation (sameNegotiationToken)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hIM)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (encodeHttpQuotedBytes, renderSeparated, shortText)
+import Network.HTTP.Grammar.Rendering (copyText, encodeCommaSeparatedChecked, encodeHttpQuotedBytes, renderSeparated, shortText, writeHttpQuotedBytes)
+import Wireform.Encode.Direct (dWord8)
 
 
 data InstanceManipulation = InstanceManipulation
@@ -91,6 +98,17 @@ instance KnownHeader IM where
   renderToHeaders _ = M.toStrictByteString . renderIM
 
 
+  renderToHeadersChecked _ (IMEntries entries) = encodeCommaSeparatedChecked bound write entries
+    where
+      bound (InstanceManipulation name parameter)
+        | isHttpTokenText name, not (sameNegotiationToken "identity" name)
+        , let size = imParameterBound parameter
+        , size >= 0 = BSI.checkedAdd "IM" (SBS.length (ST.toShortByteString name)) size
+        | otherwise = -1
+      write ptr start (InstanceManipulation name parameter) =
+        copyText ptr start name >>= \end -> writeIMParameter ptr end parameter
+
+
   headerName _ = hIM
 
 
@@ -135,3 +153,38 @@ renderIMParameter (IMParameter name value) =
   where
     renderValue (IMParameterToken token) = shortText token
     renderValue (IMParameterQuoted bytes) = M.byteString (encodeHttpQuotedBytes bytes)
+
+
+-- | Measure an optional manipulation parameter. A negative bound denotes
+-- invalid syntax or the reserved quality name.
+imParameterBound :: Maybe IMParameter -> Int
+imParameterBound Nothing = 0
+imParameterBound (Just (IMParameter name value))
+  | name == "q" || name == "Q" || not (isHttpTokenText name) = -1
+  | otherwise = case value of
+      Nothing -> nameSize
+      Just (IMParameterToken text)
+        | isHttpTokenText text -> add (add nameSize 1) (width text)
+        | otherwise -> -1
+      Just (IMParameterQuoted bytes)
+        | scanCompactBytes (isOpaqueByte . fromIntegral) bytes 0 ->
+            let size = SBS.length bytes in add (add nameSize 3) (add size size)
+        | otherwise -> -1
+  where
+    add = BSI.checkedAdd "instance manipulation parameter"
+    width = SBS.length . ST.toShortByteString
+    nameSize = add 1 (width name)
+{-# INLINE imParameterBound #-}
+
+
+-- | Write a validated optional manipulation parameter into the buffer.
+writeIMParameter :: Ptr Word8 -> Int -> Maybe IMParameter -> IO Int
+writeIMParameter _ offset Nothing = pure offset
+writeIMParameter ptr offset (Just (IMParameter name value)) = do
+  start <- dWord8 ptr offset 59
+  end <- copyText ptr start name
+  case value of
+    Nothing -> pure end
+    Just (IMParameterToken text) -> dWord8 ptr end 61 >>= \begin -> copyText ptr begin text
+    Just (IMParameterQuoted bytes) -> dWord8 ptr end 61 >>= \begin -> writeHttpQuotedBytes ptr begin bytes
+{-# INLINE writeIMParameter #-}

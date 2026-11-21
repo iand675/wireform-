@@ -213,6 +213,13 @@ instance KnownHeader XRequestStart where
   renderToHeaders _ = xRequestStartBytes
 
 
+  renderToHeadersChecked _ (XRequestStartWire _ _ (ParsedTimestamp wire _)) = Just wire
+  renderToHeadersChecked _ value =
+    case xRequestStartEpoch value of
+      Right _ -> Just (xRequestStartBytes value)
+      Left _ -> Nothing
+
+
   headerName _ = hXRequestStart
 
 

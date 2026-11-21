@@ -73,6 +73,9 @@ instance KnownHeader XPoweredBy where
   renderToHeaders _ = xPoweredByBytes
 
 
+  renderToHeadersChecked _ = renderOpaqueFieldChecked . xPoweredByBytes
+
+
   headerName _ = hXPoweredBy
 
 

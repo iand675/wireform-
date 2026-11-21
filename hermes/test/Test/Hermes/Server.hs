@@ -123,6 +123,32 @@ unit_invalid_product_fields = it "rejects malformed and repeated singleton produ
     `shouldSatisfy` isLeft
 
 
+checkedProductWrites :: Spec
+checkedProductWrites = do
+  it "checks every authored Server product and comment" $ do
+    let existing = headerMapFromList [("Server", "old")]
+        good = Server.Product "fixed" Nothing
+        reject :: Server.Server -> Expectation
+        reject value = do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value existing `shouldBe` existing
+    reject (Server.Server (Server.Product "bad/product" Nothing) [])
+    reject (Server.Server good [Right (Server.Product "ext" (Just "no /"))])
+    reject (Server.Server good [Left (Comment "bad\DEL")])
+    renderHeaderLines defaultHeaderSettings (Server.Server good [Left (Comment "café (x)\t")])
+      `shouldBe` Just ("fixed (caf\xe9 \\(x\\)\t)" :| [])
+  it "checks every authored User-Agent product and comment" $ do
+    let existing = headerMapFromList [("User-Agent", "old")]
+        good = UserAgent.Product "fixed" Nothing
+        reject :: UserAgent.UserAgent -> Expectation
+        reject value = do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value existing `shouldBe` existing
+    reject (UserAgent.UserAgent (UserAgent.Product "" Nothing) [])
+    reject (UserAgent.UserAgent good [Right (UserAgent.Product "ext" (Just ""))])
+    reject (UserAgent.UserAgent good [Left (Comment "bad\nbyte")])
+
+
 unit_deep_comments :: Spec
 unit_deep_comments = it "handles deep comments and ends at the matching close" $ do
   let depth = 32768
@@ -191,6 +217,7 @@ tests =
       , unit_user_agent_products
       , unit_nested_and_quoted
       , unit_invalid_product_fields
+      , checkedProductWrites
       , unit_deep_comments
       , unit_comment_octets
       , it "round-trips render then parse" prop_roundtrip

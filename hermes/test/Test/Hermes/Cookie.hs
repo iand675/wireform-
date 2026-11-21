@@ -54,6 +54,15 @@ requestCookies = describe "request Cookie" $ do
     forM_ ["broken", "", "; next=2", "next=2;"] $ \second ->
       isLeft (lookupHeader @Cookie (headerMapFromList [("cookie", "valid=1"), ("cookie", second)])) `shouldBe` True
     isLeft (lookupHeader @Cookie (headerMapFromList [("cookie", "split=\"a"), ("cookie", "b\"")])) `shouldBe` True
+  it "validates every authored request pair before replacing existing fields" $ do
+    let existing = headerMapFromList [("Cookie", "already=1"), ("Cookie", "second=2")]
+        check bad = do
+          let value = Cookie [CookiePair "first" "ok", bad]
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value existing `shouldBe` existing
+    mapM_ (\bad -> check (CookiePair bad "ok")) ["", "bad name", "bad=name", "bad;name"]
+    mapM_ (check . CookiePair "name") ["with space", "x;y", "\"closed\"rest", "\"unclosed", "a,b", "a\\b", "é"]
+    renderHeaderLines defaultHeaderSettings (Cookie []) `shouldBe` Just ("" :| [])
   it "implements the RFC 6265 cookie-octet class for every octet" $
     forM_ [0 .. 255] $ \octet -> do
       let payload = "prefix" <> BS.singleton octet <> "suffix"
@@ -164,5 +173,22 @@ responseCookies = describe "response Set-Cookie" $ do
       \wire -> isLeft (parseSetCookieField wire) `shouldBe` True
     isLeft (lookupHeader @SetCookies (headerMapFromList [("set-cookie", "valid=2"), ("set-cookie", "invalid")]))
       `shouldBe` True
+  it "validates every authored response cookie before replacing existing fields" $ do
+    let existing = headerMapFromList [("Set-Cookie", "already=1"), ("Set-Cookie", "second=2")]
+        check bad = do
+          let value = SetCookies [fixture, bad]
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value existing `shouldBe` existing
+    check fixture {setCookieName = "bad=name"}
+    check fixture {setCookieValue = "\"one;two\""}
+    mapM_ (\bad -> check fixture {setCookieDomain = Just bad}) ["", "bad_name", "bad..test", "-bad.test", ".test.", "bad; Secure"]
+    mapM_ (\bad -> check fixture {setCookiePath = Just bad}) [" /trimmed", "/trimmed ", "/one; Secure", "/tab\tx", "/é"]
+    check fixture {setCookieExpires = Just (UTCTime (fromGregorian 1600 12 31) 0)}
+    check fixture {setCookieExpires = Just (UTCTime (fromGregorian 10000 1 1) 0)}
+    check fixture {setCookieExpires = Just (UTCTime (fromGregorian 2026 11 21) (secondsToDiffTime (-1)))}
+    check fixture {setCookieExpires = Just (UTCTime (fromGregorian 2026 11 21) (secondsToDiffTime 86_400))}
+    let minimumDate = UTCTime (fromGregorian 1601 1 1) 0
+        accepted = SetCookies [fixture {setCookieExpires = Just minimumDate, setCookiePath = Just "/one two", setCookieMaxAge = Just minBound}]
+    lookupHeader @SetCookies (setHeader accepted existing) `shouldBe` Right (Just accepted)
   where
     fixture = SetCookie "session" "\"ab+c/def==\"" Nothing Nothing Nothing Nothing False False Nothing

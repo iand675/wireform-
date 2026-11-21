@@ -18,7 +18,7 @@ import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.Grammar.ExtensionDeclaration
 import Network.HTTP.Grammar.PEP
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.Ext as Ext
 import Network.HTTP.Headers.HeaderFieldName (hExt, hMan, hOpt, hPEP, hPEPInfo)
 import qualified Network.HTTP.Headers.Man as Man
@@ -59,6 +59,12 @@ checkValue mk renderA parse raw = do
 
 unit_ext :: Spec
 unit_ext = describe "Ext acknowledgement" $ do
+  it "validates checked writes from authored text" $ do
+    let previous = headerMapFromList [("Ext", "")]
+        bad = Ext.Ext "done"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
+    renderHeaderLines defaultHeaderSettings (Ext.Ext " \t") `shouldBe` Just (" \t" :| [])
   it "distinguishes omission from an empty acknowledgement and preserves field whitespace" $ do
     lookupHeader @Ext.Ext (headerMapFromList []) `shouldBe` Right Nothing
     lookupHeader @Ext.Ext (headerMapFromList [("Ext", "")]) `shouldBe` Right (Just Ext.extAcknowledged)
@@ -75,6 +81,12 @@ unit_ext = describe "Ext acknowledgement" $ do
 
 unit_man :: Spec
 unit_man = describe "Man" $ do
+  it "validates checked writes from authored text" $ do
+    let previous = headerMapFromList [("Man", "\"Range\"")]
+        bad = Man.Man "\"Range\"; ns=1"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
+    renderHeaderLines defaultHeaderSettings (Man.Man "\"Range\"; ns=016") `shouldBe` Just ("\"Range\"; ns=016" :| [])
   it "decodes URIs, namespace spelling and token, quoted and absent arguments" $ do
     let uri = "http://www.copyright.org/rights-management"
         wire = "\"http://www.copyright.org/rights-management\" ; NS \t= 0016; note=\"a\\\"b, c;d\"; Flag ; version=2; raw=\"\255\""
@@ -130,6 +142,11 @@ unit_man = describe "Man" $ do
 
 unit_opt :: Spec
 unit_opt = describe "Opt" $ do
+  it "validates checked writes from authored text" $ do
+    let previous = headerMapFromList [("Opt", "\"Range\"")]
+        bad = Opt.Opt "Range"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
   it "combines declarations in field order and retains the original physical lines" $ do
     let first = " \t, \"Range\" , "
         second = "\t\"urn:example:optional\"; ns=012345678901234567890"
@@ -178,6 +195,11 @@ prop_declarations = property $ do
 
 unit_pep :: Spec
 unit_pep = describe "PEP" $ do
+  it "validates checked writes from authored text" $ do
+    let previous = headerMapFromList [("PEP", "{{map \"/x\"}}")]
+        bad = PEP.PEP "{{id \"/x\"}}"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
   it "decodes the draft mapping example and accepts relative URIs, prefixes and extension bags" $ do
     let wire = "{{map \"http://www.w3.org/PEP/Digest\" 4-}}"
         expected = PepDeclaration "http://www.w3.org/PEP/Digest" ["4-"] []
@@ -231,6 +253,11 @@ unit_pep = describe "PEP" $ do
 
 unit_pepInfo :: Spec
 unit_pepInfo = describe "PEP-Info" $ do
+  it "validates checked writes from authored text" $ do
+    let previous = headerMapFromList [("PEP-Info", "{{id \"/x\"}}")]
+        bad = PEPInfo.PEPInfo "{{id \"/x\"} {max-age -1}}"
+    renderHeaderLines defaultHeaderSettings bad `shouldBe` Nothing
+    setHeader bad previous `shouldBe` previous
   it "decodes policy targets, an empty realm, TTL, strength, and opaque nested parameters" $ do
     let first =
           "{{ID \"http://some.org/payment-extension\"} {for \"/cgi-bin/buy\" *, \"secret/Overview.html\"} \

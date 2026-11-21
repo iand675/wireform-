@@ -24,11 +24,14 @@ module Network.HTTP.Headers.CacheStatus (
   FailureAccum,
   cacheStatusParser,
   renderCacheStatus,
+  renderCacheStatusChecked,
 ) where
 
+import qualified Data.ByteString.Short as SBS
+import Data.Either (isRight)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (fromMaybe, isJust)
-import Data.Text.Short (ShortText)
+import Data.Text.Short (ShortText, toShortByteString)
 import Data.Validation (Validation (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hCacheStatus)
@@ -60,8 +63,8 @@ data CacheStatusCommonFields = CacheStatusCommonFields
   { cacheStatusTtl :: !(Maybe Int)
   , cacheStatusKey :: !(Maybe P.RFC8941String)
   , cacheStatusDetail :: !(Maybe (Either P.RFC8941Token P.RFC8941String))
-  -- | Extension parameters and forwarding-only parameters on members without @fwd@.
   , cacheStatusUnknownParameters :: ![(ShortText, Maybe P.ItemValue)]
+  -- ^ Extension parameters and forwarding-only parameters on members without @fwd@.
   }
   deriving stock (Eq, Show)
 
@@ -132,7 +135,7 @@ instance KnownHeader CacheStatus where
 
 
   renderToHeaders _ (CacheStatus []) = []
-  renderToHeaders _ value = [M.toStrictByteString (renderCacheStatus value)]
+  renderToHeaders _ value = either (const []) (pure . M.toStrictByteString) (renderCacheStatusChecked value)
 
 
   omitHeaderValue = null . cacheStatus
@@ -173,7 +176,7 @@ cacheStatusEntryParser = do
           _ -> pure $ UnknownForward t
         vForwardStatus = case lookupParameter "fwd-status" mps of
           Just (P.Integer i)
-            | i >= 100 && i <= 599 -> pure $ Just i
+            | validForwardStatus i -> pure $ Just i
           Just _ -> Failure $ pure (Just k, "fwd-status must be an HTTP status code from 100 through 599")
           Nothing -> pure Nothing
         vForwardStored = optionalBoolean "stored"
@@ -200,16 +203,15 @@ cacheStatusEntryParser = do
         vUnknownParameters =
           pure (P.structuredFieldParameterPairs (filter (not . projectedParameter forwarded . P.structuredParameterKey) mps))
 
-    projectedParameter forwarded = \case
-      "hit" -> True
-      "fwd" -> True
-      "ttl" -> True
-      "key" -> True
-      "detail" -> True
-      "fwd-status" -> forwarded
-      "stored" -> forwarded
-      "collapsed" -> forwarded
-      _ -> False
+
+projectedParameter :: Bool -> ShortText -> Bool
+projectedParameter forwarded key = case SBS.length (toShortByteString key) of
+  3 -> key == "hit" || key == "fwd" || key == "ttl" || key == "key"
+  6 -> key == "detail" || (forwarded && key == "stored")
+  9 -> forwarded && key == "collapsed"
+  10 -> forwarded && key == "fwd-status"
+  _ -> False
+{-# INLINE projectedParameter #-}
 
 
 lookupParameter :: ShortText -> [P.StructuredFieldParameter] -> Maybe P.ItemValue
@@ -227,15 +229,55 @@ cacheStatusParser = do
     Success es -> pure $ CacheStatus es
 
 
+validForwardStatus :: Int -> Bool
+validForwardStatus status = status >= 100 && status <= 599
+{-# INLINE validForwardStatus #-}
+
+
+-- | Render the field value. An invalid member produces no bytes.
 renderCacheStatus :: CacheStatus -> M.Builder
-renderCacheStatus (CacheStatus entries) = M.intersperse ", " $ renderCacheStatusEntry <$> entries
+renderCacheStatus = either (const mempty) id . renderCacheStatusChecked
+
+
+{- | Validate all entries before emitting the list, including the surviving
+extension parameters after ordered replacement.
+-}
+renderCacheStatusChecked :: CacheStatus -> Either String M.Builder
+renderCacheStatusChecked (CacheStatus entries)
+  | all validCacheStatusEntry entries = Right (R.renderSeparated ", " renderCacheStatusEntry entries)
+  | otherwise = Left "Invalid Cache-Status member or parameter"
+{-# INLINE renderCacheStatusChecked #-}
+
+
+validCacheStatusEntry :: CacheStatusEntry -> Bool
+validCacheStatusEntry (CacheStatusEntry identifier hitOrForward common) =
+  validTokenOrString identifier
+    && validForward hitOrForward
+    && validCommonFields (isRight hitOrForward) common
+  where
+    validTokenOrString = either P.isStructuredFieldToken P.isStructuredFieldString
+
+    validForward (Left _) = True
+    validForward (Right (ForwardInfo reason status _ _)) =
+      validReason reason && maybe True validForwardStatus status
+    validReason (UnknownForward reason) = P.isStructuredFieldToken (P.RFC8941Token reason)
+    validReason _ = True
+
+    validCommonFields forwarded (CacheStatusCommonFields ttl key detail parameters) =
+      maybe True (P.isStructuredFieldBareItem . P.Integer) ttl
+        && maybe True P.isStructuredFieldString key
+        && maybe True validTokenOrString detail
+        && all (validExtension forwarded) (P.orderedFieldEntries fst parameters)
+    validExtension forwarded (key, value) =
+      projectedParameter forwarded key
+        || (P.isStructuredFieldKey key && maybe True P.isStructuredFieldBareItem value)
 
 
 renderCacheStatusEntry :: CacheStatusEntry -> M.Builder
 renderCacheStatusEntry (CacheStatusEntry k hf cf) =
   either R.rfc8941Token R.rfc8941String k
     <> renderHitOrForward hf
-    <> renderCommonFields cf
+    <> renderCommonFields (isRight hf) cf
 
 
 renderHitOrForward :: Either Hit ForwardInfo -> M.Builder
@@ -294,19 +336,18 @@ renderDetail :: Maybe (Either P.RFC8941Token P.RFC8941String) -> M.Builder
 renderDetail = R.rfc8941Parameter R.ExcludeIfEmpty (either R.rfc8941Token R.rfc8941String) "detail"
 
 
-renderUnknownParameter :: (ShortText, Maybe P.ItemValue) -> M.Builder
-renderUnknownParameter (k, mv) =
-  M.char7 ';'
-    <> R.shortText k
-    <> case mv of
-      Nothing -> mempty
-      Just (P.Boolean True) -> mempty
-      Just v -> M.char7 '=' <> R.rfc8941ItemValue v
-
-
-renderCommonFields :: CacheStatusCommonFields -> M.Builder
-renderCommonFields (CacheStatusCommonFields ttl key detail ups) =
+renderCommonFields :: Bool -> CacheStatusCommonFields -> M.Builder
+renderCommonFields forwarded (CacheStatusCommonFields ttl key detail parameters) =
   renderTtl ttl
     <> renderKey key
     <> renderDetail detail
-    <> foldMap renderUnknownParameter (P.orderedFieldEntries fst ups)
+    <> renderExtensions forwarded (P.orderedFieldEntries fst parameters)
+
+
+renderExtensions :: Bool -> [(ShortText, Maybe P.ItemValue)] -> M.Builder
+renderExtensions _ [] = mempty
+renderExtensions forwarded ((name, value) : rest)
+  | projectedParameter forwarded name = renderExtensions forwarded rest
+  | otherwise =
+      R.renderStructuredFieldParameter name (fromMaybe (P.Boolean True) value)
+        <> renderExtensions forwarded rest

@@ -55,6 +55,9 @@ tests =
                 parseRange "bytes=8-7" `shouldBe` Nothing
                 parseRange "bytes=18446744073709551616-" `shouldBe` Nothing
             ]
+      , it "resolves parsed byte ranges against the resource length" $
+          fmap (map (resolveByteRange 10)) (parseRange "bytes=8-20,10-,-3")
+            `shouldBe` Just [Just (ResolvedByteRange 8 2), Nothing, Just (ResolvedByteRange 7 3)]
       , describe "parseContentRange / parseContentRangeFull" $
           sequence_
             [ it "satisfied returns the legacy shape" $

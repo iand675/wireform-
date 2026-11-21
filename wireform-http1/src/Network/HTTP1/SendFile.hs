@@ -29,6 +29,7 @@ Windows-ready.)
 -}
 module Network.HTTP1.SendFile (
   sendFile,
+  sendFileExact,
   sendFileFd,
   sendMore,
 ) where
@@ -78,11 +79,22 @@ sendFile sock fileFd offset0 totalLen =
     sendFileFd sockFdInt fileFd offset0 totalLen
 
 
+-- | Like 'sendFile', with an error on early EOF. Use when the length
+-- has already been committed to the wire.
+sendFileExact :: Socket -> Fd -> Word64 -> Word64 -> IO ()
+sendFileExact sock fd offset len =
+  withFdSocket sock $ \sockFd -> sendFileFdWith unexpectedEof sockFd fd offset len
+
+
 {- | Same as 'sendFile' but takes a raw socket file descriptor. Useful
 when you already have one (e.g. from a custom event loop).
 -}
 sendFileFd :: CInt -> Fd -> Word64 -> Word64 -> IO ()
-sendFileFd sockFd (Fd fileFdInt) = loop
+sendFileFd = sendFileFdWith (pure ())
+
+
+sendFileFdWith :: IO () -> CInt -> Fd -> Word64 -> Word64 -> IO ()
+sendFileFdWith onEof sockFd (Fd fileFdInt) = loop
   where
     -- The per-call cap matters: very large counts can saturate the
     -- send buffer and starve other connections sharing the
@@ -105,15 +117,16 @@ sendFileFd sockFd (Fd fileFdInt) = loop
                else throwSendfileError err
         else
           if n == 0
-            -- File ended before we expected (e.g. the user-supplied
-            -- length lied). Bail; the caller is responsible for
-            -- having stat'd the file size correctly.
-            then pure ()
+            then onEof
             else loop (offset + fromIntegral n) (remaining - fromIntegral n)
 
 
 isWouldBlock :: Errno -> Bool
 isWouldBlock err = err == eAGAIN || err == eWOULDBLOCK
+
+
+unexpectedEof :: IO ()
+unexpectedEof = ioError (userError "sendfile: unexpected end of file")
 
 
 throwSendfileError :: Errno -> IO a

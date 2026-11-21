@@ -23,6 +23,8 @@ module Network.HTTP.Headers.EDIINTFeatures (
   renderEDIINTFeatures,
 ) where
 
+import qualified Data.ByteString.Short as SBS
+import Data.Char (chr)
 import qualified Data.CharSet as CharSet
 import Data.CharSet.Posix.Ascii (alnum)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -31,7 +33,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hEDIINTFeatures)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedText, renderSeparated, shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedText, encodeCommaSeparatedTextChecked, renderSeparated, shortText)
 
 
 -- | @EDIINT-Features@ value: the non-empty list of advertised feature tokens.
@@ -49,6 +51,9 @@ instance KnownHeader EDIINTFeatures where
 
 
   renderToHeaders _ = encodeCommaSeparatedText . ediintFeatures
+
+
+  renderToHeadersChecked _ = encodeCommaSeparatedTextChecked validFeatureName . ediintFeatures
 
 
   headerName _ = hEDIINTFeatures
@@ -72,6 +77,14 @@ featureNamesParser = do
 featureNameChars :: AsciiSet
 featureNameChars = asciiSet (alnum <> CharSet.singleton '-')
 {-# NOINLINE featureNameChars #-}
+
+
+validFeatureName :: ST.ShortText -> Bool
+validFeatureName name = case featureNameChars of
+  AsciiSet low high ->
+    let bytes = ST.toShortByteString name
+    in not (SBS.null bytes) && scanCompactBytes (asciiMember low high . chr . fromIntegral) bytes 0
+{-# INLINE validFeatureName #-}
 
 
 renderEDIINTFeatures :: EDIINTFeatures -> M.Builder

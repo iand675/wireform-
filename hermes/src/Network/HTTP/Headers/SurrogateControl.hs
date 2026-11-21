@@ -28,22 +28,22 @@ module Network.HTTP.Headers.SurrogateControl (
   renderSurrogateControl,
 ) where
 
-import Data.Bits ((.|.))
-import Data.ByteString (ByteString)
-import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
-import qualified Data.ByteString.Short.Internal as SBSI
-import Data.Char (toLower)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
+import Data.Maybe (isNothing)
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
+import Network.HTTP.ContentNegotiation (sameNegotiationToken)
 import Network.HTTP.Grammar.Parser
 import Network.HTTP.Grammar.Rendering (renderHttpQuotedString, shortText)
+import qualified Network.HTTP.Grammar.Rendering as R
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSurrogateControl)
 import qualified Network.HTTP.Headers.Mason as M
-import Network.HTTP.Headers.SurrogateCapability (SurrogateFeature, parseSurrogateFeatureSet, renderSurrogateFeatureSet, surrogateCapabilitySetParser)
+import Network.HTTP.Headers.SurrogateCapability (SurrogateFeature, isSurrogateFeatureSet, parseSurrogateFeatureSet, renderSurrogateFeatureSet, surrogateCapabilitySetParser)
+import Wireform.Encode.Direct (dWord8)
 
 
 newtype SurrogateControl = SurrogateControl
@@ -97,14 +97,14 @@ surrogateControlTargets (TargetedSurrogateControlDirective _ _ targets) = NE.toL
 -}
 surrogateControlKind :: SurrogateControlDirective -> Either String SurrogateControlKind
 surrogateControlKind directive =
-  case foldedName (ST.toByteString (surrogateControlName directive)) of
-    "no-store" -> flag SurrogateNoStore
-    "no-store-remote" -> flag SurrogateNoStoreRemote
-    "max-age" -> argument (parseFieldLine "Surrogate-Control max-age" maxAge . ST.toByteString)
-    "content" -> argument (fmap SurrogateContent . parseSurrogateFeatureSet)
-    "stale-while-revalidate" -> stale SurrogateStaleWhileRevalidate
-    "stale-if-error" -> stale SurrogateStaleIfError
-    _ -> Right (SurrogateExtension (surrogateControlName directive) value)
+  case directiveName (surrogateControlName directive) of
+    NoStoreName -> flag SurrogateNoStore
+    NoStoreRemoteName -> flag SurrogateNoStoreRemote
+    MaxAgeName -> argument (parseFieldLine "Surrogate-Control max-age" maxAge . ST.toByteString)
+    ContentName -> argument (fmap SurrogateContent . parseSurrogateFeatureSet)
+    StaleRevalidateName -> stale SurrogateStaleWhileRevalidate
+    StaleErrorName -> stale SurrogateStaleIfError
+    ExtensionName -> Right (SurrogateExtension (surrogateControlName directive) value)
   where
     value = surrogateControlValue directive
     flag kind = case value of
@@ -145,6 +145,52 @@ instance KnownHeader SurrogateControl where
   renderToHeaders _ = M.toStrictByteString . renderSurrogateControl
 
 
+  renderToHeadersChecked _ (SurrogateControl entries) =
+    R.encodeCommaSeparatedChecked bound write (NE.toList entries)
+    where
+      width = SBS.length . ST.toShortByteString
+      add = BSI.checkedAdd "Surrogate-Control"
+      bound directive
+        | isHttpTokenText name
+        , validArgument (directiveName name) value =
+            targetBound (add (width name) (maybe 0 (\v -> let n = width v in add 3 (add n n)) value))
+              (surrogateControlTargets directive)
+        | otherwise = -1
+        where
+          name = surrogateControlName directive
+          value = surrogateControlValue directive
+      targetBound size [] = size
+      targetBound size (target : rest)
+        | isHttpTokenText target = targetBound (add (add size 1) (width target)) rest
+        | otherwise = -1
+      validArgument NoStoreName value = isNothing value
+      validArgument NoStoreRemoteName value = isNothing value
+      validArgument MaxAgeName value = maybe False (\v -> isDecimalText v || isDecimalPairText 43 v) value
+      validArgument ContentName value = maybe False isSurrogateFeatureSet value
+      validArgument StaleRevalidateName value = maybe False isDecimalText value
+      validArgument StaleErrorName value = maybe False isDecimalText value
+      validArgument ExtensionName value = maybe True isHttpQuotedText value
+      write ptr start directive = do
+        let name = surrogateControlName directive
+        nameEnd <- R.copyText ptr start name
+        end <- case surrogateControlValue directive of
+          Nothing -> pure nameEnd
+          Just value -> do
+            equals <- dWord8 ptr nameEnd 61
+            if sameNegotiationToken name "content"
+              then do
+                opened <- dWord8 ptr equals 34
+                closed <- R.copyText ptr opened value
+                dWord8 ptr closed 34
+              else R.writeParameterValue ptr equals value
+        writeTargets ptr end (surrogateControlTargets directive)
+      writeTargets _ offset [] = pure offset
+      writeTargets ptr offset (target : rest) = do
+        separator <- dWord8 ptr offset 59
+        end <- R.copyText ptr separator target
+        writeTargets ptr end rest
+
+
   headerName _ = hSurrogateControl
 
 
@@ -159,17 +205,16 @@ directiveList = httpList directiveParser
 
 directiveParser :: ParserT st String SurrogateControlDirective
 directiveParser = do
-  nameBytes <- rfc9110TokenBS
-  let name = STU.fromByteStringUnsafe nameBytes
+  name <- rfc9110Token
   ows
-  value <- case foldedName nameBytes of
-    "no-store" -> pure Nothing
-    "no-store-remote" -> pure Nothing
-    "max-age" -> Just <$> (equals *> shortASCIIFromParser_ maxAge)
-    "content" -> Just <$> (equals *> surrogateCapabilitySetParser)
-    "stale-while-revalidate" -> numeric
-    "stale-if-error" -> numeric
-    _ -> withOption equals (const (Just <$> (rfc9110Token <|> (ST.fromText <$> httpQuotedString)))) (pure Nothing)
+  value <- case directiveName name of
+    NoStoreName -> pure Nothing
+    NoStoreRemoteName -> pure Nothing
+    MaxAgeName -> Just <$> (equals *> shortASCIIFromParser_ maxAge)
+    ContentName -> Just <$> (equals *> surrogateCapabilitySetParser)
+    StaleRevalidateName -> numeric
+    StaleErrorName -> numeric
+    ExtensionName -> withOption equals (const (Just <$> (rfc9110Token <|> (ST.fromText <$> httpQuotedString)))) (pure Nothing)
   targets <- many (ows *> $(char ';') *> ows *> rfc9110Token)
   pure $ case NE.nonEmpty targets of
     Nothing -> SurrogateControlDirective name value
@@ -179,11 +224,27 @@ directiveParser = do
     numeric = Just <$> (equals *> shortASCIIFromParser_ delay)
 
 
-foldedName :: ByteString -> ByteString
-foldedName name
-  | BSC.any (\c -> c >= 'A' && c <= 'Z') name = BSC.map toLower name
-  | otherwise = name
-{-# INLINE foldedName #-}
+data DirectiveName
+  = NoStoreName
+  | NoStoreRemoteName
+  | MaxAgeName
+  | ContentName
+  | StaleRevalidateName
+  | StaleErrorName
+  | ExtensionName
+
+
+directiveName :: ST.ShortText -> DirectiveName
+directiveName name = case SBS.length (ST.toShortByteString name) of
+  7
+    | sameNegotiationToken name "max-age" -> MaxAgeName
+    | sameNegotiationToken name "content" -> ContentName
+  8 | sameNegotiationToken name "no-store" -> NoStoreName
+  14 | sameNegotiationToken name "stale-if-error" -> StaleErrorName
+  15 | sameNegotiationToken name "no-store-remote" -> NoStoreRemoteName
+  22 | sameNegotiationToken name "stale-while-revalidate" -> StaleRevalidateName
+  _ -> ExtensionName
+{-# INLINE directiveName #-}
 
 
 delay :: ParserT st String Word
@@ -210,13 +271,10 @@ renderDirective directive =
   where
     name = surrogateControlName directive
     renderValue v
-      | not (SBS.null bytes) && SBS.all (isTokenChar . toEnum . fromIntegral) bytes && not contentName = M.shortByteString bytes
+      | isHttpTokenText v && not (sameNegotiationToken name "content") = M.shortByteString bytes
       | SBS.all plainQuotedByte bytes = M.char7 '"' <> M.shortByteString bytes <> M.char7 '"'
       | otherwise = renderHttpQuotedString (ST.toText v)
       where
         bytes = ST.toShortByteString v
-    contentName =
-      let bytes = ST.toShortByteString name
-      in SBS.length bytes == 7 && SBSI.unsafeIndex bytes 0 .|. 32 == 99 && foldedName (ST.toByteString name) == "content"
     plainQuotedByte byte = byte == 9 || (byte >= 32 && byte < 127 && byte /= 34 && byte /= 92)
 {-# INLINE renderDirective #-}

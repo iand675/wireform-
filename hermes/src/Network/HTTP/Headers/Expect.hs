@@ -1,3 +1,4 @@
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
@@ -33,9 +34,14 @@ module Network.HTTP.Headers.Expect (
 ) where
 
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.CaseInsensitive as CI
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
+import GHC.ByteOrder (ByteOrder (..), targetByteOrder)
+import GHC.Exts (indexWord8OffAddrAsWord32#, indexWord8OffAddrAsWord64#)
+import GHC.ForeignPtr (ForeignPtr (..), unsafeWithForeignPtr)
+import GHC.Word (Word32 (..), Word64 (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hExpect)
 import qualified Network.HTTP.Headers.Mason as M
@@ -69,7 +75,7 @@ instance KnownHeader Expect where
 
 
   parseFromHeaders _ (wire NE.:| [])
-    | wire == continueWire = Right continueExpectation
+    | isCanonicalContinue wire = Right continueExpectation
   parseFromHeaders _ fields = parseExpectFields fields
   {-# INLINE parseFromHeaders #-}
 
@@ -78,7 +84,25 @@ instance KnownHeader Expect where
   renderToHeaders _ value = M.toStrictByteString (renderExpect value)
 
 
+  renderToHeadersChecked _ ExpectEmpty = Just ""
+  renderToHeadersChecked _ (Expect (Expectation "100-continue" Nothing [] NE.:| [])) = Just "100-continue"
+  renderToHeadersChecked _ value@(Expect entries)
+    | all validExpectation entries = Just (M.toStrictByteString (renderExpect value))
+    | otherwise = Nothing
+
+
   headerName _ = hExpect
+
+
+validExpectation :: Expectation -> Bool
+validExpectation (Expectation name value params) =
+  isHttpTokenText name && case value of
+    Nothing -> null params
+    Just word -> isHttpWordValue word && all validParameter params
+  where
+    validParameter (key, Just word) = isHttpTokenText key && isHttpWordValue word
+    validParameter (_, Nothing) = False
+{-# INLINE validExpectation #-}
 
 
 expectParser :: ParserT st String Expect
@@ -90,8 +114,24 @@ parseExpectFields fields = parseFieldLine "Expect" expectParser (combineFieldLin
 {-# NOINLINE parseExpectFields #-}
 
 
-continueWire :: ByteString
-continueWire = "100-continue"
+-- Compare "100-cont" and "inue" in place. ByteString slices can begin at
+-- any alignment, and the size check bounds both loads.
+isCanonicalContinue :: ByteString -> Bool
+isCanonicalContinue (BSI.BS input@(ForeignPtr start _) 12) =
+  BSI.accursedUnutterablePerformIO $ unsafeWithForeignPtr input $ \_ ->
+    pure $!
+      ( W64# (indexWord8OffAddrAsWord64# start 0#) == prefix
+          && W32# (indexWord8OffAddrAsWord32# start 8#) == suffix
+      )
+  where
+    prefix = case targetByteOrder of
+      BigEndian -> 0x3130302d636f6e74
+      LittleEndian -> 0x746e6f632d303031
+    suffix = case targetByteOrder of
+      BigEndian -> 0x696e7565
+      LittleEndian -> 0x65756e69
+isCanonicalContinue _ = False
+{-# INLINE isCanonicalContinue #-}
 
 
 continueExpectation :: Expect
@@ -108,11 +148,12 @@ expectationList ExpectEmpty = []
 expectationList (Expect entries) = NE.toList entries
 
 
--- | Test the combined field for the bare, case-insensitive
--- @100-continue@ expectation.
+{- | Test the combined field for the bare, case-insensitive
+@100-continue@ expectation.
+-}
 hasContinueExpectation :: [ByteString] -> Bool
 hasContinueExpectation [wire]
-  | wire == continueWire = True
+  | isCanonicalContinue wire = True
 hasContinueExpectation fields = case parseExpectFields <$> NE.nonEmpty fields of
   Just (Right (Expect entries)) -> any continues entries
   _ -> False

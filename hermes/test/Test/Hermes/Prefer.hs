@@ -13,7 +13,7 @@ import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import Network.HTTP.Headers.HeaderFieldName (hRepeatabilityFirstSent, hRepeatabilityResult)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -152,6 +152,20 @@ unit_prefer_opaque_words = it "preserves each allowed quoted-pair octet in prefe
   mapM_ check [minBound .. maxBound]
 
 
+unit_prefer_checked_write :: Spec
+unit_prefer_checked_write = it "preserves the original list when an authored word or name is malformed" $ do
+  let fields = headerMapFromList [("Prefer", "respond-async"), ("Prefer", "return=minimal")]
+      valid = P.Preference "wait" (Just "10") []
+      reject entry = do
+        let value = P.Prefer (valid :| [entry])
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value fields `shouldBe` fields
+  mapM_ reject $
+    map (\name -> P.Preference name Nothing []) ["", "wait, return", "re turn", "x\xff"]
+      <> map (\word -> P.Preference "return" (Just word) []) ["", "minimal,wait=10", "\"unfinished", "\"value\"\t", "\"a\\\DEL\""]
+      <> [P.Preference "x" Nothing [("a;b", Nothing)], P.Preference "x" Nothing [("a", Just "\"a\"b\"")]]
+
+
 prop_prefer_roundtrip :: Property
 prop_prefer_roundtrip = property $ do
   v <- forAll preferGen
@@ -201,6 +215,22 @@ unit_applied_field_lines = it "reads repeated applied preferences and rejects re
     ["return=minimal;reason=cache", "return=minimal;", "return= ", " , , "]
   let legacy = PA.PreferenceApplied (PA.AppliedPreference "return" (Just "minimal") [("reason", Just "cache")] :| [])
   headerMapToList (setHeader legacy (headerMapFromList [])) `shouldBe` [("preference-applied", "return=minimal")]
+
+
+unit_applied_checked_write :: Spec
+unit_applied_checked_write = it "checks authored applied names and complete token or quoted values" $ do
+  let fields = headerMapFromList [("Preference-Applied", "return=minimal"), ("Preference-Applied", "respond-async")]
+      valid = PA.AppliedPreference "respond-async" Nothing []
+      reject entry = do
+        let value = PA.PreferenceApplied (valid :| [entry])
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value fields `shouldBe` fields
+  mapM_ reject
+    [ PA.AppliedPreference "return=representation" Nothing []
+    , PA.AppliedPreference "return" (Just "minimal;reason=cache") []
+    , PA.AppliedPreference "extension" (Just "\"a\\\"") []
+    , PA.AppliedPreference "extension" (Just "\"a\n\"") []
+    ]
 
 
 prop_applied_roundtrip :: Property
@@ -325,6 +355,18 @@ repeatabilityHeaders = describe "repeatability fields" $ do
     forM_ ["", " ", "client id", "\"uuid\"", "first, second", "client\xff"] $ \input -> do
       lookupHeader @RC.RepeatabilityClientID (headerMapFromList [("Repeatability-Client-ID", input)]) `shouldSatisfy` isLeft
       lookupHeader @RR.RepeatabilityRequestID (headerMapFromList [("Repeatability-Request-ID", input)]) `shouldSatisfy` isLeft
+  it "rejects invalid authored client identifiers before replacing the field" $ do
+    let fields = headerMapFromList [("Repeatability-Client-ID", "old")]
+    forM_ ["", "client id", "first, second", "client\xff"] $ \input -> do
+      let value = RC.RepeatabilityClientID input
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields
+  it "rejects invalid authored request identifiers before replacing the field" $ do
+    let fields = headerMapFromList [("Repeatability-Request-ID", "old")]
+    forM_ ["", "request id", "first, second", "request\xff"] $ \input -> do
+      let value = RR.RepeatabilityRequestID input
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields
   it "checks every octet in a bare or OWS-padded identifier" $ do
     let tchars = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     forM_ [0 .. 255] $ \byte -> do
@@ -369,10 +411,12 @@ tests =
       , unit_prefer_render
       , unit_prefer_field_lines
       , unit_prefer_opaque_words
+      , unit_prefer_checked_write
       , it "Prefer round-trip" prop_prefer_roundtrip
       , unit_applied_parse
       , unit_applied_render
       , unit_applied_field_lines
+      , unit_applied_checked_write
       , it "Preference-Applied round-trip" prop_applied_roundtrip
       , unit_client_id_parse
       , unit_client_id_render

@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 
@@ -12,7 +13,8 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (HeaderCardinality (..), KnownHeader (..), headerMapFromList, insertRawHeader, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (HeaderCardinality (..), HeaderRenderingResultToNonEmpty, KnownHeader (..), defaultHeaderSettings, headerMapFromList, insertRawHeader, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader, setRawHeader)
+import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName)
 import qualified Network.HTTP.Headers.CrossOriginEmbedderPolicy as COEP
 import qualified Network.HTTP.Headers.CrossOriginEmbedderPolicyReportOnly as COEPRO
 import qualified Network.HTTP.Headers.CrossOriginOpenerPolicy as COOP
@@ -306,11 +308,33 @@ typedPolicies = describe "typed policy fields" $ do
       lookupHeader @a (insertRawHeader name canonical (field canonical)) `shouldSatisfy` isLeft
 
 
+checkedPolicyWrites :: Spec
+checkedPolicyWrites = do
+  it "checks authored COEP reporting endpoint strings" $
+    mapM_ (reject "Cross-Origin-Embedder-Policy" . coep) malformed
+  it "checks authored COEP report-only endpoint strings" $
+    mapM_ (reject "Cross-Origin-Embedder-Policy-Report-Only" . COEPRO.CrossOriginEmbedderPolicyReportOnly . coep) malformed
+  it "checks authored COOP reporting endpoint strings" $
+    mapM_ (reject "Cross-Origin-Opener-Policy" . coop) malformed
+  it "checks authored COOP report-only endpoint strings" $
+    mapM_ (reject "Cross-Origin-Opener-Policy-Report-Only" . COOPRO.CrossOriginOpenerPolicyReportOnly . coop) malformed
+  where
+    malformed = map (Just . RFC8941String) ["a\tb", "a\n", "a\DEL", "é"]
+    coep = COEP.CrossOriginEmbedderPolicy COEP.CoepRequireCorp
+    coop = COOP.CrossOriginOpenerPolicy COOP.CoopSameOrigin
+    reject :: (KnownHeader a, HeaderRenderingResultToNonEmpty (Cardinality a)) => HeaderFieldName -> a -> Expectation
+    reject name value = do
+      let fields = setRawHeader name ("previous" :| []) (headerMapFromList [])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields
+
+
 tests :: Spec
 tests =
   describe "CrossOrigin" $
     sequence_
-      [ unit_coep_parse
+      [ checkedPolicyWrites
+      , unit_coep_parse
       , unit_coep_render
       , it "COEP round-trip" prop_coep_roundtrip
       , unit_coep_ro_parse

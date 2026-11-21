@@ -6,7 +6,7 @@ import Network.HTTP.ContentCoding (ContentCoding (..))
 import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType (..), WeightedMediaRange (..))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.Accept (Accept (..), acceptedContentQuality, preferredContentType)
-import Network.HTTP.Headers.AcceptCharset (AcceptCharset (..), WeightedCharset (..))
+import Network.HTTP.Headers.AcceptCharset (AcceptCharset (..), WeightedCharset (..), acceptedCharsetQuality, preferredCharset)
 import Network.HTTP.Headers.AcceptEncoding (AcceptEncoding (..), EncodingTag (..), WeightedEncoding (..))
 import Network.HTTP.Headers.AcceptLanguage (AcceptLanguage (..), WeightedLanguage (..), acceptedLanguageQuality, preferredLanguage)
 import Network.HTTP.Headers.CacheControl (CacheControl (..), CacheControlDirective (..))
@@ -100,11 +100,58 @@ tests = do
       let parse value = lookupHeader @Accept (headerMapFromList [("accept", value)])
       map (isLeft . parse) ["text/plain;q=0.1234", "text/plain;q=1.001", "text/plain;q=2", "text/plain;q=\"0.5\"", "text/plain;q=0;Q=1"]
         `shouldBe` replicate 5 True
+    it "rejects invalid authored Accept ranges and reserved quality parameters" $ do
+      let previous = headerMapFromList [("Accept", "text/plain"), ("Accept", "application/json")]
+          valid = MediaType "text" "plain"
+          ranges = [ MediaRange (MediaType "" "plain") []
+                   , MediaRange (MediaType "text" "*plain") []
+                   , MediaRange valid [("", "value")]
+                   , MediaRange valid [("Q", "0.5")]
+                   , MediaRange valid [("profile", "bad\DEL")]
+                   ]
+      mapM_
+        ( \range -> do
+            let value = Accept [WeightedMediaRange (MediaRange valid []) 1, WeightedMediaRange range 0.5]
+            renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+            setHeader value previous `shouldBe` previous
+        )
+        ranges
+    it "rejects invalid authored Accept-Encoding coding names" $ do
+      let previous = headerMapFromList [("Accept-Encoding", "gzip"), ("Accept-Encoding", "br")]
+      mapM_
+        ( \coding -> do
+            let value = AcceptEncoding [WeightedEncoding (NamedEncoding GZip) 1, WeightedEncoding (NamedEncoding (Custom coding)) 0.5]
+            renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+            setHeader value previous `shouldBe` previous
+        )
+        ["", "gzip,br", "bad name", "*"]
+    it "rejects invalid authored Accept-Charset names" $ do
+      let previous = headerMapFromList [("Accept-Charset", "utf-8"), ("Accept-Charset", "*")]
+      mapM_
+        ( \charset -> do
+            let value = AcceptCharset [WeightedCharset "utf-8" 1, WeightedCharset charset 0.5]
+            renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+            setHeader value previous `shouldBe` previous
+        )
+        ["", "bad name", "utf-8,shift_jis", "café"]
     it "rejects a malformed later field line" $
       isLeft (lookupHeader @AcceptEncoding (headerMapFromList [("accept-encoding", "gzip"), ("accept-encoding", "br;q=2")])) `shouldBe` True
     it "renders quality weights as decimals with at most three fractional digits" $ do
       let value = AcceptLanguage [WeightedLanguage "en" 0.12349, WeightedLanguage "fr" 0.009, WeightedLanguage "de" 0.05]
-      renderToHeaders defaultHeaderSettings value `shouldBe` "en;q=0.123, fr;q=0.009, de;q=0.05"
+          wire = "en;q=0.123, fr;q=0.009, de;q=0.05"
+      renderToHeaders defaultHeaderSettings value `shouldBe` wire
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Just (wire :| [])
+    it "rejects malformed authored Accept-Language ranges" $ do
+      let original = headerMapFromList [("Accept-Language", "en-US"), ("Accept-Language", "*;q=0.5")]
+      mapM_
+        ( \range -> do
+            let value = AcceptLanguage [WeightedLanguage "en-US" 1, WeightedLanguage range 0.5]
+            renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+            setHeader value original `shouldBe` original
+        )
+        ["", "fr, de", "*-CH", "en-", "en-abcdefghi", "123", "e1-US"]
+      let weighted = AcceptLanguage [WeightedLanguage "x" 2, WeightedLanguage "en-419" 0.25, WeightedLanguage "*" (0 / 0)]
+      renderHeaderLines defaultHeaderSettings weighted `shouldBe` Just ("x, en-419;q=0.25, *;q=0" :| [])
     it "assigns media qualities using the RFC 9110 precedence example" $ do
       let fields = headerMapFromList
             [ ("Accept", "text/*;q=0.3, text/plain;q=0.7, text/plain;format=flowed")
@@ -184,3 +231,34 @@ tests = do
       preferredLanguage Nothing offered `shouldBe` Just (LanguageTag "es-419")
       preferredLanguage (wildcard 0) offered `shouldBe` Nothing
       preferredLanguage (wildcard 1) offered `shouldBe` Just (LanguageTag "es-419")
+  describe "Accept-Charset selection" $ do
+    it "applies named weights and exclusions before the wildcard" $ do
+      let fields = headerMapFromList
+            [ ("Accept-Charset", "*;q=0.8, UTF-8;q=0")
+            , ("accept-charset", "ISO-8859-1;q=0.5, shift_jis")
+            ]
+          offered = ["utf-8", "utf-8-extra", "iso-8859-1", "SHIFT_JIS"]
+      preferences <- either expectationFailure pure (lookupHeader @AcceptCharset fields)
+      map (acceptedCharsetQuality preferences) offered `shouldBe` [0, 0.8, 0.5, 1]
+      preferredCharset preferences offered `shouldBe` Just "SHIFT_JIS"
+      preferredCharset preferences ["utf-8"] `shouldBe` Nothing
+    it "uses the first duplicate entry and preserves offer order on ties" $ do
+      let fields = headerMapFromList
+            [ ("Accept-Charset", "UTF-8;q=0.4, shift_jis;q=0.4, *;q=0")
+            , ("accept-charset", "utf-8, *")
+            ]
+      preferences <- either expectationFailure pure (lookupHeader @AcceptCharset fields)
+      map (acceptedCharsetQuality preferences) ["utf-8", "shift_jis", "us-ascii"] `shouldBe` [0.4, 0.4, 0]
+      preferredCharset preferences ["SHIFT_JIS", "utf-8"] `shouldBe` Just "SHIFT_JIS"
+    it "distinguishes absent, empty, and unmatched preferences" $ do
+      let offered = ["iso-8859-1", "utf-8-extra"]
+      empty <- either expectationFailure pure (lookupHeader @AcceptCharset (headerMapFromList [("Accept-Charset", " , ")]))
+      utf8 <- either expectationFailure pure (lookupHeader @AcceptCharset (headerMapFromList [("Accept-Charset", "utf-8")]))
+      preferredCharset Nothing offered `shouldBe` Just "iso-8859-1"
+      preferredCharset Nothing [] `shouldBe` Nothing
+      empty `shouldBe` Just (AcceptCharset [])
+      preferredCharset empty offered `shouldBe` Nothing
+      preferredCharset utf8 offered `shouldBe` Nothing
+    it "clamps authored weights without losing a wildcard exclusion" $ do
+      let preferences = Just (AcceptCharset [WeightedCharset "*" (0 / 0), WeightedCharset "*" 1, WeightedCharset "UTF-8" 2])
+      map (acceptedCharsetQuality preferences) ["utf-8", "us-ascii"] `shouldBe` [1, 0]

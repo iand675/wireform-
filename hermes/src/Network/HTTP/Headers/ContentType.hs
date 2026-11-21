@@ -19,19 +19,22 @@ module Network.HTTP.Headers.ContentType (
   mediaTypeFieldFromText,
   mediaTypeFieldText,
   mediaTypeFieldBytes,
+  encodeMediaTypeFieldChecked,
   mediaTypeFieldContentType,
 ) where
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Short as SBS
+import Data.Either (isRight)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
-import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType, mediaTypeWithParametersParser, renderMediaRange, renderMediaType)
+import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType, encodeMediaTypesChecked, mediaTypeSpelling, mediaTypeWithParametersParser, renderMediaRange, renderMediaType)
 import Network.HTTP.Grammar.Rendering (opaqueShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentType)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
+import Wireform.Parser.Driver (parseByteString)
 
 
 data ContentType
@@ -49,16 +52,15 @@ instance KnownHeader ContentType where
   type Direction ContentType = 'RequestAndResponse
 
 
-  parseFromHeaders _ (header :| rest) = case rest of
-    [] -> case runParser contentTypeParser header of
-      OK ct "" -> Right ct
-      OK _ leftover -> Left $ "Unconsumed input after parsing Content-Type header: " <> show leftover
-      Fail -> Left "Failed to parse Content-Type header"
-      Err e -> Left e
-    _ -> Left "Multiple Content-Type field lines"
+  parseFromHeaders _ (header :| []) = parseFieldLine "Content-Type" contentTypeParser header
+  parseFromHeaders _ _ = Left "Multiple Content-Type field lines"
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentType
+
+
+  renderToHeadersChecked _ value =
+    encodeMediaTypesChecked [MediaRange (contentType value) (contentTypeParameters value)]
 
 
   headerName _ = hContentType
@@ -117,6 +119,16 @@ mediaTypeFieldText (ParsedMediaTypeField bytes _) = opaqueShortText bytes
 mediaTypeFieldBytes :: MediaTypeField -> SBS.ShortByteString
 mediaTypeFieldBytes (MediaTypeFieldText value) = ST.toShortByteString value
 mediaTypeFieldBytes (ParsedMediaTypeField bytes _) = bytes
+
+
+-- | Keep parsed wire spelling and validate a newly authored field value.
+encodeMediaTypeFieldChecked :: MediaTypeField -> Maybe BS.ByteString
+encodeMediaTypeFieldChecked (ParsedMediaTypeField bytes _) = Just (SBS.fromShort bytes)
+encodeMediaTypeFieldChecked (MediaTypeFieldText value)
+  | isRight (parseByteString (ows *> mediaTypeSpelling <* ows <* eof) wire) = Just wire
+  | otherwise = Nothing
+  where
+    wire = ST.toByteString value
 
 
 mediaTypeFieldContentType :: MediaTypeField -> Either String ContentType

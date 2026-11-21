@@ -763,7 +763,7 @@ resumeHeader field
   | BS.null field = Nothing
   | otherwise =
       case Typed.parseFromHeaders @LastEventID Typed.defaultHeaderSettings (field :| []) of
-        Right cursor -> Just (Typed.renderToHeaders Typed.defaultHeaderSettings cursor)
+        Right cursor -> Typed.renderToHeadersChecked Typed.defaultHeaderSettings cursor
         Left _ -> Nothing
 
 

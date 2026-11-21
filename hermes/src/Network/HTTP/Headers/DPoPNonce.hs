@@ -17,6 +17,7 @@ module Network.HTTP.Headers.DPoPNonce (
 ) where
 
 import qualified Data.CharSet as CharSet
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hDPoPNonce)
@@ -40,6 +41,12 @@ instance KnownHeader DPoPNonce where
 
 
   renderToHeaders _ = ST.toByteString . dPoPNonceValue
+
+
+  renderToHeadersChecked _ (DPoPNonce nonce) =
+    let wire = ST.toByteString nonce
+    in either (const Nothing) (const (Just wire)) $
+         parseSingleFieldLine "DPoP-Nonce" (asciiSetBytes nonceChars) (wire :| [])
 
 
   headerName _ = hDPoPNonce

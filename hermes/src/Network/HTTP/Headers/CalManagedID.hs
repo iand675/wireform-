@@ -14,6 +14,7 @@ module Network.HTTP.Headers.CalManagedID (
 ) where
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Unsafe as BSU
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
@@ -46,6 +47,15 @@ instance KnownHeader CalManagedID where
 
 
   renderToHeaders _ = M.toStrictByteString . renderCalManagedID
+
+
+  renderToHeadersChecked _ (CalManagedID value)
+    | BS.null wire = Just wire
+    | not (isFieldSpace (BSU.unsafeHead wire) || isFieldSpace (BSU.unsafeLast wire))
+    , BS.all isParamChar wire = Just wire
+    | otherwise = Nothing
+    where
+      wire = ST.toByteString value
 
 
   headerName _ = hCalManagedID

@@ -4,6 +4,7 @@
 module Test.Hermes.SecurityMisc (tests) where
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Short as SBS
 import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
@@ -11,7 +12,7 @@ import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.Grammar.Authority (SerializedOrigin (..))
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.ClearSiteData as CSD
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
@@ -307,12 +308,29 @@ tests =
       , unit_xcto_parse
       , unit_xcto_render
       , it "X-Content-Type-Options round-trip" prop_xcto_roundtrip
+      , it "validates extension X-Content-Type-Options before writing" $ do
+          let fields = headerMapFromList [("X-Content-Type-Options", "nosniff")]
+          mapM_ (\token -> do
+            let value = XCTO.XContentTypeOptionsOther token
+            renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+            setHeader value fields `shouldBe` fields) ["", "NoSnIfF", "xx yy", "xx,yy", "é"]
       , unit_xfo_parse
       , unit_xfo_render
       , unit_xfo_allowfrom
       , it "X-Frame-Options round-trip" prop_xfo_roundtrip
       , unit_csd_parse
       , unit_csd_render
+      , it "validates authored Clear-Site-Data extension bodies without rewriting wire escapes" $ do
+          let fields = headerMapFromList [("Clear-Site-Data", "\"cache\"")]
+              wrap item = CSD.ClearSiteData (CSD.SiteDataCache :| [item])
+          mapM_ (\item -> do
+            let value = wrap item
+            renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+            setHeader value fields `shouldBe` fields)
+            ([CSD.SiteDataOther "a\DEL", CSD.SiteDataOther "cookies", CSD.SiteDataOther "*"]
+              <> map (CSD.SiteDataOtherWireBytes . SBS.toShort) ["a\"b", "a\\", "a\\\DEL", "a\n", "storage"])
+          renderHeaderLines defaultHeaderSettings (wrap (CSD.SiteDataOtherWireBytes (SBS.toShort "\\x\xff")))
+            `shouldBe` Just ("\"cache\", \"\\x\xff\"" :| [])
       , it "Clear-Site-Data round-trip" prop_csd_roundtrip
       , typedBrowserFields
       ]

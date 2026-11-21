@@ -44,4 +44,7 @@ instance KnownHeader ProxyAuthorization where
   renderToHeaders _ (ProxyAuthorization creds) = M.toStrictByteString $ renderCredentials creds
 
 
+  renderToHeadersChecked _ = encodeCredentialsChecked . proxyAuthorizationCredentials
+
+
   headerName _ = hProxyAuthorization

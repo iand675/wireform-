@@ -21,7 +21,7 @@ module Network.HTTP.Headers.ConfigurationContext (
 ) where
 
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (uriWithFragment)
+import Network.HTTP.Grammar.URIReference (checkedURIField, outboundAbsoluteURIWithFragmentBytes, uriWithFragment)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hConfigurationContext)
 import qualified Network.HTTP.Headers.Mason as M
@@ -44,6 +44,10 @@ instance KnownHeader ConfigurationContext where
 
 
   renderToHeaders _ = ST.toByteString . configurationContextValue
+
+
+  renderToHeadersChecked _ =
+    checkedURIField outboundAbsoluteURIWithFragmentBytes . ST.toByteString . configurationContextValue
 
 
   headerName _ = hConfigurationContext

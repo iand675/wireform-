@@ -1,3 +1,5 @@
+{-# LANGUAGE TypeOperators #-}
+
 module Test.Hermes.Date (tests) where
 
 import Control.Monad (forM_)
@@ -6,6 +8,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Short as SBS
 import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.Proxy (Proxy (..))
 import Data.Time (UTCTime (..), addUTCTime, fromGregorian, secondsToDiffTime)
 import Hedgehog (forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
@@ -14,9 +17,22 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.AcceptDatetime (AcceptDatetime (..))
 import Network.HTTP.Headers.Age (Age (..))
 import Network.HTTP.Headers.CacheControl (CacheControl (..), CacheControlDirective (..))
+import Network.HTTP.Headers.CertNotAfter (CertNotAfter (..))
+import Network.HTTP.Headers.CertNotBefore (CertNotBefore (..))
 import Network.HTTP.Headers.Date (Date (..))
 import Network.HTTP.Headers.Expires (Expires (..))
-import Network.HTTP.Headers.HeaderFieldName (hDate, hRetryAfter)
+import Network.HTTP.Headers.HeaderFieldName (
+  HeaderFieldName,
+  hAcceptDatetime,
+  hDate,
+  hExpires,
+  hIfUnmodifiedSince,
+  hLastModified,
+  hMementoDatetime,
+  hRepeatabilityFirstSent,
+  hRetryAfter,
+  hSunset,
+ )
 import Network.HTTP.Headers.IfModifiedSince (IfModifiedSince (..))
 import Network.HTTP.Headers.IfRange (IfRange (..))
 import Network.HTTP.Headers.IfUnmodifiedSince (IfUnmodifiedSince (..))
@@ -107,16 +123,28 @@ tests = describe "HTTP dates and delays" $ do
       settings
       (headerMapFromList [("Retry-After", "Wednesday, 01-Jan-70 00:00:05 GMT")])
       `shouldBe` Right (Just (SpecificTime (utc 2070 1 1 5)))
-  it "applies the shared parser through each singleton HTTP-date codec" $ do
+  describe "singleton HTTP-date codecs" $ do
     let stamp = date exampleDate
-        fields = " Sunday, 06-Nov-94 08:49:37 GMT\t" :| []
-    parseFromHeaders defaultHeaderSettings fields `shouldBe` Right (AcceptDatetime stamp)
-    parseFromHeaders defaultHeaderSettings fields `shouldBe` Right (Expires stamp)
-    parseFromHeaders defaultHeaderSettings fields `shouldBe` Right (IfUnmodifiedSince stamp)
-    parseFromHeaders defaultHeaderSettings fields `shouldBe` Right (LastModified stamp)
-    parseFromHeaders defaultHeaderSettings fields `shouldBe` Right (MementoDatetime stamp)
-    parseFromHeaders defaultHeaderSettings fields `shouldBe` Right (RepeatabilityFirstSent stamp)
-    parseFromHeaders defaultHeaderSettings fields `shouldBe` Right (Sunset stamp)
+    it "Accept-Datetime" $ checkDateField hAcceptDatetime (AcceptDatetime stamp)
+    it "Expires" $ checkDateField hExpires (Expires stamp)
+    it "If-Unmodified-Since" $ checkDateField hIfUnmodifiedSince (IfUnmodifiedSince stamp)
+    it "Last-Modified" $ checkDateField hLastModified (LastModified stamp)
+    it "Memento-Datetime" $ checkDateField hMementoDatetime (MementoDatetime stamp)
+    it "Repeatability-First-Sent" $ checkDateField hRepeatabilityFirstSent (RepeatabilityFirstSent stamp)
+    it "Sunset" $ checkDateField hSunset (Sunset stamp)
+  describe "rejects unrepresentable authored dates" $ do
+    it "Date" $ checkAuthoredDates Date
+    it "Accept-Datetime" $ checkAuthoredDates AcceptDatetime
+    it "Cert-Not-After" $ checkAuthoredDates CertNotAfter
+    it "Cert-Not-Before" $ checkAuthoredDates CertNotBefore
+    it "Expires" $ checkAuthoredDates Expires
+    it "If-Modified-Since" $ checkAuthoredDates IfModifiedSince
+    it "If-Unmodified-Since" $ checkAuthoredDates IfUnmodifiedSince
+    it "Last-Modified" $ checkAuthoredDates LastModified
+    it "Memento-Datetime" $ checkAuthoredDates MementoDatetime
+    it "Repeatability-First-Sent" $ checkAuthoredDates RepeatabilityFirstSent
+    it "Retry-After" $ checkAuthoredDates SpecificTime
+    it "Sunset" $ checkAuthoredDates Sunset
   it "retains historical cookie expiry dates and ignores their weekday" $ do
     let fields = "session=abc; Expires=Mon, 06 Nov 1898 08:49:37 GMT" :| []
     case parseFromHeaders defaultHeaderSettings fields of
@@ -240,6 +268,40 @@ exampleDate = Date (utc 1994 11 6 31_777)
 
 exampleWireDate :: BS.ByteString
 exampleWireDate = "Sun, 06 Nov 1994 08:49:37 GMT"
+
+
+checkAuthoredDates :: forall a. (KnownHeader a, Cardinality a ~ 'ZeroOrOne, ParseFailure a ~ String, Eq a, Show a) => (UTCTime -> a) -> IO ()
+checkAuthoredDates constructor = do
+  let name = headerName (Proxy @a)
+      original = setRawHeader name (exampleWireDate :| [exampleWireDate]) (headerMapFromList [])
+  forM_ [utc 1899 12 31 0, utc 10000 1 1 0, utc 2026 1 1 (-1), utc 2026 1 1 86_401] $ \timestamp -> do
+    let value = constructor timestamp
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value original `shouldBe` original
+  forM_
+    [ (utc 1900 1 1 0, "Mon, 01 Jan 1900 00:00:00 GMT")
+    , (utc 9999 12 31 86_399, "Fri, 31 Dec 9999 23:59:59 GMT")
+    , (utc 2016 12 31 86_400, "Sat, 31 Dec 2016 23:59:60 GMT")
+    ]
+    $ \(timestamp, wire) -> do
+      let value = constructor timestamp
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Just (wire :| [])
+      lookupHeader @a (setHeader value original) `shouldBe` Right (Just value)
+
+
+checkDateField :: forall a. (KnownHeader a, Cardinality a ~ 'ZeroOrOne, ParseFailure a ~ String, Eq a, Show a) => HeaderFieldName -> a -> IO ()
+checkDateField name value = do
+  let empty = headerMapFromList []
+      field wire = insertRawHeader name wire empty
+      readField = lookupHeader @a . field
+  lookupHeader @a empty `shouldBe` Right Nothing
+  forM_
+    [exampleWireDate, " Sunday, 06-Nov-94 08:49:37 GMT\t", "Sun Nov  6 08:49:37 1994"]
+    (\wire -> readField wire `shouldBe` Right (Just value))
+  readField (exampleWireDate <> " extra") `shouldSatisfy` isLeft
+  let repeated = insertRawHeader name exampleWireDate (field exampleWireDate)
+  lookupHeader @a repeated `shouldSatisfy` isLeft
+  lookupRawHeader name (setHeader value repeated) `shouldBe` Just (exampleWireDate :| [])
 
 
 cookieExpiry :: ByteString -> Either String (Maybe UTCTime)

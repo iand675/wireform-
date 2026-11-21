@@ -26,7 +26,7 @@ import qualified Data.ByteString.Short as SBS
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
-import Network.HTTP.Headers.ContentType (ContentType, MediaTypeField, mediaTypeFieldBytes, mediaTypeFieldContentType, mediaTypeFieldFromText, mediaTypeFieldParser, mediaTypeFieldText)
+import Network.HTTP.Headers.ContentType (ContentType, MediaTypeField, encodeMediaTypeFieldChecked, mediaTypeFieldBytes, mediaTypeFieldContentType, mediaTypeFieldFromText, mediaTypeFieldParser, mediaTypeFieldText)
 import Network.HTTP.Headers.HeaderFieldName (hContentScriptType)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -64,6 +64,9 @@ instance KnownHeader ContentScriptType where
 
 
   renderToHeaders _ = SBS.fromShort . contentScriptTypeBytes
+
+
+  renderToHeadersChecked _ (ContentScriptTypeField value) = encodeMediaTypeFieldChecked value
 
 
   headerName _ = hContentScriptType

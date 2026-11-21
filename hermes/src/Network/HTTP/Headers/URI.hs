@@ -25,15 +25,17 @@ module Network.HTTP.Headers.URI (
   renderURI,
 ) where
 
+import Data.Either (isRight)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.URIReference (uriReference)
+import Network.HTTP.Grammar.URIReference (outboundURIReferenceBytes, uriReference)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hURI)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (shortText)
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- | @URI@ value: a non-empty list of angle-bracketed URIs (brackets stripped).
@@ -51,6 +53,12 @@ instance KnownHeader URI where
 
 
   renderToHeaders _ = M.toStrictByteString . renderURI
+
+
+  renderToHeadersChecked settings value@(URI uris)
+    | all (isRight . parseByteString (outboundURIReferenceBytes <* eof) . ST.toByteString) uris =
+        Just (renderToHeaders settings value)
+    | otherwise = Nothing
 
 
   headerName _ = hURI

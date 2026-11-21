@@ -25,7 +25,7 @@ module Network.HTTP.Headers.XForwardedProto (
 
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.Authority (uriSchemeBytes)
+import Network.HTTP.Grammar.Authority (isUriSchemeText, uriSchemeBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXForwardedProto)
 import qualified Network.HTTP.Headers.Mason as M
@@ -57,6 +57,14 @@ instance KnownHeader XForwardedProto where
   renderToHeaders _ XForwardedProtoHttp = "http"
   renderToHeaders _ XForwardedProtoHttps = "https"
   renderToHeaders _ (XForwardedProtoOther scheme) = ST.toByteString scheme
+
+
+  renderToHeadersChecked _ XForwardedProtoHttp = Just "http"
+  renderToHeadersChecked _ XForwardedProtoHttps = Just "https"
+  renderToHeadersChecked _ (XForwardedProtoOther scheme)
+    | isUriSchemeText scheme = Just (ST.toByteString scheme)
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
 
 
   headerName _ = hXForwardedProto

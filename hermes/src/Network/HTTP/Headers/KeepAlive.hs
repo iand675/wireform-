@@ -102,7 +102,7 @@ keepAliveMaxRequests = readLimit "max"
 
 
 readLimit :: ST.ShortText -> KeepAlive -> Either String (Maybe Word64)
-readLimit name = parseLimit . filter (matches . keepAliveParameterName) . keepAliveParameters
+readLimit name = findLimit . keepAliveParameters
   where
     expected = ST.toShortByteString name
     len = SBS.length expected
@@ -113,14 +113,22 @@ readLimit name = parseLimit . filter (matches . keepAliveParameterName) . keepAl
         folded !i =
           i == len
             || ((SBSI.unsafeIndex bytes i .|. 32) == SBSI.unsafeIndex expected i && folded (i + 1))
-    parseLimit [] = Right Nothing
-    parseLimit [KeepAliveParameter _ (Just value)] =
-      let wire = ST.toByteString value
-          fallback = Just <$> parseFieldLine "Keep-Alive limit"
-            (boundedDecimalWord64 (err "Keep-Alive limit exceeds Word64")) wire
-      in withShortDecimal wire (Right . Just . fromIntegral) fallback
-    parseLimit [KeepAliveParameter _ Nothing] = Left "Keep-Alive limit requires a decimal value"
-    parseLimit _ = Left "Repeated Keep-Alive limit"
+    isLimit = matches . keepAliveParameterName
+    findLimit [] = Right Nothing
+    findLimit (entry : rest)
+      | not (isLimit entry) = findLimit rest
+      | any isLimit rest = Left "Repeated Keep-Alive limit"
+      | otherwise = parseLimit (keepAliveParameterValue entry)
+
+    parseLimit Nothing = Left "Keep-Alive limit requires a decimal value"
+    parseLimit (Just value) =
+      let fallback =
+            Just
+              <$> parseFieldLine
+                "Keep-Alive limit"
+                (boundedDecimalWord64 (err "Keep-Alive limit exceeds Word64"))
+                (ST.toByteString value)
+      in withShortTextDecimal value (Right . Just . fromIntegral) fallback
 
 
 instance KnownHeader KeepAlive where
@@ -134,6 +142,14 @@ instance KnownHeader KeepAlive where
 
   renderToHeaders _ =
     encodeHttpParameterList keepAliveParameterName keepAliveParameterValue . keepAliveParameters
+
+
+  renderToHeadersChecked _ (KeepAliveFields params)
+    | all validParameter params =
+        Just (encodeHttpParameterList keepAliveParameterName keepAliveParameterValue params)
+    | otherwise = Nothing
+    where
+      validParameter (KeepAliveParameter name value) = isHttpTokenText name && all isHttpQuotedText value
 
 
   headerName _ = hKeepAlive

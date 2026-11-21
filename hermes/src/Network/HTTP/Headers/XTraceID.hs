@@ -77,6 +77,9 @@ instance KnownHeader XTraceID where
   renderToHeaders _ = xTraceIDBytes
 
 
+  renderToHeadersChecked _ = renderOpaqueFieldChecked . xTraceIDBytes
+
+
   headerName _ = hXTraceID
 
 

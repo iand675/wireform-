@@ -24,7 +24,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAllow)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (shortText)
+import Network.HTTP.Headers.Rendering.Util (encodeCommaSeparatedTokenPairs, shortText)
 
 
 -- | Standard HTTP methods
@@ -60,6 +60,14 @@ instance KnownHeader Allow where
   renderToHeaders _ = M.toStrictByteString . renderAllow
 
 
+  renderToHeadersChecked _ (Allow methods)
+    | all validMethod methods = Just (encodeCommaSeparatedTokenPairs "" methodToken (const Nothing) methods)
+    | otherwise = Nothing
+    where
+      validMethod (CustomMethod token) = isHttpTokenText token
+      validMethod _ = True
+
+
   headerName _ = hAllow
 
 
@@ -88,8 +96,8 @@ allowParser :: ParserT st String Allow
 allowParser = Allow <$> httpList httpMethodParser
 
 
-renderHttpMethod :: HttpMethod -> M.Builder
-renderHttpMethod = \case
+methodToken :: HttpMethod -> ST.ShortText
+methodToken = \case
   GET -> "GET"
   HEAD -> "HEAD"
   POST -> "POST"
@@ -99,8 +107,8 @@ renderHttpMethod = \case
   OPTIONS -> "OPTIONS"
   TRACE -> "TRACE"
   PATCH -> "PATCH"
-  CustomMethod method -> shortText method
+  CustomMethod method -> method
 
 
 renderAllow :: Allow -> M.Builder
-renderAllow (Allow methods) = M.intersperse ", " (map renderHttpMethod methods)
+renderAllow (Allow methods) = M.intersperse ", " (map (shortText . methodToken) methods)

@@ -214,6 +214,9 @@ instance KnownHeader AMPCacheTransform where
   renderToHeaders _ (TransformList entries) = NE.toList (R.fieldLines entries)
 
 
+  renderToHeadersChecked _ (TransformList entries) = NE.toList <$> R.checkedFieldLines fieldName transformList entries
+
+
   headerName _ = hAMPCacheTransform
 
 

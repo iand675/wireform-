@@ -18,14 +18,23 @@ See also: "Network.HTTP.Headers.Range", "Network.HTTP.Headers.ETag", "Network.HT
 -}
 module Network.HTTP.Headers.IfRange (
   IfRange (..),
+  ifRangeMatches,
   ifRangeParser,
   renderIfRange,
+  renderIfRangeChecked,
 ) where
 
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
 import Data.Time.Clock (UTCTime)
+import Data.Word (Word8)
+import Foreign.Ptr (plusPtr)
+import Foreign.Storable (pokeByteOff)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
-import Network.HTTP.Headers.ETag (EntityTag, entityTagParser, renderEntityTag)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate, renderDateBytesChecked, renderDateChecked)
+import Network.HTTP.Headers.ETag (EntityTag (..), entityTagParser, isValidOpaqueTag, renderEntityTag, strongMatch)
 import Network.HTTP.Headers.HeaderFieldName (hIfRange)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -40,6 +49,22 @@ data IfRange
   deriving stock (Eq, Show)
 
 
+{- | Evaluate an If-Range validator for a selected representation.
+Supply its entity tag and its Last-Modified date if that date is a
+strong validator under RFC 9110 §8.8.2.2. Entity tags must match
+strongly. Dates must match exactly. A failed condition asks the
+recipient to ignore Range, as specified in §13.1.5.
+-}
+ifRangeMatches :: Maybe EntityTag -> Maybe UTCTime -> IfRange -> Bool
+ifRangeMatches tag strongDate = \case
+  IfRangeETag expected -> matchTag expected
+  IfRangeDate expected -> matchDate expected
+  where
+    matchTag = maybe (const False) strongMatch tag
+    matchDate = maybe (const False) (==) strongDate
+{-# INLINE ifRangeMatches #-}
+
+
 instance KnownHeader IfRange where
   type ParseFailure IfRange = String
   type Cardinality IfRange = 'ZeroOrOne
@@ -50,6 +75,12 @@ instance KnownHeader IfRange where
 
 
   renderToHeaders _ = M.toStrictByteString . renderIfRange
+
+
+  renderToHeadersChecked _ (IfRangeETag (StrongETagBytes bytes))
+    | isValidOpaqueTag bytes = Just (encodeStrongTag bytes)
+  renderToHeadersChecked _ (IfRangeETag _) = Nothing
+  renderToHeadersChecked _ (IfRangeDate t) = renderDateBytesChecked t
 
 
   headerName _ = hIfRange
@@ -69,7 +100,29 @@ ifRangeParserWith parseDate =
     <|> (IfRangeDate <$> parseDate)
 
 
+-- | Render the structural value. For checked emission use 'renderIfRangeChecked'.
 renderIfRange :: IfRange -> M.Builder
 renderIfRange = \case
   IfRangeETag tag -> renderEntityTag tag
   IfRangeDate t -> renderDate t
+
+
+{- | Serialize a valid strong entity tag or a representable HTTP-date. The
+caller must establish date strength and supply the accompanying Range field.
+-}
+renderIfRangeChecked :: IfRange -> Either String M.Builder
+renderIfRangeChecked (IfRangeETag tag) = case tag of
+  StrongETagBytes bytes
+    | isValidOpaqueTag bytes -> Right (renderEntityTag tag)
+    | otherwise -> Left "Invalid opaque If-Range entity tag"
+  WeakETagBytes _ -> Left "If-Range requires a strong entity tag"
+renderIfRangeChecked (IfRangeDate t) = maybe (Left "Invalid If-Range HTTP-date") Right (renderDateChecked t)
+
+
+encodeStrongTag :: SBS.ShortByteString -> ByteString
+encodeStrongTag bytes = BSI.unsafeCreate (BSI.checkedAdd "If-Range" size 2) $ \out -> do
+  pokeByteOff out 0 (34 :: Word8)
+  SBSI.copyToPtr bytes 0 (out `plusPtr` 1) size
+  pokeByteOff out (size + 1) (34 :: Word8)
+  where
+    size = SBS.length bytes

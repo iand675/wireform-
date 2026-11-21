@@ -47,8 +47,8 @@ data SetCookie2
   | ParsedSetCookie2 !ByteString !(NonEmpty Cookie2Definition)
 
 
-{- | The legacy wire spelling of a field line. Use 'setCookie2FromEntries'
-for checked authoring.
+{- | The legacy wire spelling of a field line. Checked field writes
+validate the complete line.
 -}
 pattern SetCookie2 :: ST.ShortText -> SetCookie2
 pattern SetCookie2 {setCookie2Value} <- (legacyText -> setCookie2Value)
@@ -108,8 +108,23 @@ data Cookie2Attribute
 
 
 setCookie2Entries :: SetCookie2 -> Either String (NonEmpty Cookie2Definition)
-setCookie2Entries (RawSetCookie2 text) = parseFieldLine "Set-Cookie2" definitionList (ST.toByteString text)
+setCookie2Entries (RawSetCookie2 text) = parseDefinitions (ST.toByteString text)
 setCookie2Entries (ParsedSetCookie2 _ cookies) = Right cookies
+
+
+parseDefinitions :: ByteString -> Either String (NonEmpty Cookie2Definition)
+parseDefinitions = parseFieldLine "Set-Cookie2" definitionList
+{-# INLINE parseDefinitions #-}
+
+
+checkedWireBytes :: SetCookie2 -> Maybe ByteString
+checkedWireBytes (ParsedSetCookie2 wire _) = Just wire
+checkedWireBytes (RawSetCookie2 text) =
+  case parseDefinitions wire of
+    Left _ -> Nothing
+    Right _ -> Just wire
+  where
+    wire = ST.toByteString text
 
 
 {- | Construct one field line from cookie definitions. Invalid names,
@@ -133,10 +148,13 @@ instance KnownHeader SetCookie2s where
 
   parseFromHeaders _ fields = SetCookie2s <$> traverse parseLine (NE.toList fields)
     where
-      parseLine wire = ParsedSetCookie2 wire <$> parseFieldLine "Set-Cookie2" definitionList wire
+      parseLine wire = ParsedSetCookie2 wire <$> parseDefinitions wire
 
 
   renderToHeaders _ (SetCookie2s cookies) = map wireBytes cookies
+
+
+  renderToHeadersChecked _ (SetCookie2s cookies) = traverse checkedWireBytes cookies
 
 
   headerName _ = hSetCookie2

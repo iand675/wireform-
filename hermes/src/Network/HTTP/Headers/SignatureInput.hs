@@ -44,7 +44,7 @@ import Network.HTTP.Headers.HeaderFieldName (hSignatureInput)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
-import Network.HTTP.Headers.Signature.Internal (renderSignatureInnerList, signatureInputDictionary)
+import Network.HTTP.Headers.Signature.Internal (renderSignatureDictionary, renderSignatureInnerList, signatureInputDictionary, validSignatureInputEntry)
 
 
 {- | A single covered component identifier: an RFC 8941 String (e.g.
@@ -85,7 +85,7 @@ instance KnownHeader SignatureInput where
   parseFromHeaders _ = parseStructuredFieldLines "Signature-Input" signatureInputParser
 
 
-  renderToHeaders _ = pure . M.toStrictByteString . renderSignatureInput
+  renderToHeaders _ = maybe [] (pure . M.toStrictByteString) . signatureInputBuilder
 
 
   headerName _ = hSignatureInput
@@ -99,19 +99,28 @@ signatureInputParser :: ParserT st String SignatureInput
 signatureInputParser =
   SignatureInput
     <$> signatureInputDictionary validTimestamp signatureLabel componentName componentParams SignatureComponent SignatureInputEntry
-  where
-    validTimestamp (Integer _) = True
-    validTimestamp _ = False
+
+
+validTimestamp :: ItemValue -> Bool
+validTimestamp (Integer _) = True
+validTimestamp _ = False
+{-# INLINE validTimestamp #-}
 
 
 -- ---------------------------------------------------------------------------
 -- Renderer
 -- ---------------------------------------------------------------------------
 
+-- | Render the field value. Invalid entries or repeated labels produce no bytes.
 renderSignatureInput :: SignatureInput -> M.Builder
-renderSignatureInput (SignatureInput entries) =
-  M.intersperse ", " (renderEntry <$> entries)
+renderSignatureInput = maybe mempty id . signatureInputBuilder
+
+
+signatureInputBuilder :: SignatureInput -> Maybe M.Builder
+signatureInputBuilder (SignatureInput entries) = renderSignatureDictionary signatureLabel validEntry renderEntry entries
   where
+    validEntry (SignatureInputEntry _ components metadata) =
+      validSignatureInputEntry validTimestamp componentName componentParams components metadata
     renderEntry (SignatureInputEntry label components metadata) =
       R.shortText label
         <> M.char7 '='

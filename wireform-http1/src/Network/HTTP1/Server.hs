@@ -38,8 +38,14 @@ module Network.HTTP1.Server
   ) where
 
 import Control.Concurrent (ThreadId, forkIO)
-import Control.Exception (bracket, catch, fromException, SomeException, finally, try)
+import Control.Exception (Exception, bracket, catch, fromException, SomeException, finally, throwIO, try)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Word (Word8)
+import Foreign.C.Error (throwErrnoIfMinus1Retry)
+import Foreign.C.Types (CInt (..), CSize (..))
+import Foreign.Ptr (Ptr)
 import Network.Socket (Socket)
 import qualified Network.Socket as NS
 
@@ -50,17 +56,27 @@ import System.Timeout (timeout)
 import Control.Monad (when)
 import qualified Network.HTTP1.SendFile as SF
 import Data.Word (Word64)
-import System.IO
-  (Handle, IOMode (..), SeekMode (..), hSeek, withBinaryFile)
-import qualified System.Posix.IO as PosixIO
 import System.Posix.IO (closeFd, defaultFileFlags, openFd, OpenMode (..))
+import System.Posix.Types (COff (..), CSsize (..), Fd (..), FileOffset)
 
 
 import Wireform.Network.TLS.OpenSSL (SslConn)
 import Wireform.Ring.Pool (RingPool)
 
+import qualified Network.HTTP.Headers as Typed
+import qualified Network.HTTP.Headers.TransferEncoding as TransferEncoding
+import Network.HTTP1.Chunked (encodeChunk, encodeChunkPrefix)
 import Network.HTTP1.Connection
-import Network.HTTP1.Encode (headersBuilder, responseBuilder)
+import Network.HTTP1.Encode
+  ( ResponseFramingHint (..)
+  , checkKnownResponseLength
+  , headersBuilder
+  , prepareChunkedResponse
+  , responseAllowsContent
+  , responseBuilder
+  , responseBuilderWithoutFraming
+  , responseFramingHint
+  )
 import Network.HTTP1.Headers
 import Network.HTTP1.Parser
 import qualified Network.HTTP1.StreamingReader as SR
@@ -237,15 +253,12 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
                   { requestBody = body
                   , requestTrailers = trailersIO
                   }
-            r <- try @SomeException $ do
-              resp0 <- serverHandler cfg req
-              let responseOptions = connectionOptions (responseHeaders resp0)
-                  willClose = decideClose cfg req responseOptions
-                  extraOption = responseConnectionOption willClose (requestVersion req) responseOptions
-              sendResponse conn (requestMethod req) extraOption resp0
-              pure willClose
+            r <- try @SomeException $
+              serverHandler cfg req >>= sendResponseForRequest cfg conn req
             case r of
               Left e
+                | Just (ResponseStarted _) <- fromException e ->
+                    pure ()  -- Close without writing another status into the body.
                 | Just (ProtocolException pe) <- fromException e ->
                     -- The handler hit a protocol error
                     -- while reading the request body (e.g. malformed
@@ -259,17 +272,87 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
                     -- just close.
                     sendErrorResponse conn InternalServerError
                       `catch` (\(_ :: SomeException) -> pure ())
-              Right willClose -> do
+              Right CloseDelimitedResponse ->
+                when (framing /= NoBody && framing /= ContentLength 0) (lingeringClose conn)
+              Right disposition -> do
                 -- A final response has already gone out. If the unread
                 -- body is incomplete, close the connection.
                 drained <- try @ProtocolException (drainBody (requestBody req))
                 case drained of
-                  Right () | not willClose -> loop conn
+                  Right () | KeepConnectionOpen <- disposition -> loop conn
                   _ -> pure ()
 
 ------------------------------------------------------------------------
 -- Response writing
 ------------------------------------------------------------------------
+
+newtype ResponseStarted = ResponseStarted SomeException
+  deriving stock (Show)
+
+instance Exception ResponseStarted
+
+writeCommitted :: IO a -> IO a
+writeCommitted action = action `catch` (throwIO . ResponseStarted)
+
+data ResponseDisposition = KeepConnectionOpen | CloseAfterDrain | CloseDelimitedResponse
+
+sendResponseForRequest :: ServerConfig -> Connection -> Request -> Response -> IO ResponseDisposition
+sendResponseForRequest cfg conn req original = do
+  let legacy = requestVersion req == HTTP_1_0 || responseVersion original == HTTP_1_0
+      version = if legacy then HTTP_1_0 else HTTP_1_1
+      method = requestMethod req
+  resp <- if legacy then either (ioError . userError) pure (prepareLegacyResponse method original) else pure original
+  legacyFraming <- case responseBody resp of
+    BodyStream _ | legacy, responseHasContent method resp -> do
+      framing <- either (ioError . userError . show) pure
+        (responseFraming method HTTP_1_0 (responseStatus resp) (responseHeaders resp))
+      pure $ case framing of
+        NoBody -> CloseDelimited  -- A successful CONNECT writes raw tunnel bytes.
+        _ -> framing
+    _ -> pure NoBody
+  let responseOptions = connectionOptions (responseHeaders resp)
+      closeDelimited = legacyFraming == CloseDelimited
+      willClose = closeDelimited || decideClose cfg req version responseOptions
+      extraOption
+        | closeDelimited = Nothing
+        | otherwise = responseConnectionOption willClose version responseOptions
+      outgoing
+        | closeDelimited = closeDelimitedResponse responseOptions resp
+        | otherwise = resp
+  sendResponse conn method version legacyFraming extraOption outgoing
+  pure $
+    if closeDelimited then CloseDelimitedResponse
+    else if willClose then CloseAfterDrain
+    else KeepConnectionOpen
+
+prepareLegacyResponse :: Method -> Response -> Either String Response
+prepareLegacyResponse method resp = case responseBody resp of
+  BodyPreEncoded _ -> Right resp  -- The encoded writer handles its own bytes.
+  _ -> do
+    let fields = responseHeaders resp
+        codings = hLookupAll "Transfer-Encoding" fields
+        hasContent = responseHasContent method resp
+        discardLength = hasContent && not (null codings)
+        omit name =
+          headerNameIeq "Transfer-Encoding" name
+            || headerNameIeq "Trailer" name
+            || (discardLength && headerNameIeq "Content-Length" name)
+    when hasContent (checkLegacyTransferCodings codings)
+    pure resp {responseHeaders = filter (not . omit . fst) fields}
+
+closeDelimitedResponse :: [ConnectionOption] -> Response -> Response
+closeDelimitedResponse options resp =
+  resp
+    { responseHeaders = filter (not . omit . fst) (responseHeaders resp)
+        <> [("Connection", BS.intercalate ", " ("close" : foldr addExtension [] options))]
+    }
+  where
+    omit name = headerNameIeq "Connection" name || headerNameIeq "Keep-Alive" name
+    addExtension (ConnOption option) rest = option : rest
+    addExtension _ rest = rest
+
+responseHasContent :: Method -> Response -> Bool
+responseHasContent method resp = method /= HEAD && responseAllowsContent (responseStatus resp)
 
 -- | Send a complete response (head + body) over the connection.
 --
@@ -279,23 +362,66 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
 --      single send. For HEAD we slice to 'peHeadLen' so the body is
 --      dropped while the metadata survives (RFC 9110 § 9.3.2).
 --      A per-connection response option is inserted into the head.
---   2. 'BodyBytes' — combine head + body in one vectored send (raw
---      socket) or two sequential sends (TLS / other non-socket
---      transports).
+--   2. 'BodyBytes' without a trailer declaration — combine head and body
+--      in one vectored send or two sequential sends on other transports.
 --   3. Everything else falls back to the head-first send + body
 --      stream.
 --
 -- The @sendfile(2)@ fast path requires a raw socket fd, so it only
 -- fires on socket-backed transports. Over TLS we fall back to a
 -- userspace read \/ write loop.
-sendResponse :: Connection -> Method -> Maybe BS.ByteString -> Response -> IO ()
-sendResponse conn reqMethod extraOption original = do
-  let mustOmitBody =
-        reqMethod == HEAD
-          || let sc = case responseStatus original of Status w -> w
-             in (sc >= 100 && sc < 200) || sc == 204 || sc == 304
+sendResponse :: Connection -> Method -> Version -> Framing -> Maybe BS.ByteString -> Response -> IO ()
+sendResponse conn reqMethod framingVersion legacyFraming extraOption original =
   case responseBody original of
-    BodyPreEncoded pe ->
+    BodyPreEncoded pe@PreEncodedWithTrailers {}
+      | framingVersion == HTTP_1_0 ->
+          let legacy = resp {responseHeaders = filter (not . isTrailerFraming . fst) (responseHeaders resp)}
+          in case preEncodedPayloadForLegacy (responseHeaders resp) pe of
+            Right bytes -> sendBufferedPlain (legacy {responseBody = BodyBytes bytes}) bytes
+            Left _ | mustOmitBody -> connectionSendBuilderDirect conn (responseBuilder legacy)
+            Left err -> ioError (userError err)
+      | mustOmitBody -> sendPreEncoded pe
+      | otherwise -> writeCommitted $ do
+          sendPreEncoded pe
+          writeChunkedBody conn (pure Nothing) (responseTrailers resp)
+    BodyPreEncoded pe -> sendPreEncoded pe
+    body -> do
+      if mustOmitBody
+        then sendHead
+        else case body of
+          BodyEmpty -> sendBuffered BS.empty
+          BodyBytes bs -> sendBuffered bs
+          BodyStream producer -> sendStream producer
+          BodyFile fb -> do
+            checkFileExtent fb
+            if usesChunked
+              then do
+                headBuilder <- chunkedHead
+                withFileBodyFd fb $ \fd ->
+                  writeCommitted (sendChunkedFileBody conn headBuilder fd (fbOffset fb) (fbLength fb) (responseTrailers resp))
+              else do
+                checkLength (fbLength fb)
+                withFileBodyFd fb $ \fd ->
+                  writeCommitted (sendFixedFileBody conn (responseBuilder resp) fd (fbOffset fb) (fbLength fb))
+  where
+    mustOmitBody = not (responseHasContent reqMethod original)
+
+    resp = case extraOption of
+      Nothing -> original
+      Just option -> original {responseHeaders = responseHeaders original <> [("Connection", option)]}
+
+    sendHead = connectionSendBuilderDirect conn $ case responseBody resp of
+      BodyStream _ | framingVersion == HTTP_1_0 -> responseBuilderWithoutFraming resp
+      _ -> responseBuilder resp
+    hint = responseFramingHint (responseHeaders resp)
+    usesChunked
+      | framingVersion == HTTP_1_1, ChunkedFraming <- hint = True
+      | otherwise = False
+
+    chunkedHead = responseBuilder <$> either (ioError . userError) pure (prepareChunkedResponse resp)
+    sendChunked write = chunkedHead >>= writeCommitted . write
+
+    sendPreEncoded pe =
       let bs = if mustOmitBody then preEncodedHead pe else peBytes pe
           end = peHeadLen pe
       in case extraOption of
@@ -305,85 +431,159 @@ sendResponse conn reqMethod extraOption original = do
                  -- Insert a field before the blank line, keeping the encoded body intact.
                  let fieldStart = end - 2
                  in withConnectionCork conn $ \corked -> do
-                      sendByteString corked (BS.take fieldStart bs)
+                      sendResponseBytes corked (BS.take fieldStart bs)
                       sendBuilderDirect corked (headersBuilder [("Connection", option)])
-                      sendByteString corked (BS.drop fieldStart bs)
-           _ -> connectionSendBytes conn bs
-    body -> do
-      if mustOmitBody
-        then connectionSendBuilderDirect conn (responseBuilder resp)
-        else case body of
-          BodyEmpty -> connectionSendBuilderDirect conn (responseBuilder resp)
-          BodyBytes bs
-            | BS.null bs -> connectionSendBuilderDirect conn (responseBuilder resp)
-            | otherwise  ->
-                -- Cork: headers + body go into the ring without
-                -- publishing; one publish on exit = one sendmsg /
-                -- one io_uring SQE.
-                withConnectionCork conn $ \corked -> do
-                  sendBuilderDirect corked (responseBuilder resp)
-                  sendByteString corked bs
-          BodyStream producer -> do
-                -- Streaming: send headers immediately so the client
-                -- sees the status before the first body chunk.
-            connectionSendBuilderDirect conn (responseBuilder resp)
-            case responseVersion resp of
-              HTTP_1_1 -> writeChunkedBody conn producer (responseTrailers resp)
-              HTTP_1_0 -> streamRaw conn producer
-          BodyFile fb -> do
-            let headBs = B.toStrictByteStringWith 1024 (responseBuilder resp)
-            sendFileBody conn headBs fb
-  where
-    resp = case extraOption of
-      Nothing -> original
-      Just option -> original {responseHeaders = responseHeaders original <> [("Connection", option)]}
+                      sendResponseBytes corked (BS.drop fieldStart bs)
+           _ -> sendResponseBytes (connectionSend conn) bs
 
--- | Push a file-backed response body.  On plain TCP connections we
--- use the @sendfile(2)@ fast path with @MSG_MORE@ on the head; on
--- TLS connections (where the kernel cannot encrypt for us) we fall
--- back to a userspace @read()@\/ring-send loop.
-sendFileBody :: Connection -> BS.ByteString -> FileBody -> IO ()
-sendFileBody conn headBs fb = case connSocket of
-  Just sock -> do
-    -- Flush the send ring first so head bytes go out in order with
-    -- respect to the upcoming sendfile.  Then SF.sendMore primes
-    -- the kernel with MSG_MORE so the sendfile can coalesce on the
-    -- wire.
-    --
-    -- (We deliberately call SF.sendMore here, not through the send
-    -- ring: the sendfile fast path is a kernel-managed zero-copy
-    -- and the head MUST be the immediately-preceding write on the
-    -- same socket fd.)
-    sendFlushConn conn
-    SF.sendMore sock headBs
-    case fbSource fb of
-      FileSourcePath p ->
-        bracket
-#if MIN_VERSION_unix(2,8,0)
-          (openFd p ReadOnly defaultFileFlags)
-#else
-          (openFd p ReadOnly Nothing defaultFileFlags)
-#endif
-          closeFd
-          $ \fd -> SF.sendFile sock fd (fbOffset fb) (fbLength fb)
-      FileSourceFd fd ->
-        SF.sendFile sock fd (fbOffset fb) (fbLength fb)
-  Nothing -> do
-    -- TLS / non-socket: head through the ring, body through a
-    -- userspace copy loop that also goes through the ring.
-    connectionSendBytes conn headBs
-    case fbSource fb of
-      FileSourcePath p ->
-        withBinaryFile p ReadMode $ \h ->
-          userspaceCopyHandle conn h (fbOffset fb) (fbLength fb)
-      FileSourceFd fd -> do
-        h <- PosixIO.fdToHandle fd
-        userspaceCopyHandle conn h (fbOffset fb) (fbLength fb)
+    sendBuffered bs
+      | usesChunked = sendChunked $ \headBuilder -> do
+          let firstChunk = if BS.null bs then mempty else encodeChunk bs
+          connectionSendBuilderDirect conn (headBuilder <> firstChunk)
+          writeChunkedBody conn (pure Nothing) (responseTrailers resp)
+      | otherwise = do
+          checkLength (fromIntegral (BS.length bs))
+          sendBufferedPlain resp bs
+
+    sendStream producer
+      | usesChunked = sendChunked $ \headBuilder -> do
+          connectionSendBuilderDirect conn headBuilder
+          writeChunkedBody conn producer (responseTrailers resp)
+      | ContentLength remaining <- legacyFraming =
+          writeCommitted (sendHead >> streamFixed conn remaining producer)
+      | CloseDelimited <- legacyFraming =
+          writeCommitted (sendHead >> streamRaw conn producer)
+      | FixedFraming <- hint = do
+          declared <- either (ioError . userError . show) pure (declaredContentLength (responseHeaders resp))
+          case declared of
+            Just remaining -> writeCommitted (sendHead >> streamFixed conn remaining producer)
+            Nothing -> ioError (userError "missing Content-Length for fixed response")
+      | otherwise = writeCommitted (sendHead >> writeChunkedBody conn producer (responseTrailers resp))
+
+    checkLength size = case hint of
+      FixedFraming -> either (ioError . userError) pure (checkKnownResponseLength size (responseHeaders resp))
+      _ -> pure ()
+
+    sendBufferedPlain response bs
+      | mustOmitBody || BS.null bs = connectionSendBuilderDirect conn (responseBuilder response)
+      | otherwise =
+          -- Publish the head and the buffered body together.
+          withConnectionCork conn $ \corked -> do
+            sendBuilderDirect corked (responseBuilder response)
+            sendResponseBytes corked bs
+
+    isTrailerFraming name =
+      headerNameIeq "Trailer" name
+        || headerNameIeq "Transfer-Encoding" name
+        || headerNameIeq "Content-Length" name
+
+-- HTTP/1.0 cannot decode transfer codings. For a compatible payload,
+-- reuse the data from the cached chunk as a slice of the same buffer.
+preEncodedPayloadForLegacy :: Headers -> PreEncoded -> Either String BS.ByteString
+preEncodedPayloadForLegacy fields pe = do
+  checkLegacyTransferCodings (hLookupAll "Transfer-Encoding" fields)
+  if BS.null chunk
+    then Right BS.empty
+    else case parseChunkHeader chunk 0 of
+      Right (Just (ChunkHeader size start))
+        | Just bytes <- BS.stripSuffix "\r\n" (BS.drop start chunk)
+        , fromIntegral (BS.length bytes) == size -> Right bytes
+      _ -> Left "invalid pre-encoded data chunk"
   where
-    -- sendfile bypasses the ring; only fires on plain TCP (TLS sets
-    -- connSocket to Nothing intentionally so the userspace branch
-    -- runs through the TLS-aware send ring).
-    connSocket = connectionSocket conn
+    chunk = BS.drop (peHeadLen pe) (peBytes pe)
+
+checkLegacyTransferCodings :: [BS.ByteString] -> Either String ()
+checkLegacyTransferCodings [] = Right ()
+checkLegacyTransferCodings (first : rest) = do
+  coding <- Typed.parseFromHeaders Typed.defaultHeaderSettings (first :| rest)
+  case TransferEncoding.transferCodings coding of
+    [] -> Right ()
+    [_] | TransferEncoding.transferEncodingEndsInChunked coding -> Right ()
+    _ -> Left "HTTP/1.0 client cannot receive transfer-coded content"
+
+-- Keep the single reservation for small sends. A builder can publish
+-- in segments when the cached bytes exceed the transport's ring.
+sendResponseBytes :: SendTransport -> BS.ByteString -> IO ()
+sendResponseBytes transport bytes
+  | BS.length bytes <= sendRingSize transport = sendByteString transport bytes
+  | otherwise = sendBuilderDirect transport (B.byteString bytes)
+{-# INLINE sendResponseBytes #-}
+
+-- | Send exactly the promised extent. Plain TCP uses @sendfile(2)@
+-- with @MSG_MORE@ on the head so the kernel can coalesce the writes.
+-- Other transports use the positional copy loop.
+sendFixedFileBody :: Connection -> B.Builder -> Fd -> Word64 -> Word64 -> IO ()
+sendFixedFileBody conn headBuilder fd off len
+  | len == 0 = connectionSendBuilderDirect conn headBuilder
+  | Just sock <- connectionSocket conn = do
+      sendFlushConn conn
+      SF.sendMore sock (B.toStrictByteStringWith 1024 headBuilder)
+      SF.sendFileExact sock fd off len
+  | otherwise = do
+      connectionSendBuilderDirect conn headBuilder
+      copyFileExtent fd (sendResponseBytes (connectionSend conn)) off len
+
+withFileBodyFd :: FileBody -> (Fd -> IO a) -> IO a
+withFileBodyFd fb use = case fbSource fb of
+  FileSourcePath path ->
+    bracket
+#if MIN_VERSION_unix(2,8,0)
+      (openFd path ReadOnly defaultFileFlags)
+#else
+      (openFd path ReadOnly Nothing defaultFileFlags)
+#endif
+      (writeCommitted . closeFd)
+      use
+  FileSourceFd fd -> use fd
+
+checkFileExtent :: FileBody -> IO ()
+checkFileExtent fb =
+  when (len /= 0 && (off > limit || len > limit - off)) $
+    ioError (userError "file response extent exceeds the file offset range")
+  where
+    off = fbOffset fb
+    len = fbLength fb
+    limit = fromIntegral (maxBound :: FileOffset)
+
+-- A socket can send the entire extent as one chunk without copying.
+-- Other transports read positionally so shared descriptors keep their
+-- current offset and remain owned by the application.
+sendChunkedFileBody :: Connection -> B.Builder -> Fd -> Word64 -> Word64 -> IO Headers -> IO ()
+sendChunkedFileBody conn headBuilder fd off len produceTrailers
+  | len == 0 = connectionSendBuilderDirect conn headBuilder >> finish mempty
+  | Just sock <- connectionSocket conn = do
+      sendFlushConn conn
+      SF.sendMore sock (B.toStrictByteStringWith 1024 (headBuilder <> encodeChunkPrefix len))
+      SF.sendFileExact sock fd off len
+      finish (B.byteString "\r\n")
+  | otherwise = do
+      connectionSendBuilderDirect conn headBuilder
+      copyFileExtent fd (connectionSendBuilder conn . encodeChunk) off len
+      finish mempty
+  where
+    finish suffix = writeChunkedTerminator conn suffix produceTrailers
+
+-- | A bounded positional copy preserves the caller's descriptor offset.
+copyFileExtent :: Fd -> (BS.ByteString -> IO ()) -> Word64 -> Word64 -> IO ()
+copyFileExtent fd write = loop
+  where
+    loop !_ 0 = pure ()
+    loop !offset !remaining = do
+      let want = fromIntegral (min remaining 65536)
+      bytes <- readFileChunkAt fd offset want
+      when (BS.null bytes) (ioError (userError "file response: unexpected end of file"))
+      write bytes
+      let got = fromIntegral (BS.length bytes)
+      loop (offset + got) (remaining - got)
+{-# INLINE copyFileExtent #-}
+
+readFileChunkAt :: Fd -> Word64 -> Int -> IO BS.ByteString
+readFileChunkAt (Fd fd) offset want =
+  BSI.createUptoN want $ \buf ->
+    fromIntegral <$> throwErrnoIfMinus1Retry "pread" (c_pread fd buf (fromIntegral want) (fromIntegral offset))
+
+foreign import ccall safe "pread"
+  c_pread :: CInt -> Ptr Word8 -> CSize -> COff -> IO CSsize
 
 -- | Best-effort flush of any pending bytes in the send ring.  The
 -- inline send-ring drain is already synchronous so this is usually a
@@ -392,27 +592,6 @@ sendFileBody conn headBs fb = case connSocket of
 sendFlushConn :: Connection -> IO ()
 sendFlushConn _ = pure ()
 
--- | Userspace read + ring-send loop, used when sendfile is
--- unavailable (TLS, in-memory).  64 KiB chunks match the
--- @sendfile(2)@ default and are large enough to amortise per-call
--- overhead.
-userspaceCopyHandle :: Connection -> Handle -> Word64 -> Word64 -> IO ()
-userspaceCopyHandle conn h off0 len0 = do
-  hSeek h AbsoluteSeek (fromIntegral off0)
-  loop len0
-  where
-    chunkSize = 65536 :: Int
-    loop 0 = pure ()
-    loop rem' = do
-      let want = fromIntegral (min rem' (fromIntegral chunkSize)) :: Int
-      bs <- BS.hGet h want
-      let got = BS.length bs
-      if got <= 0
-        then pure ()
-        else do
-          connectionSendBytes conn bs
-          loop (rem' - fromIntegral got)
-
 streamRaw :: Connection -> IO (Maybe BS.ByteString) -> IO ()
 streamRaw conn producer = loop
   where
@@ -420,7 +599,19 @@ streamRaw conn producer = loop
       mc <- producer
       case mc of
         Nothing -> pure ()
-        Just bs -> connectionSendBytes conn bs >> loop
+        Just bs -> sendResponseBytes (connectionSend conn) bs >> loop
+
+streamFixed :: Connection -> Word64 -> IO (Maybe BS.ByteString) -> IO ()
+streamFixed conn = loop
+  where
+    loop !remaining producer = do
+      next <- producer
+      case next of
+        Nothing | remaining == 0 -> pure ()
+        Just bytes | let size = fromIntegral (BS.length bytes), size <= remaining -> do
+          sendResponseBytes (connectionSend conn) bytes
+          loop (remaining - size) producer
+        _ -> ioError (userError "response body does not match Content-Length")
 
 ------------------------------------------------------------------------
 -- Errors / framing decisions
@@ -503,12 +694,12 @@ errorToStatus = \case
 -- Keep-alive decision
 ------------------------------------------------------------------------
 
-decideClose :: ServerConfig -> Request -> [ConnectionOption] -> Bool
-decideClose cfg req responseOptions =
+decideClose :: ServerConfig -> Request -> Version -> [ConnectionOption] -> Bool
+decideClose cfg req version responseOptions =
   not (serverKeepAlive cfg)
     || ConnClose `elem` requestOptions
     || ConnClose `elem` responseOptions
-    || (requestVersion req == HTTP_1_0 && ConnKeepAlive `notElem` requestOptions)
+    || (version == HTTP_1_0 && ConnKeepAlive `notElem` requestOptions)
   where
     requestOptions = connectionOptions (requestHeaders req)
 

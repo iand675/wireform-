@@ -55,7 +55,7 @@ data Alternates
 
 
 {- | The original text API. Typed lookup validates the grammar. Constructing
-with this pattern retains the caller's text for rendering.
+with this pattern retains the caller's text. Checked writes validate it.
 -}
 pattern Alternates :: ST.ShortText -> Alternates
 pattern Alternates {rawAlternates} <- (alternatesText -> rawAlternates)
@@ -197,6 +197,15 @@ instance KnownHeader Alternates where
 
 
   renderToHeaders _ = alternatesWire
+
+
+  renderToHeadersChecked _ (ParsedAlternates wire _) = Just wire
+  renderToHeadersChecked _ (RawAlternates value) =
+    case parseFieldLine "Alternates" alternateListParser wire of
+      Left _ -> Nothing
+      Right _ -> Just wire
+    where
+      wire = ST.toByteString value
 
 
   headerName _ = hAlternates

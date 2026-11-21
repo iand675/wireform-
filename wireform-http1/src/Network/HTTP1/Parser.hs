@@ -61,6 +61,7 @@ module Network.HTTP1.Parser (
   validateTarget,
   requestFraming,
   responseFraming,
+  declaredContentLength,
 ) where
 
 -- \$crossvalid
@@ -650,6 +651,14 @@ responseFraming _ ver _ hdrs = messageFraming ResponseBody ver hdrs
 
 data FramingSide = RequestBody | ResponseBody
   deriving stock (Eq)
+
+-- | Parse the supplied length fields independently of transfer coding.
+declaredContentLength :: Headers -> Either ParseError (Maybe Word64)
+declaredContentLength fields =
+  fmap lengthOf (contentLengthFraming NoBody (hLookupAll "Content-Length" fields))
+  where
+    lengthOf (ContentLength n) = Just n
+    lengthOf _ = Nothing
 
 
 -- Locate both framing fields in one pass. Length equality needs no order,

@@ -2,6 +2,7 @@
 module Network.HTTP.Headers.RetainedList (
   RetainedList (..),
   fieldLines,
+  checkedFieldLines,
   legacyText,
   decodeList,
   listEntries,
@@ -31,6 +32,17 @@ instance Eq (RetainedList a) where
 fieldLines :: RetainedList a -> NonEmpty ByteString
 fieldLines (RawList text) = ST.toByteString text :| []
 fieldLines (DecodedList wire _) = wire
+
+
+checkedFieldLines :: String -> ParserT st String [a] -> RetainedList a -> Maybe (NonEmpty ByteString)
+checkedFieldLines name item (RawList text) =
+  case parseFieldLine name (nonEmptyList name item) wire of
+    Left _ -> Nothing
+    Right _ -> Just (wire :| [])
+  where
+    wire = ST.toByteString text
+checkedFieldLines _ _ (DecodedList wire _) = Just wire
+{-# INLINE checkedFieldLines #-}
 
 
 legacyText :: RetainedList a -> ST.ShortText

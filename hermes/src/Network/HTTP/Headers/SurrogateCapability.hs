@@ -20,6 +20,7 @@ module Network.HTTP.Headers.SurrogateCapability (
   surrogateCapabilityFromFeatures,
   surrogateCapabilitySetParser,
   parseSurrogateFeatureSet,
+  isSurrogateFeatureSet,
   renderSurrogateFeatureSet,
   surrogateCapabilityParser,
   renderSurrogateCapability,
@@ -27,16 +28,20 @@ module Network.HTTP.Headers.SurrogateCapability (
 
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Grammar.Parser
 import Network.HTTP.Grammar.Rendering (renderProductToken, shortText)
+import qualified Network.HTTP.Grammar.Rendering as R
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSurrogateCapability)
 import qualified Network.HTTP.Headers.Mason as M
 import qualified Wireform.Builder as WB
+import Wireform.Encode.Direct (dBytes, dWord8)
 
 
 newtype SurrogateCapability = SurrogateCapability
@@ -80,6 +85,23 @@ instance KnownHeader SurrogateCapability where
       add = BSI.checkedAdd "Surrogate-Capability"
 
 
+  renderToHeadersChecked _ (SurrogateCapability entries)
+    | distinctDevices values = R.encodeCommaSeparatedChecked bound write values
+    | otherwise = Nothing
+    where
+      values = NE.toList entries
+      add = BSI.checkedAdd "Surrogate-Capability"
+      width = SBS.length . ST.toShortByteString
+      bound (SurrogateCapabilityEntry device capabilities)
+        | isHttpTokenText device && isSurrogateFeatureSet capabilities = add (add 3 (width device)) (width capabilities)
+        | otherwise = -1
+      write ptr offset (SurrogateCapabilityEntry device capabilities) = do
+        deviceEnd <- R.copyText ptr offset device
+        opened <- dBytes ptr deviceEnd "=\""
+        end <- R.copyText ptr opened capabilities
+        dWord8 ptr end 34
+
+
   headerName _ = hSurrogateCapability
 
 
@@ -100,13 +122,38 @@ capabilityList = httpList $ do
 validateEntries :: [SurrogateCapabilityEntry] -> Either String SurrogateCapability
 validateEntries entries = do
   nonEmpty <- requireNonEmptyList "Surrogate-Capability" entries
-  if distinct entries
+  if distinctDevices entries
     then Right (SurrogateCapability nonEmpty)
     else Left "Duplicate Surrogate-Capability device token"
+
+
+distinctDevices :: [SurrogateCapabilityEntry] -> Bool
+distinctDevices [_] = True
+distinctDevices [a, b] = surrogateCapabilityDevice a /= surrogateCapabilityDevice b
+distinctDevices xs = Set.size (Set.fromList (map surrogateCapabilityDevice xs)) == length xs
+
+
+-- | Validate the unquoted sequence of products, separated by single spaces.
+isSurrogateFeatureSet :: ST.ShortText -> Bool
+isSurrogateFeatureSet value = feature 0
   where
-    distinct [_] = True
-    distinct [a, b] = surrogateCapabilityDevice a /= surrogateCapabilityDevice b
-    distinct xs = Set.size (Set.fromList (map surrogateCapabilityDevice xs)) == length xs
+    bytes = ST.toShortByteString value
+    size = SBS.length bytes
+    at = SBSI.unsafeIndex bytes
+    tokenEnd offset
+      | offset < size && isTokenChar (BSI.w2c (at offset)) = tokenEnd (offset + 1)
+      | otherwise = offset
+    feature start =
+      let end = tokenEnd start
+      in end /= start && (end == size || case at end of
+            47 ->
+              let version = end + 1
+                  next = tokenEnd version
+              in next /= version && separator next
+            32 -> feature (end + 1)
+            _ -> False)
+    separator end = end == size || (at end == 32 && feature (end + 1))
+{-# INLINE isSurrogateFeatureSet #-}
 
 
 -- | Read a quoted capability set and retain its spelling without the quotes.

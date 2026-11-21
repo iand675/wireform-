@@ -44,15 +44,18 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.Char (toLower)
-import Data.List qualified as List
 import Data.String (IsString (..))
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Short qualified as ST
 import Network.HTTP.ContentNegotiation qualified as Hermes
+import Network.HTTP.Grammar.Rendering (renderSeparated)
 import Network.HTTP.Headers.Mason qualified as M
-import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), runParser)
+import Network.HTTP.Headers.Parsing.Util (ParserT, Result (..), eof, isTokenChar, ows, runParser)
+import Network.HTTP.Internal.Validation (equalShortBytes)
 import Network.HTTP.Types.Header qualified as H
+import Wireform.Parser.Driver (parseByteString)
+import Wireform.Parser.Error (ParseError (..))
 
 
 {- | A parsed @type\/subtype@ media type, plus any parameters that
@@ -83,28 +86,26 @@ mediaTypeBytes = renderMediaType
 
 
 -- | Parse a concrete @Content-Type@ value, including any parameters.
+-- Already lowercase type and subtype names may share the input buffer.
 parseMediaType :: ByteString -> Either String MediaType
-parseMediaType = parseMediaValue "Content-Type" Hermes.mediaTypeWithParametersParser
+parseMediaType = parseMediaValue "Content-Type" (Hermes.mediaTypeWithRawNames fromWireMediaType)
 
 
 -- | Parse one media range, including a possible wildcard and parameters.
 parseMediaRange :: ByteString -> Either String MediaType
-parseMediaRange = parseMediaValue "media range" Hermes.mediaRangeParser
+parseMediaRange = parseMediaValue "media range" (fromHermesRange <$> Hermes.mediaRangeParser)
 
 
-parseMediaValue :: String -> ParserT st String Hermes.MediaRange -> ByteString -> Either String MediaType
+parseMediaValue :: String -> ParserT st String MediaType -> ByteString -> Either String MediaType
 parseMediaValue name parser bs0 =
-  let bs = BS.dropWhile isOWS bs0
-  in case runParser parser bs of
-       OK r leftover
-         | BS.all isOWS leftover ->
-             Right (fromHermesRange r)
-         | otherwise ->
-             Left ("trailing input after " <> name <> ": " <> show leftover)
-       Fail -> Left ("malformed " <> name <> ": " <> show bs0)
-       Err e -> Left e
-  where
-    isOWS b = b == 0x20 || b == 0x09
+  case parseByteString (ows *> parser <* ows <* eof) bs0 of
+    Right media -> Right media
+    Left (ParseErr _ e) -> Left e
+    Left _ -> case runParser (ows *> parser) bs0 of
+      OK _ leftover -> Left ("trailing input after " <> name <> ": " <> show leftover)
+      Fail -> Left ("malformed " <> name <> ": " <> show bs0)
+      Err e -> Left e
+{-# INLINE parseMediaValue #-}
 
 
 {- | Convert a hermes 'MediaRange' to our 'MediaType'. Hermes uses
@@ -116,17 +117,19 @@ the rest of the Wire client.
 fromHermesRange :: Hermes.MediaRange -> MediaType
 fromHermesRange r =
   let mt = Hermes.mediaType r
-      stBytes = ST.toByteString
-      normalise b
-        | BS.null b = "*"
-        | otherwise = lowerToken b
-  in MediaType
-       { mtType = normalise (stBytes (Hermes.mediaBaseType mt))
-       , mtSubType = normalise (stBytes (Hermes.mediaSubtype mt))
-       , mtParameters =
-           map (\(k, v) -> (lowerToken (stBytes k), opaqueBytes v)) (Hermes.mediaParams r)
-       }
+  in fromWireMediaType (wireName (Hermes.mediaBaseType mt)) (wireName (Hermes.mediaSubtype mt)) (Hermes.mediaParams r)
   where
+    wireName name
+      | ST.null name = "*"
+      | otherwise = ST.toByteString name
+
+
+fromWireMediaType :: ByteString -> ByteString -> [(ST.ShortText, ST.ShortText)] -> MediaType
+fromWireMediaType base subtype parameters =
+  MediaType (lowerToken base) (lowerToken subtype) (map lowerParameter parameters)
+  where
+    lowerParameter (k, v) = (lowerToken (ST.toByteString k), opaqueBytes v)
+
     -- The parser has already validated these names as ASCII tokens.
     lowerToken bytes
       | BS.any isUpperAscii bytes = BS.map lowerAscii bytes
@@ -141,13 +144,23 @@ fromHermesRange r =
 
 
 renderMediaType :: MediaType -> ByteString
-renderMediaType m = M.toStrictByteString $
-  M.byteString (mtType m) <> "/" <> M.byteString (mtSubType m) <> foldMap renderParam (mtParameters m)
+renderMediaType (MediaType base subtype []) = BS.concat [base, "/", subtype]
+renderMediaType m = M.toStrictByteString (mediaTypeBuilder m)
+
+
+mediaTypeBuilder :: MediaType -> M.Builder
+mediaTypeBuilder m =
+  M.byteString (mtType m) <> M.char7 '/' <> M.byteString (mtSubType m) <> foldMap renderParam (mtParameters m)
   where
     renderParam (key, value)
       | BS.null key = mempty
       | otherwise =
-          "; " <> M.byteString key <> "=" <> Hermes.renderMediaParameterValue (ST.fromText (TE.decodeLatin1 value))
+          M.byteString "; " <> M.byteString key <> M.char7 '=' <> renderValue value
+    renderValue value
+      | not (BS.null value) && BS8.all isTokenChar value = M.byteString value
+      | BS.all plainQuotedByte value = M.char7 '"' <> M.byteString value <> M.char7 '"'
+      | otherwise = Hermes.renderMediaParameterValue (ST.fromText (TE.decodeLatin1 value))
+    plainQuotedByte byte = (byte == 9 || byte >= 32) && byte /= 34 && byte /= 92 && byte /= 127
 
 
 -- | Drop any media-type parameters, leaving the bare @type\/subtype@.
@@ -166,9 +179,10 @@ matches candidate target =
       candSub = mtSubType candidate
       tgtTy = mtType target
       tgtSub = mtSubType target
-      tyOk = candTy == tgtTy || tgtTy == "*"
-      subOk = candSub == tgtSub || tgtSub == "*"
+      tyOk = equalShortBytes candTy tgtTy || tgtTy == "*"
+      subOk = equalShortBytes candSub tgtSub || tgtSub == "*"
   in tyOk && subOk
+{-# INLINE matches #-}
 
 
 matchesAny :: MediaType -> [MediaType] -> Bool
@@ -239,32 +253,14 @@ contentTypeOf hdrs = case H.lookupSingletonHeader H.hContentType hdrs of
     defaultMediaType = MediaType "application" "octet-stream" []
 
 
-{- | Render a list of @(media-type, quality)@ pairs as an @Accept@
-header value. Quality 1.0 is omitted; other qualities are rendered
-per RFC 9110 \u00a712.4.2 \u2014 @0\u201a1\u201a or @0.@ followed by 1-3
-DIGIT, no exponent, trailing zeros dropped.
+{- | Render media ranges and their qualities as an @Accept@ field value.
+Qualities of at least one are implicit. Other values round to the nearest
+thousandth, with negative values and NaN rendered as @q=0@.
 -}
 acceptHeaderValue :: [(MediaType, Quality)] -> ByteString
-acceptHeaderValue = BS.intercalate ", " . List.map one
+acceptHeaderValue [(m, Quality q)] | q >= 1 = renderMediaType m
+acceptHeaderValue offers = M.toStrictByteString (renderSeparated (M.byteString ", ") renderOffer offers)
   where
-    one (m, Quality q)
-      | q >= 1.0 = renderMediaType m
-      | otherwise = renderMediaType m <> "; q=" <> renderQuality q
-
-
--- | Render a quality value (clamped to @[0,1]@) per RFC 9110 \u00a712.4.2.
-renderQuality :: Double -> ByteString
-renderQuality d
-  | d >= 1.0 = "1"
-  | d <= 0.0 = "0"
-  | otherwise =
-      let milli = round (d * 1000) :: Int -- 0..999
-          padded = pad3 (BS8.pack (show milli))
-          trimmed = BS.dropWhileEnd (== 0x30) padded
-      in if BS.null trimmed
-           then "0"
-           else "0." <> trimmed
-  where
-    pad3 bs =
-      let n = BS.length bs
-      in if n >= 3 then bs else BS.replicate (3 - n) 0x30 <> bs
+    renderOffer (m, Quality q)
+      | q >= 1 = mediaTypeBuilder m
+      | otherwise = mediaTypeBuilder m <> M.byteString "; q=" <> Hermes.renderQualityValue q

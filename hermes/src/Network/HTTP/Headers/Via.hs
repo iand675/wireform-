@@ -30,16 +30,20 @@ module Network.HTTP.Headers.Via (
   renderVia,
 ) where
 
+import Data.Char (ord)
+import Data.Either (isRight)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.Authority (receivedBy)
+import Network.HTTP.Grammar.Authority (receivedBy, receivedByBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hVia)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (renderComment, sepByCommas1, shortText)
+import Wireform.Parser.Driver (parseByteString)
 
 
 -- | @received-protocol@: an optional protocol name with a required version.
@@ -80,6 +84,10 @@ instance KnownHeader Via where
 
   parseFromHeaders _ = fmap fromEntries . parseListFieldLines "Via" (httpList viaEntryParser)
   renderToHeaders _ = pure . M.toStrictByteString . renderVia
+  renderToHeadersChecked _ ViaEmpty = Just [""]
+  renderToHeadersChecked settings value@(Via entries)
+    | all validEntry entries = Just (renderToHeaders settings value)
+    | otherwise = Nothing
   headerName _ = hVia
 
 
@@ -125,3 +133,11 @@ renderViaEntry (ViaEntry proto by mc) =
 renderReceivedProtocol :: ReceivedProtocol -> M.Builder
 renderReceivedProtocol (ReceivedProtocol mname version) =
   maybe mempty (\n -> shortText n <> M.char7 '/') mname <> shortText version
+
+
+validEntry :: ViaEntry -> Bool
+validEntry (ViaEntry (ReceivedProtocol name version) by note) =
+  maybe True isHttpTokenText name
+    && isHttpTokenText version
+    && isRight (parseByteString (receivedByBytes <* eof) (ST.toByteString by))
+    && maybe True (T.all (isOpaqueByte . fromIntegral . ord)) note

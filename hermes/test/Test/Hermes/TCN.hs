@@ -12,7 +12,7 @@ import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType (..))
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.AcceptAdditions as AA
 import qualified Network.HTTP.Headers.AcceptFeatures as AF
 import qualified Network.HTTP.Headers.Alternates as Alt
@@ -272,6 +272,13 @@ unit_alternates_render =
 
 typedNegotiate :: Spec
 typedNegotiate = describe "typed Negotiate" $ do
+  it "checks complete authored Negotiate names and arguments" $ do
+    let old = headerMapFromList [("Negotiate", "trans")]
+        invalid = [Neg.NegotiateDirective "bad name" Nothing, Neg.NegotiateDirective "mode" (Just "bad mode"), Neg.NegotiateDirective "mode" (Just "")]
+    forM_ invalid $ \entry -> do
+      let value = Neg.Negotiate (Neg.NegotiateDirective "trans" Nothing :| [entry])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old
   it "combines repeated lines and projects version identifiers without losing spelling" $ do
     let entries =
           Neg.NegotiateDirective "TRANS" Nothing
@@ -306,6 +313,13 @@ typedNegotiate = describe "typed Negotiate" $ do
 
 typedTCN :: Spec
 typedTCN = describe "typed TCN" $ do
+  it "checks all authored TCN directive names and decoded values" $ do
+    let old = headerMapFromList [("TCN", "choice")]
+        invalid = [TCN.TCNDirective "bad name" Nothing, TCN.TCNDirective "note" (Just "bad\DEL")]
+    forM_ invalid $ \entry -> do
+      let value = TCN.TCN [TCN.TCNDirective "choice" Nothing, entry]
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old
   it "preserves ordered response types, overrides, and opaque extension bytes" $ do
     let directives =
           [ TCN.TCNDirective "ChoIce" Nothing
@@ -330,6 +344,14 @@ typedTCN = describe "typed TCN" $ do
 
 typedVariantVary :: Spec
 typedVariantVary = describe "typed Variant-Vary" $ do
+  it "checks authored field names and reserves the stand-alone wildcard" $ do
+    let old = headerMapFromList [("Variant-Vary", "Accept")]
+    forM_ ["", "bad name", "name:other", "*"] $ \name -> do
+      let value = VV.VariantVaryFields ("Accept-Language" :| [name])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value old `shouldBe` old
+    renderHeaderLines defaultHeaderSettings (VV.VariantVaryFields ("*" :| [])) `shouldBe` Nothing
+    renderHeaderLines defaultHeaderSettings VV.VariantVaryAll `shouldBe` Just ("*" :| [])
   it "retains wire spelling across field lines and provides case-folded names" $ do
     let fields = headerMapFromList [("Variant-Vary", "Accept-Language, "), ("Variant-Vary", ", X-Edition, *suffix")]
         value = VV.VariantVaryFields ("Accept-Language" :| ["X-Edition", "*suffix"])
@@ -349,6 +371,14 @@ typedVariantVary = describe "typed Variant-Vary" $ do
 
 typedAcceptFeatures :: Spec
 typedAcceptFeatures = describe "typed Accept-Features" $ do
+  it "validates writes through the legacy Accept-Features pattern" $ do
+    let previous = headerMapFromList [("Accept-Features", "blex")]
+    forM_ ["paper=", "paper={A,B}", "*;x=\"bad\r\""] $ \text -> do
+      let value = AF.AcceptFeatures text
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous
+    renderHeaderLines defaultHeaderSettings (AF.AcceptFeatures "") `shouldBe` Just ("" :| [])
+    renderHeaderLines defaultHeaderSettings (AF.AcceptFeatures "Paper!=A2") `shouldBe` Just ("Paper!=A2" :| [])
   it "projects every condition and preserves repeated field order and extension octets" $ do
     let first = "blex, !BLEBBER, colordepth={5}"
         second = "paper = A4, paper!=\"A%32\";mode=\"a,\\\"\255\\\\\", x-version=104, *"
@@ -418,6 +448,14 @@ typedAcceptFeatures = describe "typed Accept-Features" $ do
 
 typedAlternates :: Spec
 typedAlternates = describe "typed Alternates" $ do
+  it "validates writes through the legacy Alternates pattern" $ do
+    let previous = headerMapFromList [("Alternates", "{\"fallback\"}")]
+    forM_ ["", "{\"one\"}, {\"two\"}", "{\"a\" 1 {type text/html} {TYPE text/plain}}"] $ \text -> do
+      let value = Alt.Alternates text
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous
+    let wire = "  {\"a\" 1 {X-Mode high}}  "
+    renderHeaderLines defaultHeaderSettings (Alt.Alternates wire) `shouldBe` Just ("  {\"a\" 1 {X-Mode high}}  " :| [])
   it "decodes all attributes, predicate bags, ranges, factors and proxy versions" $ do
     let first =
           "{\"../paper%20one\" 0.9 {TYPE text/html;profile=\"a,b\"} {charset utf-8} {language en, fr-CA}"
@@ -517,6 +555,26 @@ typedAlternates = describe "typed Alternates" $ do
     lookupAlternates ["{\"fallback\"}", "{\"other\"}"] `shouldSatisfy` isLeft
 
 
+checkedAdditionsWrites :: Spec
+checkedAdditionsWrites = it "checks the first authored qvalue and any extension parameters" $ do
+  let old = headerMapFromList [("Accept-Additions", "milk")]
+      addition params = AA.AcceptAdditions [AA.Addition "milk" [], AA.Addition "syrup" params]
+      param = AA.AdditionParam
+      invalid = [ param "q" Nothing, param "Q" (Just "1.001"), param "q" (Just "0.2 "), param "q" (Just "0.4444")
+                , param "bad=name" Nothing, param "description" (Just "bad\NUL")
+                ]
+      reject :: AA.AcceptAdditions -> Expectation
+      reject value = do
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value old `shouldBe` old
+  reject (AA.AcceptAdditions [AA.Addition "not valid" []])
+  mapM_ (reject . addition . pure) invalid
+  let accepted = addition [param "Q" (Just "0."), param "q" (Just "extension value"), param "note" (Just "café")]
+  lookupRawHeader "Accept-Additions" (setHeader accepted old)
+    `shouldBe` Just ("milk, syrup;Q=0.;q=\"extension value\";note=\"caf\xe9\"" :| [])
+  lookupHeader @AA.AcceptAdditions (setHeader accepted old) `shouldBe` Right (Just accepted)
+
+
 tests :: Spec
 tests =
   describe "TCN" $
@@ -538,6 +596,7 @@ tests =
       , unit_acceptadditions_render
       , typedAcceptAdditions
       , it "Accept-Additions round-trip" prop_acceptadditions_roundtrip
+      , checkedAdditionsWrites
       , unit_acceptfeatures_parse
       , typedAcceptFeatures
       , unit_acceptfeatures_render

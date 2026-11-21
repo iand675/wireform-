@@ -34,9 +34,9 @@ module Network.HTTP.Headers.WantDigest (
 import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
 import qualified Data.Text.Short as ST
-import Network.HTTP.ContentNegotiation (qualityValueParser)
+import Network.HTTP.ContentNegotiation (isQualityValueText, qualityValueParser)
 import Network.HTTP.Grammar.Parser
-import Network.HTTP.Grammar.Rendering (encodeCommaSeparatedPairs, renderHttpWordValue, renderSeparated, shortText)
+import Network.HTTP.Grammar.Rendering (encodeCommaSeparatedPairs, encodeCommaSeparatedTokenPairs, renderHttpWordValue, renderSeparated, shortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hWantDigest)
 import qualified Network.HTTP.Headers.Mason as M
@@ -75,6 +75,13 @@ instance KnownHeader WantDigest where
 
   parseFromHeaders _ = fmap fromEntries . parseListFieldLines "Want-Digest" (httpList wantDigestEntry)
   renderToHeaders _ = pure . encodeCommaSeparatedPairs ";q=" wantDigestAlgorithm wantDigestQ . wantDigestValueList
+  renderToHeadersChecked _ header
+    | all valid entries = Just [encodeCommaSeparatedTokenPairs ";q=" wantDigestAlgorithm wantDigestQ entries]
+    | otherwise = Nothing
+    where
+      entries = wantDigestValueList header
+      valid (WantDigestValue algorithm quality) =
+        isHttpTokenText algorithm && maybe True isQualityValueText quality
   headerName _ = hWantDigest
 
 

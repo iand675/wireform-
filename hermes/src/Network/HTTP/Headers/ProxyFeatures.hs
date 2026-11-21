@@ -142,6 +142,13 @@ instance KnownHeader ProxyFeatures where
   renderToHeaders _ = wireBytes
 
 
+  renderToHeadersChecked _ (ParsedProxyFeatures wire _) = Just wire
+  renderToHeadersChecked _ (RawProxyFeatures text) =
+    let wire = ST.toByteString text
+    in either (const Nothing) (const (Just wire)) $
+         parseSingleFieldLine "Proxy-Features" featuresParser (wire :| [])
+
+
   headerName _ = hProxyFeatures
 
 

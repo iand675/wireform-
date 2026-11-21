@@ -69,6 +69,9 @@ instance KnownHeader ProtocolRequest where
   renderToHeaders _ (ProtocolRequestList entries) = NE.toList (R.fieldLines entries)
 
 
+  renderToHeadersChecked _ (ProtocolRequestList entries) = NE.toList <$> R.checkedFieldLines "Protocol-Request" entriesParser entries
+
+
   headerName _ = hProtocolRequest
 
 

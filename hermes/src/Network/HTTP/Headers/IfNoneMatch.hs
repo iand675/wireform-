@@ -25,7 +25,7 @@ module Network.HTTP.Headers.IfNoneMatch (
 
 import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
-import Network.HTTP.Headers.ETag (EntityTag, conditionalEntityTagParser, parseConditionalEntityTagFields, renderEntityTag)
+import Network.HTTP.Headers.ETag (EntityTag, conditionalEntityTagParser, encodeEntityTagListChecked, parseConditionalEntityTagFields, renderEntityTag)
 import Network.HTTP.Headers.HeaderFieldName (hIfNoneMatch)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -52,6 +52,11 @@ instance KnownHeader IfNoneMatch where
 
 
   renderToHeaders _ = M.toStrictByteString . renderIfNoneMatch
+
+
+  renderToHeadersChecked _ IfNoneMatchAny = Just "*"
+  renderToHeadersChecked _ IfNoneMatchNoTags = Just ""
+  renderToHeadersChecked _ (IfNoneMatchTags tags) = encodeEntityTagListChecked tags
 
 
   headerName _ = hIfNoneMatch

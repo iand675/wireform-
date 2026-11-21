@@ -28,7 +28,7 @@ import qualified Data.ByteString.Short as SBS
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.Rendering (encodeHttpQuotedBytes, opaqueShortText)
+import Network.HTTP.Grammar.Rendering (encodeHttpQuotedBytes, encodeHttpQuotedBytesChecked, opaqueShortText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hDefaultStyle)
 import qualified Network.HTTP.Headers.Mason as M
@@ -63,6 +63,9 @@ instance KnownHeader DefaultStyle where
 
 
   renderToHeaders _ = encodeHttpQuotedBytes . defaultStyleTitleBytes
+
+
+  renderToHeadersChecked _ = encodeHttpQuotedBytesChecked . defaultStyleTitleBytes
 
 
   headerName _ = hDefaultStyle

@@ -76,6 +76,9 @@ instance KnownHeader XRequestID where
   renderToHeaders _ = xRequestIDBytes
 
 
+  renderToHeadersChecked _ = renderOpaqueFieldChecked . xRequestIDBytes
+
+
   headerName _ = hXRequestID
 
 

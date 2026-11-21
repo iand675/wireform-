@@ -50,6 +50,10 @@ instance KnownHeader UserAgent where
   renderToHeaders _ = M.toStrictByteString . renderUserAgent
 
 
+  renderToHeadersChecked _ (UserAgent first rest) =
+    encodeProductSequenceChecked productName productVersion first rest
+
+
   headerName _ = hUserAgent
 
 

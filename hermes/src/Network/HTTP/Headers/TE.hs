@@ -43,6 +43,7 @@ import Network.HTTP.Headers.Parsing.Util
 import Network.HTTP.Headers.Rendering.Util (sepByCommas1, shortText)
 import Network.HTTP.Headers.TransferEncoding (
   TransferParameter (..),
+  encodeTransferCodingsChecked,
   renderTransferParameter,
   transferCodingIs,
   transferCodingNameParser,
@@ -89,7 +90,26 @@ instance KnownHeader TE where
 
   parseFromHeaders _ = fmap fromCodings . parseListFieldLines "TE" (httpList teCodingParser)
   renderToHeaders _ = pure . M.toStrictByteString . renderTE
+  renderToHeadersChecked _ TEEmpty = Just [""]
+  renderToHeadersChecked _ (TE codings)
+    | all validTECoding codings =
+        pure <$> encodeTransferCodingsChecked teCodingName teCodingParams teCodingWeight (NE.toList codings)
+    | otherwise = Nothing
   headerName _ = hTE
+
+
+validTECoding :: TECoding -> Bool
+validTECoding (TECoding name weight)
+  | transferCodingIs "chunked" name = False
+  | transferCodingIs "trailers" name = case weight of
+      Nothing -> True
+      Just _ -> False
+  | otherwise = True
+validTECoding (TEParameterizedCoding name _ parameters) =
+  not (transferCodingIs "trailers" name)
+    && transferCodingSupportsParameters name
+    && all (not . transferCodingIs "q" . transferParameterName) parameters
+{-# INLINE validTECoding #-}
 
 
 teParser :: ParserT st String TE

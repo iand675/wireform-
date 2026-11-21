@@ -2,6 +2,7 @@
 
 module Test.Hermes.WebSocket (tests) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
@@ -12,7 +13,7 @@ import Data.Time (UTCTime (..), fromGregorian)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (HeaderMessage (..), defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupHeaderWith, setHeader, withHeaderDateReference, withHeaderMessage)
+import Network.HTTP.Headers (HeaderMessage (..), defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupHeaderWith, renderHeaderLines, setHeader, withHeaderDateReference, withHeaderMessage)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util (Result (..), runParser)
 import qualified Network.HTTP.Headers.SecWebSocketAccept as Accept
@@ -237,6 +238,63 @@ unit_ext_field = it "preserves ordered extension lines and requires unescaped pa
     ["foo;mode=\"\"", "foo;mode=\"a b\"", "foo;mode=\"a,b\"", "foo;mode=\"a\\\"b\"", "foo;mode=\"\xff\"", "foo;mode=", "foo;", ", ,"]
 
 
+checked_writers :: Spec
+checked_writers = do
+  describe "Sec-WebSocket-Key" $
+    it "validates public constructors before writing field lines" $ do
+      let wire = "dGhlIHNhbXBsZSBub25jZQ=="
+          previous = headerMapFromList [("Sec-WebSocket-Key", wire)]
+      renderHeaderLines defaultHeaderSettings (Key.SecWebSocketKey "the sample nonce") `shouldBe` Just (wire :| [])
+      forM_ [0, 15, 17] $ \width -> do
+        let value = Key.SecWebSocketKey (BS.replicate width 0xff)
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value previous `shouldBe` previous
+  describe "Sec-WebSocket-Accept" $
+    it "validates public constructors before writing field lines" $ do
+      let wire = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+          previous = headerMapFromList [("Sec-WebSocket-Accept", wire)]
+      renderHeaderLines defaultHeaderSettings sampleAccept `shouldBe` Just (wire :| [])
+      forM_ [0, 19, 21] $ \width -> do
+        let value = Accept.SecWebSocketAccept (BS.replicate width 0xff)
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value previous `shouldBe` previous
+  describe "Sec-WebSocket-Version" $
+    it "validates public constructors before writing field lines" $ do
+      let request = withHeaderMessage HeaderRequest defaultHeaderSettings
+          response = withHeaderMessage HeaderResponse defaultHeaderSettings
+          previous = headerMapFromList [("Sec-WebSocket-Version", "13")]
+          versions = Ver.SecWebSocketVersion (13 :| [0, 255])
+      renderHeaderLines request (Ver.SecWebSocketVersion (13 :| [])) `shouldBe` Just ("13" :| [])
+      renderHeaderLines response versions `shouldBe` Just ("13, 0, 255" :| [])
+      renderHeaderLines request versions `shouldBe` Nothing
+      forM_ [256 :| [], 13 :| [maxBound]] $ \numbers -> do
+        let invalid = Ver.SecWebSocketVersion numbers
+        renderHeaderLines response invalid `shouldBe` Nothing
+        setHeader invalid previous `shouldBe` previous
+  describe "Sec-WebSocket-Protocol" $
+    it "validates public constructors before writing field lines" $ do
+      let request = withHeaderMessage HeaderRequest defaultHeaderSettings
+          response = withHeaderMessage HeaderResponse defaultHeaderSettings
+          previous = headerMapFromList [("Sec-WebSocket-Protocol", "chat")]
+          protocols = Proto.SecWebSocketProtocol ("Chat" :| ["chat"])
+      renderHeaderLines response (Proto.SecWebSocketProtocol ("chat" :| [])) `shouldBe` Just ("chat" :| [])
+      renderHeaderLines request protocols `shouldBe` Just ("Chat, chat" :| [])
+      renderHeaderLines response protocols `shouldBe` Nothing
+      forM_ ["" :| [], "chat, superchat" :| [], "chat" :| ["chat"], "one" :| ["two", "one"], "chat" :| ["💬"]] $ \tokens -> do
+        let invalid = Proto.SecWebSocketProtocol tokens
+        renderHeaderLines request invalid `shouldBe` Nothing
+        setHeader invalid previous `shouldBe` previous
+  describe "Sec-WebSocket-Extensions" $
+    it "validates public constructors before writing field lines" $ do
+      let previous = headerMapFromList [("Sec-WebSocket-Extensions", "foo")]
+          make extension = Ext.SecWebSocketExtensions (Ext.Extension "foo" [] :| [extension])
+          valid = make (Ext.Extension "bar" [Ext.ExtensionParam "flag" Nothing, Ext.ExtensionParam "mode" (Just "x")])
+      renderHeaderLines defaultHeaderSettings valid `shouldBe` Just ("foo, bar;flag;mode=x" :| [])
+      forM_ [Ext.Extension "bar;q" [], Ext.Extension "" [], Ext.Extension "bar" [Ext.ExtensionParam "q=x" Nothing], Ext.Extension "bar" [Ext.ExtensionParam "q" (Just "")], Ext.Extension "bar" [Ext.ExtensionParam "q" (Just "a b")]] $ \invalid -> do
+        renderHeaderLines defaultHeaderSettings (make invalid) `shouldBe` Nothing
+        setHeader (make invalid) previous `shouldBe` previous
+
+
 -- ---------------------------------------------------------------------------
 -- Round-trip properties
 -- ---------------------------------------------------------------------------
@@ -324,6 +382,7 @@ tests =
       , unit_ext_parse
       , unit_ext_render
       , unit_ext_field
+      , checked_writers
       , it "key bytes round-trip" prop_key_roundtrip
       , it "accept bytes round-trip" prop_accept_roundtrip
       , it "version list round-trip" prop_version_roundtrip

@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
@@ -34,13 +36,14 @@ module Network.HTTP.Headers.Digest (
   renderDigest,
 ) where
 
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short.Internal as SBS
 import qualified Data.CharSet as CharSet
 import qualified Data.List.NonEmpty as NE
 import Data.Text.Short (ShortText)
-import qualified Data.Text.Short.Unsafe as STU
+import qualified Data.Text.Short as ST
 import Data.Word (Word64)
+import Network.HTTP.ContentNegotiation (sameNegotiationToken)
 import Network.HTTP.Grammar.Parser
 import Network.HTTP.Grammar.Rendering (encodeCommaSeparatedPairs, renderHttpWordValue, renderSeparated, shortText)
 import Network.HTTP.Headers
@@ -80,6 +83,11 @@ instance KnownHeader Digest where
 
   parseFromHeaders _ = fmap fromEntries . parseListFieldLines "Digest" (httpList digestEntry)
   renderToHeaders _ = pure . encodeCommaSeparatedPairs "=" digestAlgorithm (Just . digestEncoded) . digestValueList
+  renderToHeadersChecked _ header
+    | all validDigest entries = Just [encodeCommaSeparatedPairs "=" digestAlgorithm (Just . digestEncoded) entries]
+    | otherwise = Nothing
+    where
+      entries = digestValueList header
   headerName _ = hDigest
 
 
@@ -102,34 +110,48 @@ digestParser = fromEntries <$> httpList digestEntry
 
 
 digestEntry :: ParserT st String DigestValue
-digestEntry = withByteString tokenBytes $ \_ algorithm -> do
-  ows *> $(char '=') *> ows
-  DigestValue (STU.fromByteStringUnsafe algorithm) <$> digestOutput (foldAlgorithm algorithm)
+digestEntry = do
+  algorithm <- rfc9110Token <* ows <* $(char '=') <* ows
+  DigestValue algorithm <$> digestOutput (digestEncoding algorithm)
+
+
+data DigestEncoding
+  = Base64Output {-# UNPACK #-} !Int {-# UNPACK #-} !Int
+  | DecimalOutput {-# UNPACK #-} !Word64
+  | HexOutput
+  | WantDigestOnly
+  | ExtensionOutput
+
+
+digestEncoding :: ShortText -> DigestEncoding
+digestEncoding name = case SBS.length (ST.toShortByteString name) of
+  3
+    | matches "md5" -> Base64Output 22 2
+    | matches "sha" -> Base64Output 27 1
+  6 | matches "crc32c" -> HexOutput
+  7
+    | matches "sha-256" -> Base64Output 43 1
+    | matches "sha-512" -> Base64Output 86 2
+    | matches "adler32" -> HexOutput
+    | matches "unixsum" -> DecimalOutput 65_535
+  9 | matches "unixcksum" -> DecimalOutput 4_294_967_295
+  10 | matches "contentmd5" -> WantDigestOnly
+  _ -> ExtensionOutput
   where
-    foldAlgorithm bytes
-      | B.any isUpper bytes = B.map lower bytes
-      | otherwise = bytes
-    isUpper byte = byte >= 65 && byte <= 90
-    lower byte
-      | isUpper byte = byte + 32
-      | otherwise = byte
+    matches expected = sameNegotiationToken expected name
+{-# INLINE digestEncoding #-}
 
 
-digestOutput :: ByteString -> ParserT st String ShortText
-digestOutput algorithm = case algorithm of
-  "md5" -> base64Digest 22 $(string "==")
-  "sha" -> base64Digest 27 $(char '=')
-  "sha-256" -> base64Digest 43 $(char '=')
-  "sha-512" -> base64Digest 86 $(string "==")
-  "unixsum" -> decimalDigest 65535
-  "unixcksum" -> decimalDigest 4294967295
-  "adler32" -> hexDigest
-  "crc32c" -> hexDigest
-  "contentmd5" -> err "contentMD5 is only allowed in Want-Digest"
-  _ -> quotedExtension <|> shortASCIIFromParser_ (asciiAlnumSetBytes extensionCharacters)
+digestOutput :: DigestEncoding -> ParserT st String ShortText
+digestOutput = \case
+  Base64Output digits padding ->
+    base64Digest (fromIntegral digits) (if padding == 2 then $(string "==") else $(char '='))
+  DecimalOutput limit -> shortASCIIFromParser_ (boundedDecimalWord (fromIntegral limit) (err "Digest checksum exceeds its width"))
+  HexOutput -> hexDigest
+  WantDigestOnly -> err "contentMD5 is only allowed in Want-Digest"
+  ExtensionOutput -> quotedExtension <|> shortASCIIFromParser_ (asciiAlnumSetBytes extensionCharacters)
   where
     quotedExtension = shortTextFromLatin1 <$> byteStringOf ($(char '"') *> scanOpaqueBody 34 False)
-    decimalDigest limit = shortASCIIFromParser_ (boundedDecimalWord limit (err "Digest checksum exceeds its width"))
     hexDigest = shortASCIIFromParser_ $
       withSpan (asciiSetBytes hexCharacters) $ \_ (Span (Pos start) (Pos end)) ->
         if end - start <= 8
@@ -155,6 +177,35 @@ extensionCharacters = asciiSet (CharSet.range '!' '~' `CharSet.difference` "\",;
 {-# NOINLINE base64Characters #-}
 {-# NOINLINE hexCharacters #-}
 {-# NOINLINE extensionCharacters #-}
+
+
+validDigest :: DigestValue -> Bool
+validDigest (DigestValue algorithm value) = isHttpTokenText algorithm && size /= 0
+  && case digestEncoding algorithm of
+    Base64Output digits padding ->
+      size == digits + padding && at digits == 61 && (padding == 1 || at (digits + 1) == 61)
+        && validBase64Prefix bytes digits
+    DecimalOutput limit -> decimal limit 0 0
+    HexOutput -> size <= 8 && prefix hexCharacters size 0
+    WantDigestOnly -> False
+    ExtensionOutput
+      | at 0 == 34 -> isHttpWordValue value
+      | otherwise -> prefix extensionCharacters size 0
+  where
+    bytes = ST.toShortByteString value
+    size = SBS.length bytes
+    at = SBS.unsafeIndex bytes
+    prefix (AsciiSet low high) end = scan
+      where
+        scan !offset = offset == end || (asciiMember low high (BSI.w2c (at offset)) && scan (offset + 1))
+    -- The largest allowed checksum is 32-bit, so the multiply cannot
+    -- overflow a Word64 even on the step that rejects the value.
+    decimal limit !offset !total
+      | offset == size = True
+      | otherwise = digit <= 9 && next <= limit && decimal limit (offset + 1) next
+      where
+        digit = at offset - 48
+        next = total * 10 + fromIntegral digit
 
 
 -- ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ module Network.HTTP.Headers.SecPurpose (
   secPurposePrefetches,
   secPurposeParser,
   renderSecPurpose,
+  renderSecPurposeChecked,
 ) where
 
 import Data.List.NonEmpty (NonEmpty (..))
@@ -72,9 +73,16 @@ instance KnownHeader SecPurpose where
   parseFromHeaders _ fields = parseStructuredFieldLines "Sec-Purpose" secPurposeParser fields
 
 
-  renderToHeaders _ (SecPurpose (RFC8941Token "prefetch")) = "prefetch"
-  renderToHeaders _ (SecPurpose (RFC8941Token token)) = ST.toByteString token
-  renderToHeaders _ field = M.toStrictByteString (renderSecPurpose field)
+  renderToHeaders settings value = maybe "" id (renderToHeadersChecked settings value)
+  {-# INLINE renderToHeaders #-}
+
+
+  renderToHeadersChecked _ (SecPurpose (RFC8941Token "prefetch")) = Just "prefetch"
+  renderToHeadersChecked _ (SecPurpose token)
+    | isStructuredFieldToken token = Just (ST.toByteString (unsafeToRFC8941Token token))
+    | otherwise = Nothing
+  renderToHeadersChecked _ value = either (const Nothing) (Just . M.toStrictByteString) (renderSecPurposeChecked value)
+  {-# INLINE renderToHeadersChecked #-}
 
 
   omitHeaderValue = null . secPurposeMembers
@@ -88,5 +96,11 @@ secPurposeParser :: ParserT st String SecPurpose
 secPurposeParser = SecPurposeList <$> (ows *> rfc8941List structuredFieldMemberParser <* ows)
 
 
+-- | Render the field value. An invalid list produces no bytes.
 renderSecPurpose :: SecPurpose -> M.Builder
-renderSecPurpose = R.renderStructuredFieldList . secPurposeMembers
+renderSecPurpose = either (const mempty) id . renderSecPurposeChecked
+
+
+-- | Validate authored members and the surviving parameters at each level.
+renderSecPurposeChecked :: SecPurpose -> Either String M.Builder
+renderSecPurposeChecked = R.renderStructuredFieldListChecked . secPurposeMembers

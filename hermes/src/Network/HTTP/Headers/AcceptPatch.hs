@@ -26,7 +26,7 @@ module Network.HTTP.Headers.AcceptPatch (
 ) where
 
 import qualified Data.List.NonEmpty as NE
-import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType, mediaTypeWithParametersParser, renderMediaRange)
+import Network.HTTP.ContentNegotiation (MediaRange (..), MediaType, encodeMediaTypesChecked, mediaTypeWithParametersParser, renderMediaRange)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hAcceptPatch)
 import qualified Network.HTTP.Headers.Mason as M
@@ -62,6 +62,9 @@ instance KnownHeader AcceptPatch where
 
 
   renderToHeaders _ = pure . M.toStrictByteString . renderAcceptPatch
+
+
+  renderToHeadersChecked _ (AcceptPatchRanges ranges) = pure <$> encodeMediaTypesChecked (NE.toList ranges)
 
 
   headerName _ = hAcceptPatch

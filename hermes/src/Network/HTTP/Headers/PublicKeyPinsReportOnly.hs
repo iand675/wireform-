@@ -33,12 +33,13 @@ module Network.HTTP.Headers.PublicKeyPinsReportOnly (
 ) where
 
 import qualified Data.List.NonEmpty as NE
+import Data.Maybe (isJust)
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPublicKeyPinsReportOnly)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.TransportPolicy (pinPolicy, renderPinPolicy)
+import Network.HTTP.Headers.TransportPolicy (encodePinPolicyChecked, pinPolicy, renderPinPolicy)
 
 
 {- | A single pinned public key: a hash algorithm and a base64-encoded SPKI
@@ -80,6 +81,10 @@ instance KnownHeader PublicKeyPinsReportOnly where
   renderToHeaders _ = M.toStrictByteString . renderPublicKeyPinsReportOnly
 
 
+  renderToHeadersChecked _ value@(PublicKeyPinsReportOnly pins _ subdomains uri) =
+    encodePinPolicyChecked pinAlgorithm pinFingerprint pins (ageDirective value) subdomains uri
+
+
   headerName _ = hPublicKeyPinsReportOnly
 
 
@@ -88,9 +93,11 @@ publicKeyPinsReportOnlyParser = pinPolicy Pin PublicKeyPinsReportOnly (Just 0)
 
 
 renderPublicKeyPinsReportOnly :: PublicKeyPinsReportOnly -> M.Builder
-renderPublicKeyPinsReportOnly (PublicKeyPinsReportOnly pins age subdomains uri) =
-  renderPinPolicy pinAlgorithm pinFingerprint pins ageDirective subdomains uri
-  where
-    ageDirective
-      | age == 0 && (not (null pins) || subdomains || uri /= Nothing) = Nothing
-      | otherwise = Just age
+renderPublicKeyPinsReportOnly value@(PublicKeyPinsReportOnly pins _ subdomains uri) =
+  renderPinPolicy pinAlgorithm pinFingerprint pins (ageDirective value) subdomains uri
+
+
+ageDirective :: PublicKeyPinsReportOnly -> Maybe Word
+ageDirective (PublicKeyPinsReportOnly pins age subdomains uri)
+  | age == 0 && (not (null pins) || subdomains || isJust uri) = Nothing
+  | otherwise = Just age

@@ -65,6 +65,7 @@ import Data.Text (Text)
 import Network.HTTP.Client.Media (Encode, encode, mediaType, renderMediaType)
 import Network.HTTP.Client.Protocol
 import Network.HTTP.Client.URI
+import Network.HTTP.Headers.Trailer (isForbiddenTrailerName)
 import Network.HTTP.Types.Header qualified as H
 import Network.HTTP.Types.Method qualified as M
 import Network.HTTP.Types.Version (Version)
@@ -209,8 +210,7 @@ withRequestTrailers names produce req = do
       if H.isValidHeaderValue value then Right () else Left (InvalidRequestTrailerValue name)
     validateTrailerName name
       | not (H.isValidHeaderName (CI.original name)) = Left (InvalidRequestTrailerName name)
-      | H.isHopByHop name || H.isHttp2Forbidden name
-          || name `elem` [H.hHost, H.hContentLength, H.hContentType, H.hContentEncoding, H.hContentRange, H.hAuthorization, H.hExpect, H.hRange] =
+      | isForbiddenTrailerName (CI.foldedCase name) =
           Left (ForbiddenRequestTrailer name)
       | otherwise = Right ()
 

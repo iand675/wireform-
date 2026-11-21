@@ -13,16 +13,16 @@ Run `cabal test hermes:hermes-tests` for the package suite and
 `python3 scripts/run-benchmarks.py --only hermes-bench` from the repository
 root for the Criterion target.
 
-| Area | Evidence and outstanding work |
+| Area | Evidence |
 | --- | --- |
-| HeaderMap and Accept family | Header names compare and hash by their spelling across literal, cached, and parsed construction. Public API regressions cover ordered raw and typed access, field lines, quality values, and quoting. Accept-Language checks RFC 4647 basic ranges and preserves spelling and order. Accept validates whole-type and subtype wildcards. Accept-Post uses the same range grammar and preserves parameters. |
+| HeaderMap and Accept family | Header names compare and hash by their spelling across literal, cached, and parsed construction. Public API regressions cover ordered raw and typed access, field lines, quality values, and quoting. Accept, Accept-Language, Accept-Encoding, and Accept-Charset expose selection with specific entries taking precedence over wildcards. Accept-Post uses the same media range grammar as Accept and preserves parameters. |
 | Representation headers | Content-Type and Accept-Patch use the concrete media-type grammar. The typed codec and client preserve opaque bytes in quoted media parameters and re-quote values when needed. Client callers can parse wildcards explicitly with `parseMediaRange`. Content-Encoding preserves ordered codings across field lines and represents an explicitly empty field. |
 | MIME and AtomPub metadata | Content-MD5 validates exact-width canonical Base64. MIME-Version validates its decimal components and ignores comments. Slug validates percent-encoded UTF-8, preserves its wire spelling, and provides decoded text and typed authoring. All three reject repeated field lines. |
 | SOAP action and metering | SOAPAction distinguishes an empty field from an empty quoted URI and validates quoted URI references. Meter retains repeated field lines and mixed directive spellings, reads paired arbitrary-precision counts, and checks known directive direction when supplied. |
 | Transparent negotiation directives | Negotiate, TCN, and Variant-Vary retain all field lines. Negotiate exposes bounded algorithm versions and RFC keywords. TCN exposes typed response and override directives and preserves extension bytes. Variant-Vary checks that the wildcard stands alone and exposes case-folded field names. |
 | Transparent negotiation variants | Accept-Features and Alternates validate their nested grammars, retain field order and exact member spelling, and support typed lookup and authoring. Tests cover opaque extensions, repeated lines, a real Apache response, and violations such as duplicate fallback variants or attributes. |
 | Content-Disposition and Content-Language | Content-Disposition rejects duplicate parameter names and validates RFC 8187 syntax, retaining the original extended spelling. The filename accessor prefers decoded UTF-8 or Latin-1 and can fall back to the regular filename. Content-Language shares the RFC 5646 tag checker, with private use and grandfathered forms, an empty-field constructor, and ordered repeated-line parsing. |
-| Structured Fields | Shared Boolean, integer, decimal and byte-sequence codecs checked against RFC 9651 and 262 HTTP Working Group scalar vectors. The dictionary codec adds strict strings, dates, display strings, inner lists, and ordered last-value-wins handling for keys and parameters. CDN-Cache-Control, Priority, the RFC 9530 digest family, and Reporting-Endpoints use it. The signature fields enforce unique labels. Cache-Status and Proxy-Status use the shared list grammar and keep extension parameters in wire order. Additional Structured Fields consumers still need review. |
+| Structured Fields | Shared Boolean, integer, decimal and byte-sequence codecs checked against RFC 9651 and 262 HTTP Working Group scalar vectors. The dictionary codec adds strict strings, dates, display strings, inner lists, and ordered last-value-wins handling for keys and parameters. CDN-Cache-Control, Priority, the RFC 9530 digest family, and Reporting-Endpoints use it. The signature fields enforce unique labels. Cache-Status and Proxy-Status use the shared list grammar and keep extension parameters in wire order. The rows for browser policies, certificate fields, and request signals record the field-specific constraints on other Structured Fields consumers. |
 | Certificate fields | Client-Cert is a singleton and Client-Cert-Chain retains the order of its List entries across lines. The combined accessor checks that the chain has a leaf and excludes that leaf. Cert-Not-Before and Cert-Not-After are ACME STAR response fields that use the shared HTTP-date codec and UTCTime. |
 | Fetch CORS and Resource Timing | The CORS header and method lists preserve ordered field lines, skip empty members, and parse complete tokens. Response lists represent an explicitly empty field value. The request method, max-age, and credentials fields enforce singleton cardinality. Timing-Allow-Origin combines lists of validated serialized origins, null, and wildcard entries. |
 | Early cross-site access and S-HTTP | Method-Check uses the shared case-sensitive method type. Method-Check-Expires resolves all three HTTP-date forms with the configured reference clock. Referer-Root requires an explicit port or the null literal. Security-Scheme validates the S-HTTP/1.4 literal. The four fields enforce singleton lookup. |
@@ -48,7 +48,7 @@ root for the Criterion target.
 | Permissions policy | The full Structured Fields dictionary is retained and duplicate feature names use the last value across field lines. The typed declaration view validates CSP scheme and host sources, reads Token-valued reporting endpoints, and distinguishes an empty allowlist from an unsupported member value. |
 | Conditional entity tags | ETag, If-Match, If-None-Match, If-Range, and Delta-Base preserve every allowed opaque octet. ETag and Delta-Base enforce singleton fields. Match lists preserve field order, and the HTTP client uses the same strong and weak byte comparisons as Hermes. |
 | Delta encoding | A-IM and IM combine field lines in order, preserve extension parameters, and retain empty lists. A-IM uses the shared quality-value renderer and accepts the reserved identity token. IM rejects identity. |
-| Range requests and partial responses | Range recognizes the byte unit case-insensitively, skips empty list entries, and validates offsets through the full Word64 range. Content-Range enforces ordered endpoints and a complete length beyond the last byte. Both enforce singleton field lines. Accept-Ranges keeps advertised units in order, and the client projects only byte units into its byte-range type. |
+| Range requests and partial responses | Range recognizes the byte unit case-insensitively, skips empty list entries, and validates offsets through the full Word64 range. The resolver clips an inclusive end or suffix to the representation length. If-Range checks strong tag equality and exact strong dates. Content-Range enforces ordered endpoints and a complete length beyond the last byte. Range and Content-Range enforce singleton field lines. Accept-Ranges keeps advertised units in order. |
 | WebSocket handshake fields | Key and Accept decode canonical Base64 at their prescribed lengths. Version validates the 0–255 grammar, and Protocol checks the uniqueness and order of offered tokens. Explicit request and response settings select the singleton grammar for request Version and response Protocol. Extensions preserves order across lines in both directions and validates parameter tokens after unescaping. |
 | W3C Trace Context | Traceparent checks version, lowercase hex and nonzero identifiers, rejects repeated field lines and preserves future-version extensions. Tracestate combines field lines in order, recognizes simple and tenant keys, preserves spaces inside values, rejects duplicate keys and enforces the combined member limit. |
 | HTTP dates and delays | Typed lookup covers all three HTTP-date formats, calendar and clock bounds, leap seconds, the explicit RFC 850 clock cutoff, field whitespace and singleton cardinality. The clock-free API retains its 1970–2069 window. Age uses the first field member and saturates overflow, Cache-Control accepts quoted delays and saturates overflow, and Retry-After retains decimal delays beyond Word. Cookie Expires has its own token grammar, year floor and clock rules. |
@@ -78,11 +78,68 @@ root for the Criterion target.
 | Response Set-Cookie | The codec shares request Cookie's exact value grammar. Standard attribute names and SameSite values are case-insensitive. Tests cover signed and saturated Max-Age, raw paths, duplicate attributes, ordered extension preservation, and separate physical lines. A focused client middleware test covers storing and returning quoted values, host and path matching, rejecting an out-of-scope domain, and expiration. Expires supports RFC 6265 date tokens with the first syntactic match for each component and stops at the next attribute. |
 | Legacy cookie fields | Cookie2 checks singleton decimal versions. Set-Cookie2 parses folded lists within each line, retains field order and bytes, and projects the first occurrence of each attribute. Typed authoring validates required versions, quoted URL and port arguments, and opaque values. |
 
-The source inventory now finds 241 instances with a direct import in Hermes
-tests. Direct imports do not establish the depth of the wire cases or
-interoperability. Downstream and aggregate coverage still need inspection.
+All 241 instances are exposed by the library and have a direct import in a
+registered Hermes test spec. An inventory of typed entry points found 223
+through explicit type applications. Manual review located typed lookup for
+the remaining 18 through inferred result types and shared test helpers.
 
-The latest GHC 9.10.3 suite passed all 1,122 Hermes tests. The earlier
+| Fields resolved by manual review | Typed `HeaderMap` evidence |
+| --- | --- |
+| Accept-Datetime, Expires, If-Unmodified-Since, Last-Modified, Memento-Datetime, Sunset | [Date tests](test/Test/Hermes/Date.hs) read all three date forms, reject trailing bytes and repeated lines, and replace repeats with a single canonical field. The same checks run for Repeatability-First-Sent. |
+| Authentication-Info, Proxy-Authentication-Info, Proxy-Authenticate | [Authentication tests](test/Test/Hermes/WWWAuthenticate.hs) combine valid lines in order, reject malformed later lines, and replace the original lines with one canonical field. |
+| Content-Location, Ping-To, Referer | [URI reference tests](test/Test/Hermes/URIReference.hs) check valid and invalid wire values, render the accepted spelling, and reject repeated lines. |
+| Cross-Origin-Embedder-Policy, Cross-Origin-Embedder-Policy-Report-Only, Cross-Origin-Opener-Policy, Cross-Origin-Opener-Policy-Report-Only, Cross-Origin-Resource-Policy, Origin-Agent-Cluster | [Cross-origin tests](test/Test/Hermes/CrossOrigin.hs) check valid and invalid tokens and parameters, canonical rendering, and singleton lookup. |
+
+The typed writers for Apply-To-Redirect-Ref, Close,
+Cross-Origin-Resource-Policy, Early-Data, Include-Referred-Token-Binding-ID,
+Overwrite, Repeatability-Result, Sec-GPC, X-DNS-Prefetch-Control, and
+X-Download-Options emit fixed wire spellings. DNT exposes only its
+boolean preference and a constructor that validates any extension suffix
+with the same predicate as its parser. These eleven instances satisfy
+the outbound grammar through their value constructors or renderers.
+Capsule-Protocol, Depth, Hobareg, Origin-Agent-Cluster, Schedule-Reply,
+and Urgency also emit fixed spellings for their distinct values. Age,
+Content-Length, and TTL render unsigned decimal values within the width
+their readers accept.
+Access-Control-Max-Age clamps signed values to nonnegative seconds.
+Strict-Transport-Security uses an unsigned age and Boolean switches for
+its two optional directives.
+
+CalDAV-Timezones and X-Permitted-Cross-Domain-Policies emit only
+registered spellings. Access-Control-Allow-Credentials emits `true` or
+omits the field. Priority normalizes urgency to its supported range.
+Client-Cert and Client-Cert-Chain encode arbitrary byte sequences in
+Structured Fields syntax, using a nonempty list for the chain.
+
+Twelve more writers validate in their existing list or dictionary
+renderer. Cache-Status, CDN-Cache-Control and Proxy-Status apply their
+member validation. Content-Digest, Repr-Digest, Want-Content-Digest and
+Want-Repr-Digest check the Structured Fields dictionary and member
+types. Signature, Signature-Input and Accept-Signature validate labels
+and their respective member values. Accept-CH checks each hint name,
+and Permissions-Policy validates the normalized dictionary. The typed
+entry point treats their invalid empty rendering as a failed write.
+Tests cover preservation of existing fields when those writers fail.
+
+Of the 241 typed headers, 201 have a dedicated checked writer, 28
+satisfy their wire grammar through the type or renderer, and 12
+validate in their existing renderer. See the
+[final write-side checks](#final-write-side-checks) for the last 13 fields.
+
+The Criterion target directly exercises 227 of the 241 typed header
+modules. The other 14 share the parser or renderer measured by the
+fixtures below.
+
+| Fields without a direct fixture | Benchmark evidence |
+| --- | --- |
+| Accept-Datetime, Cert-Not-Before, Expires, If-Modified-Since, If-Unmodified-Since, Last-Modified, Memento-Datetime, Sunset | Share HTTP-date decoding and rendering with `dates-and-delays/date-parse` and `date-render`. |
+| Delta-Base, If-Match | `entity-tags/strong` and `match-list` exercise the shared entity-tag and conditional list grammars. |
+| Alt-Used | The `authority/host` and `authority-ipv6` fixtures exercise the shared host and port scanner. |
+| Content-Location, Ping-From | The `uri-references` fixtures exercise the URI-reference and browser URL scanners, including Ping-To. |
+| Close | Has a constant singleton path and delegates other inputs to the Connection codec measured by `field-lists/connection-parse`. |
+
+The latest GHC 9.10.3 suite passed all 1,367 Hermes tests in synchronous and
+parallel runs. The earlier
 748-test suite passed 100 of 100 threaded runs with two or four
 capabilities after switching map keys to byte equality and hashing.
 Before the switch, the suite intermittently
@@ -103,6 +160,649 @@ weekday consistency and runs through the generic typed field driver.
 Age and Retry-After took 37 and 38 ns respectively for four-digit delays,
 with 552 bytes allocated per operation in each case.
 
+### Checked numeric and HTTP-date authoring
+
+Twelve typed date writers share the checked 29-byte IMF-fixdate encoder,
+including the timestamp form of Retry-After. The encoder accepts years
+1900 through 9999, truncates fractional seconds, and preserves the
+representable leap second. It rejects out-of-range dates and clocks before
+`setHeader` replaces existing lines. If-Range uses the same direct byte
+encoder on its checked date path. [RFC 9110 §5.6.7](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.7),
+[RFC 5322 §3.3](https://www.rfc-editor.org/rfc/rfc5322.html#section-3.3).
+
+Max-Forwards and MIME-Version validate their signed constructor values
+before rendering unsigned decimals. X-Forwarded-Port checks the 16-bit
+range, Timeout checks the 32-bit second count of each choice, and
+OData-Version emits only spellings in its ABNF. OData-MaxVersion
+preserves fractional padding and checks the line size, including the
+field name and colon, against `HeaderSettings` before allocating it.
+[RFC 9110 §7.6.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-7.6.2),
+[MIME-Version](https://www.rfc-editor.org/rfc/rfc2045.html#section-4),
+[X-Forwarded-Port](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/x-forwarded-headers.html#x-forwarded-port),
+[RFC 4918 §10.7](https://www.rfc-editor.org/rfc/rfc4918.html#section-10.7),
+[OData ABNF](https://docs.oasis-open.org/odata/odata/v4.01/os/abnf/odata-abnf-construction-rules.txt).
+
+The checked date writer matched Data.Time across 2,958,464 Gregorian
+days and all 86,401 seconds of a leap-second day. The numeric model
+matched 213,575 cases, including the complete port range and padding at
+different line-size limits. All 1,262 Hermes and 487 aggregate HTTP
+tests passed in synchronous and parallel runs. HTTP/1, HTTP/2, and
+Connect passed as well.
+
+Sequential Criterion runs measured the public typed write entry point.
+The Go 1.26.10 fixtures apply the corresponding bounds and emit the
+same bytes. Timings are in nanoseconds and allocations are bytes per
+operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Date | 29.0 / 224 | 31.3 / 312 | 73–78 / 32 |
+| Retry-After date | 35.6 / 424 | 32.6 / 312 | 73–78 / 32 |
+| MIME-Version | 18.8 / 344 | 19.6 / 288 | 17.6–17.8 / 48 |
+| OData-Version 4.01 | 7.9 / 96 | 6.0 / 32 | 1.7 / 0 |
+| OData-MaxVersion with padding | 31.2 / 456 | 30.4 / 296 | 20.1 / 16 |
+| WebDAV Timeout choices | 86.3 / 920 | 27.0 / 304 | 16.7–18.9 / 48 |
+| X-Forwarded-Port | 14.8 / 328 | 15.1 / 248 | 9.9–10.2 / 5 |
+| Max-Forwards | 14.6 / 328 | 15.2 / 248 | 11.7–11.8 / 24 |
+
+The cached OData-Version fixture improved and remains above the twofold
+Go timing target. Simplified Core places the date validity guard before
+the fixed-width encoding worker.
+
+### Checked media types and content negotiation
+
+Content-Type and Accept-Patch validate concrete media names. Accept and
+Accept-Post allow media ranges, and Accept-Post also accepts its
+standalone wildcard. Checked writes validate parameter names and values
+before replacing existing field lines. The encoder preserves quoted
+Latin-1 octets and escapes quotes and backslashes. Accept reserves
+`q` for the weight, including when the field uses an uppercase `Q`.
+[RFC 9110 media types](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.3.1),
+[RFC 9110 Accept](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.1),
+[RFC 5789 Accept-Patch](https://www.rfc-editor.org/rfc/rfc5789.html#section-3.1),
+[LDP Accept-Post](https://www.w3.org/TR/ldp/).
+
+Accept-Charset validates every charset token. Accept-Encoding validates
+custom coding tokens and uses the wildcard constructor for `*`.
+Content-Encoding validates the complete ordered coding chain.
+Content-Script-Type and Content-Style-Type validate newly authored raw
+media type spellings and re-emit parsed values as received.
+[RFC 9110 content codings](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.4.1),
+[RFC 9110 Accept-Charset](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.2),
+[RFC 9110 Accept-Encoding](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.3).
+
+Nine regressions exercise the typed write entry point and verify that a
+failed write preserves existing lines. A separate model and parser
+differential covered 90,413 authored values, including every Latin-1
+octet in parameter values. The four weighted list writers matched the
+previous builder on 32,172 renders. All 1,285 Hermes tests and 487
+aggregate HTTP tests passed on each of the synchronous and parallel
+schedules. HTTP/1, HTTP/2, and Connect passed 108, 126, and 137 tests
+respectively.
+
+The shared encoders validate and size the fields before allocating the
+output buffer. Simplified Core shows direct byte stores for punctuation
+and weight digits and bulk copies for token segments.
+
+Sequential Criterion runs measure the typed writer. The Go 1.26.10
+fixtures check the corresponding values and emit the same bytes. The
+legacy HTML fixtures use Go's `mime.ParseMediaType` on their raw
+inputs. Timings are in nanoseconds and allocations are bytes per operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Content-Type with parameters | 58.5 / 632 | 60.3 / 344 | 43.0–46.4 / 96 |
+| Weighted Accept ranges | 190 / 1,776 | 103 / 440 | 77.2–77.9 / 96 |
+| Accept-Charset list | 136 / 1,504 | 55.5 / 328 | 45.8–48.4 / 96 |
+| Accept-Encoding preferences | 140 / 1,504 | 50.4 / 328 | 39.0–39.3 / 96 |
+| Content-Encoding chain | 69.5 / 744 | 44.5 / 296 | 24.7–26.6 / 24 |
+| Accept-Patch types | 79.3 / 792 | 72.2 / 384 | 54.6–55.0 / 96 |
+| Accept-Post ranges | 136 / 1,352 | 65.2 / 320 | 30.8–31.1 / 96 |
+| Content-Script-Type | 15.7 / 192 | 51.6 / 456 | 43.7–45.5 / 64 |
+| Content-Style-Type | 16.0 / 208 | 52.8 / 472 | 105–114 / 360 |
+| Weighted Accept-Language ranges | 111 / 1,192 | 108 / 1,192 | 61.8–62.0 / 96 (prior run) |
+
+Accept-Post remains about 2.1 times the reference timing. The two
+legacy HTML fixtures previously copied raw authored bytes without
+validating the media type.
+
+### Checked cache directives and preferences
+
+Cache-Control validates qualified `private` and `no-cache` field-name
+lists and rejects reserved names in extension directives. Its checked
+writer emits directives in order into one buffer, with canonical
+decimal arguments and HTTP quoting. Pragma checks both its explicit
+token and quoted forms. Warning checks the code, the full host or
+pseudonym, decoded quoted text, and the optional date.
+[RFC 9111 §5.2](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2),
+[RFC 7234 §§5.4–5.5](https://www.rfc-editor.org/rfc/rfc7234.html#section-5.4).
+
+Prefer and Preference-Applied check names and complete token or quoted
+value spellings. Only the request field emits parameters. Both retain
+the spelling of valid quoted values, including quoting backslashes
+and Latin-1 octets. The two OData repeatability identifiers validate
+complete HTTP tokens and copy their exact spelling.
+[RFC 7240 §§2–3](https://www.rfc-editor.org/rfc/rfc7240.html#section-2),
+[OASIS Repeatable Requests §3.1](https://docs.oasis-open.org/odata/repeatable-requests/v1.0/repeatable-requests-v1.0.html).
+
+Seven regressions cover typed rejection and preservation of the old
+lines. A model and parser differential matched 33,544 authored cases,
+including complete byte sets, reserved names in mixed case, and
+quoted-pair boundaries. All 1,292 Hermes and 487 aggregate HTTP tests
+passed on each scheduler. HTTP/1, HTTP/2, and Connect passed 108, 126,
+and 137 tests respectively.
+
+Sequential Criterion runs measured `renderHeaderLines` on GHC 9.10.3
+with ARM64 macOS. The Go 1.26.10 fixtures validate the corresponding
+inputs and produce the same bytes. Timings are in nanoseconds and
+allocations are bytes per operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Prefer with a quoted parameter | 64.4 / 368 | 136 / 408 | 64.5–67.2 / 80 |
+| Preference-Applied | 31.0 / 368 | 67.3 / 400 | 28.9–29.0 / 32 |
+| Repeatability-Client-ID | 17.3 / 328 | 29.8 / 240 | 31.0–31.3 / 48 |
+| Repeatability-Request-ID | 16.7 / 328 | 31.4 / 208 | 19.0–19.4 / 16 |
+| Cache-Control canonical directives | 117 / 1,248 | 51.4 / 352 | 22.2–22.4 / 48 |
+| Cache-Control qualified field list | 106 / 1,072 | 88.3 / 640 | 54.5–56.0 / 48 |
+| Cache-Control extension directives | 180 / 1,520 | 135 / 864 | 42.2–43.1 / 32 |
+| Pragma with token and quoted values | 42.6 / 368 | 70.9 / 400 | 32.8–33.1 / 32 |
+| Warning with IPv6 and a date | 96.7 / 584 | 197 / 1,400 | 126 / 112 |
+
+Cache-Control parse fixtures kept their allocations and measured
+57–129 ns after the shared directive dispatch changed. Simplified
+Core shows bulk copies and an unboxed offset between written
+directives. The canonical and extension Cache-Control fixtures,
+Prefer, Preference-Applied, and Pragma remain above the twofold
+reference target.
+
+### Checked transfer codings and token lists
+
+Transfer-Encoding checks coding and parameter spelling, rejects repeated
+`chunked` across all spellings, and rejects parameters on standard
+codings. The request framing check still requires a final `chunked`.
+TE rejects `chunked`, keeps `trailers` bare, and reserves `q` for its
+optional weight. It retains an explicit `q=1`. Both writers preserve
+coding and parameter order and decoded quoted octets. Their shared
+encoder validates and sizes the complete list before allocating the
+output buffer. [RFC 9112 §6.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1),
+[RFC 9110 §10.1.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.1.4).
+
+Trailer checks the complete field-name tokens. The HTTP transports
+apply their trailer policy when processing the actual trailer fields.
+Keep-Alive checks names and decoded parameter values. Expect validates
+names, retained token or quoted spelling, and the structure of extension
+parameters. The canonical `100-continue` writer returns a constant
+field value. [RFC 9110 Trailer](https://www.rfc-editor.org/rfc/rfc9110.html#section-6.6.2),
+[RFC 9110 Expect](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.1.1),
+[HTTP Keep-Alive draft](https://datatracker.ietf.org/doc/html/draft-thomson-hybi-http-timeout-03#section-2).
+
+Access-Control-Allow-Methods, Access-Control-Allow-Headers,
+Access-Control-Expose-Headers, and Public check their complete tokens
+while retaining order and spelling. The CORS writers keep explicit
+empty and wildcard fields. EDIINT-Features checks its narrower alphabet
+of ASCII letters, digits, and hyphens.
+[Fetch CORS headers](https://fetch.spec.whatwg.org/#http-new-header-syntax),
+[RFC 2068 Public](https://www.rfc-editor.org/rfc/rfc2068.html#section-14.35),
+[RFC 6017 EDIINT-Features](https://www.rfc-editor.org/rfc/rfc6017.html).
+
+Ten regressions failed before the change and now pass. The separate model
+matched 20,075 authored cases and 16,086 explicit quality renders. It
+covered all 256 octets, quoted text at a nonzero UTF-8 slice offset,
+malformed parameters, mixed-case reserved tokens, and quality rounding
+boundaries. The shared encoder also passed the 90,413 authored cases
+and 32,172 quality comparisons from the negotiation model.
+All 1,302 Hermes and 487 aggregate HTTP tests passed on each scheduler.
+HTTP/1, HTTP/2, and Connect passed 108, 126, and 137 tests respectively.
+
+Sequential Criterion runs measured the typed write entry point with
+GHC 9.10.3 on ARM64 macOS. The Go 1.26.10 fixtures apply the relevant
+checks and emit the same bytes. Timings are in nanoseconds and
+allocations are bytes per operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Transfer-Encoding, gzip and chunked | 85.2 / 920 | 50.8 / 352 | 21.9–23.7 / 16 |
+| Transfer-Encoding extension parameters | 122 / 1,032 | 147 / 752 | 50.1–50.9 / 48 |
+| TE, trailers and weighted gzip | 108 / 1,096 | 60.0 / 448 | 42.1–43.2 / 24 |
+| TE, weighted extension parameters | 141 / 1,232 | 139 / 744 | 65.0 / 64 |
+| Expect, canonical continue | 12.3 / 96 | 10.8 / 72 | 1.7 / 0 |
+| Expect, extension with quoted parameters | 54.2 / 344 | 103 / 384 | 51.0–52.0 / 64 |
+| Keep-Alive, numeric and quoted values | 57.8 / 296 | 92.3 / 312 | 43.5–43.7 / 48 |
+| Trailer names | 30.5 / 280 | 60.2 / 336 | 35.5–35.9 / 48 |
+| Public method list | 42.6 / 256 | 89.3 / 296 | 32.3–34.0 / 32 |
+| EDIINT feature list | 22.0 / 256 | 39.8 / 296 | 21.2–21.3 / 32 |
+| CORS allow-methods list | 121 / 1,344 | 55.8 / 296 | 23.5–24.6 / 24 |
+| CORS allow-headers list | 79.8 / 984 | 47.9 / 296 | 29.2–29.6 / 32 |
+| CORS expose-headers list | 79.2 / 984 | 48.7 / 296 | 25.5–25.6 / 24 |
+
+Simplified Core shows direct stores and bulk copies, with unboxed
+offsets between coding parameters and entries. The parameterized
+Transfer-Encoding parse went from 190 to 143 ns and from 1,432 to
+984 allocated bytes. The four existing negotiation write fixtures
+kept their allocation counts. Transfer-Encoding and its extension
+fixture, the TE extension fixture, cached Expect, Keep-Alive, Public,
+and CORS allow-methods remain above the twofold reference target.
+
+### Checked authentication fields
+
+Authorization and Proxy-Authorization validate the scheme and distinguish
+bare credentials, token68, and parameter lists. Token68 requires a
+nonempty body before padding. Both credential writers and all three
+challenge writers validate parameter names and values and reject
+case-insensitive duplicate names. They retain the challenge order and
+quoted octets. Authentication-Info and Proxy-Authentication-Info use the
+same parameter encoder and preserve the ordered generic list. Empty
+Optional-WWW-Authenticate still omits the field.
+[RFC 9110 §§11.3, 11.6–11.7](https://www.rfc-editor.org/rfc/rfc9110.html#section-11.3),
+[RFC 8053 Optional-WWW-Authenticate](https://www.rfc-editor.org/rfc/rfc8053.html#section-3).
+
+Authentication-Control requires at least one parameter per entry and
+checks the more restrictive control parameter names. Plain and extended
+forms share the same case-insensitive name for duplicate checks within
+and across entries for the same scheme and realm. Extended
+values require valid non-ASCII UTF-8 with an empty language tag when
+authored. The writer preserves their encoded spelling.
+[RFC 8053 §§2.2, 4](https://www.rfc-editor.org/rfc/rfc8053.html#section-4).
+
+Eight regressions exercise rejection before existing fields are replaced.
+The independent model matched 41,443 authored cases, including the
+complete octet range in schemes, names, token68 bodies and padding,
+quoted text, sliced opaque byte sequences, duplicate spellings, and a
+32 KiB token68 body.
+All 1,310 Hermes and 487 aggregate HTTP tests passed on each scheduler.
+HTTP/1, HTTP/2, and Connect passed 108, 126, and 137 tests respectively.
+
+Sequential Criterion runs on GHC 9.10.3 and ARM64 macOS measured the
+public checked writer. The Go 1.26.10 fixtures validate the
+corresponding inputs and emit the same bytes. Timings are in
+nanoseconds and allocations are bytes per operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Authorization token68 | 22.5 / 376 | 39.7 / 320 | 31.5–33.4 / 24 |
+| Proxy-Authorization token68 | 21.2 / 376 | 41.9 / 320 | 31.5–33.4 / 24 |
+| Authorization parameters | 90.4 / 888 | 91.5 / 408 | 34.3 / 32 |
+| WWW-Authenticate challenges | 168 / 1,776 | 118 / 576 | 45.4–47.0 / 48 |
+| Proxy-Authenticate challenges | 172 / 1,776 | 117 / 576 | 45.4–47.0 / 48 |
+| Optional-WWW-Authenticate challenges | 168 / 1,776 | 115 / 576 | 45.4–47.0 / 48 |
+| Authentication-Info | 127 / 1,280 | 56.0 / 408 | 26.2 / 32 |
+| Proxy-Authentication-Info | 122 / 1,280 | 54.1 / 408 | 26.2 / 32 |
+| Authentication-Control | 216 / 2,144 | 169 / 736 | 71.5–73.9 / 64 |
+| Authentication-Control extended | 132 / 1,384 | 282 / 1,720 | 98.2–99.3 / 72 |
+
+Simplified Core shows bulk copies and unboxed offsets in the
+challenge writer. The two-parameter parse path compares compact names
+directly. The challenge parse fixture went from 187 to 139 ns and
+from 1,216 to 960 bytes. The parameter and challenge writers and both
+Authentication-Control fixtures remain above the twofold timing target.
+The extended control fixture includes percent-decoding and UTF-8
+validation on writes.
+
+### Checked opaque values and identifiers
+
+GetProfile, SetProfile, ProfileObject, X-Correlation-ID, X-Request-ID,
+X-Trace-ID, and X-Powered-By share the existing field-framing scanner.
+The checked writer returns the same bytes, including permitted opaque
+octets and retained whitespace. Last-Event-ID applies that framing
+check to its UTF-8 cursor, and the SSE client uses the checked writer
+when it replays a cursor on reconnection.
+[RFC 9110 field values](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.5),
+[OPS over HTTP](https://www.w3.org/TR/NOTE-OPS-OverHTTP),
+[HTML Last-Event-ID](https://html.spec.whatwg.org/multipage/server-sent-events.html#the-last-event-id-header).
+
+X-Request-Start validates the complete decimal spelling from its
+legacy constructor and reuses the exact bytes for parsed and numeric
+values. Topic enforces the nonempty Base64url alphabet and 32-character
+limit. Cal-Managed-ID checks iCalendar paramtext and rejects surrounding
+whitespace so that the identifier survives field parsing intact.
+Default-Style checks decoded title octets before quoting. Slug checks
+both the percent-escape syntax and the resulting UTF-8 while preserving
+the literal wire spelling. [RFC 8030 Topic](https://www.rfc-editor.org/rfc/rfc8030.html#section-5.4),
+[RFC 8607 Cal-Managed-ID](https://www.rfc-editor.org/rfc/rfc8607.html#section-5.1),
+[HTML 4.01 Default-Style](https://www.w3.org/TR/html401/present/styles.html#h-14.3.2),
+[RFC 5023 Slug](https://www.rfc-editor.org/rfc/rfc5023.html#section-9.7).
+
+All 13 regressions failed on the previous checked entry point. A separate
+model matched 14,128 cases, including all eight positions in an unaligned
+word scan, opaque and Unicode values, percent escapes, and decimal
+exponent limits. The SSE test covers a caller cursor containing a
+forbidden control byte. All 1,323 Hermes and 487 aggregate HTTP tests
+passed on each scheduler. HTTP/1, HTTP/2, and Connect passed 108, 126,
+and 137 tests respectively.
+
+Sequential Criterion runs on GHC 9.10.3 and ARM64 macOS measured the
+checked entry point. The Go 1.26.10 fixtures validate the corresponding
+values and emit the same bytes. Timings are in nanoseconds and
+allocations are bytes per operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Request, correlation, and trace ID | 6.1 / 72 | 16.1–16.9 / 104 | 20.5–20.7 / 48 |
+| X-Powered-By | 6.1 / 72 | 13.5 / 104 | 13.5 / 16 |
+| GetProfile | 6.6 / 72 | 16.3 / 104 | 14.8–14.9 / 16 |
+| SetProfile | 5.9 / 72 | 17.8 / 104 | 17.1–17.2 / 24 |
+| ProfileObject | 6.3 / 72 | 12.5 / 104 | 16.4–18.4 / 24 |
+| X-Request-Start, legacy | 16.1 / 176 | 32.9 / 280 | 20.6 / 18 |
+| X-Request-Start, parsed | 8.8 / 96 | 7.1 / 72 | — |
+| Last-Event-ID | 15.2 / 208 | 19.5 / 216 | 14.8–14.9 / 24 |
+| Topic | 14.7 / 208 | 29.3 / 224 | 18.8–18.9 / 32 |
+| Cal-Managed-ID | 16.5 / 328 | 22.6 / 184 | 20.1–20.2 / 16 |
+| Default-Style | 27.3 / 232 | 29.9 / 256 | 17.2–20.5 / 16 |
+| Slug, literal | 16.3 / 208 | 29.8 / 200 | 18.8–19.5 / 24 |
+| Slug, percent-escaped | 16.2 / 208 | 69.5 / 440 | 75.3–76.7 / 48 |
+
+Simplified Core shows bounded eight-byte loads in the shared framing
+scanner. It returns the original payload without copying the bytes.
+The literal and escaped Slug readers kept their allocation counts.
+All comparable write fixtures took less than twice the Go timing in
+these runs.
+
+### Checked browser policy and origin fields
+
+The Origin and Access-Control-Allow-Origin writers validate the scheme
+and host before writing, including the host punctuation accepted by the
+CORS reader and bracketed IP literals. An Origin list preserves member
+order. Timing-Allow-Origin checks complete list members and preserves
+port spelling, including leading zeroes. The dedicated wildcard
+constructor emits `*`. [RFC 6454](https://www.rfc-editor.org/rfc/rfc6454#section-7),
+[Fetch CORS header](https://fetch.spec.whatwg.org/#http-access-control-allow-origin),
+[Resource Timing](https://www.w3.org/TR/resource-timing/#sec-timing-allow-origin).
+
+The four cross-origin embedder and opener policy writers validate the
+optional `report-to` value as a Structured Fields String before escaping
+quotes and backslashes. The CSP writers check directive names and each
+value token before emitting any policy, preserving case, duplicates and
+policy boundaries. [WHATWG HTML](https://html.spec.whatwg.org/multipage/browsers.html#cross-origin-opener-policies),
+[RFC 9651](https://www.rfc-editor.org/rfc/rfc9651.html#name-strings),
+[CSP Level 3](https://www.w3.org/TR/CSP3/#csp-header).
+
+Clear-Site-Data validates extension bodies and preserves existing quoted
+pairs and opaque octets. Extension constructors reject reserved directive
+spellings. X-Content-Type-Options validates extension tokens and reserves
+every ASCII case spelling of `nosniff` for the dedicated constructor.
+[Clear Site Data](https://w3c.github.io/webappsec-clear-site-data/#header),
+[Fetch MIME sniffing](https://fetch.spec.whatwg.org/#x-content-type-options-header).
+
+All 11 regressions failed on the previous writers. A separate
+299,072-case model checked exact output and typed lookup for accepted
+values, plus preservation of the previous field on rejection. The
+model exercised character boundaries, every octet at each position of
+the packed CSP scans, quoted pairs, scheme and host syntax, every
+16-bit port, and long zero-padded ports. All 1,334 Hermes, 108 HTTP/1,
+126 HTTP/2, 487 aggregate HTTP, and 137 Connect tests passed. Hermes and
+aggregate HTTP passed in both synchronous and parallel runs.
+
+Sequential Criterion runs on ARM64 macOS measured the public typed
+field-line API. The Go 1.26.10 fixtures validated the same inputs and
+returned a field-line result. Hermes uses the same Origin codec for
+CORS and Origin and shares the reporting writer across policy
+dispositions. Values below are ns per write and bytes allocated.
+
+| Fixture | Previous | Checked | Go field lines |
+| --- | ---: | ---: | ---: |
+| CORS origin | 24.2 / 344 | 29.7 / 344 | 33.5–34.2 / 72 |
+| CORS IPv6 origin | 27.1 / 344 | 65.1 / 648 | 50.1–50.5 / 80 |
+| Origin list | 35.2 / 344 | 49.8 / 384 | 47.5–49.6 / 96 |
+| Timing-Allow-Origin | 89.7 / 1,056 | 53.0 / 304 | 61.3–66.4 / 96 |
+| COEP bare directive | 6.9 / 96 | 7.7 / 96 | 13.2–13.5 / 48 |
+| COEP with endpoint | 30.4 / 376 | 29.9 / 336 | 30.3–30.6 / 96 |
+| COOP with endpoint | 28.7 / 376 | 30.3 / 336 | 28.5–28.8 / 96 |
+| CSP | 91.1 / 472 | 108.5 / 424 | 81.9–82.2 / 160 |
+| CSP report-only policy list | 155.3 / 1,040 | 168.1 / 504 | 114.9–116.5 / 208 |
+| Clear-Site-Data | 133.1 / 1,360 | 31.0 / 296 | 30.7–32.6 / 80 |
+| Clear-Site-Data with extensions | 153.0 / 1,496 | 54.3 / 312 | 41.3–42.6 / 96 |
+| X-Content-Type-Options extension | 14.0 / 192 | 21.2 / 184 | 30.3–30.4 / 64 |
+
+The initial checked CSP writer took 162 ns and 231 ns on the two
+fixtures. Packed ASCII checks cut the scan time, and Core shows unboxed
+validation cursors and direct copies from compact byte arrays into the
+output buffer. Bracketed origins copy the compact host into a
+`ByteString` for the shared IP-literal parser, which also supports
+IPvFuture spelling. Clear-Site-Data uses length-based dispatch for
+registered words and copies validated wire extensions directly.
+
+### Checked cookies and parameter lists
+
+Cookie and Set-Cookie check the token name and complete RFC 6265 value,
+including both bare octets and literal double quotes. A request keeps
+duplicate cookie names in wire order. A response keeps each cookie on
+its own field line and validates the whole batch before replacing
+existing values. Set-Cookie checks domain labels, path octets, and the
+cookie expiration date. It retains legacy leading domain dots,
+signed Max-Age, and extension ordering. [RFC 6265 §§4.1–4.2](https://www.rfc-editor.org/rfc/rfc6265.html#section-4).
+
+Content-Disposition checks its disposition token, parameter names and
+values, and case-insensitive name uniqueness. Extended values keep
+their language, charset, and percent-escape spelling after syntax
+validation. Server-Timing and CDN-Loop use the same checked
+parameter-list writer. They retain ordering and Latin-1 quoted octets.
+CDN-Loop validates both pseudonyms and URI authorities, preserving
+the URI port's decimal spelling. [RFC 6266 §4.1](https://www.rfc-editor.org/rfc/rfc6266.html#section-4.1),
+[RFC 8187 §3.2](https://www.rfc-editor.org/rfc/rfc8187.html#section-3.2),
+[Server Timing §2](https://www.w3.org/TR/server-timing/#the-server-timing-header-field),
+[RFC 8586 §2](https://www.rfc-editor.org/rfc/rfc8586.html#section-2).
+
+All five regressions failed on the previous writers. An independent
+131,993-case model checked output bytes, typed lookup and preservation of
+prior fields on rejection. It covered all cookie octets in bare and quoted
+values at varying offsets, the extended parameter alphabets, numeric
+limits and dates across the supported year boundaries. All 1,339 Hermes,
+108 HTTP/1, 126 HTTP/2, 487 aggregate HTTP and 137 Connect tests passed.
+Hermes and aggregate HTTP passed in both synchronous and parallel runs.
+
+Sequential Criterion runs on ARM64 macOS measured the public field-line
+API. The Go 1.26.10 fixtures validate the corresponding input syntax and
+return field lines. Values below are ns per write and allocated bytes.
+
+| Fixture | Previous | Checked | Go field lines |
+| --- | ---: | ---: | ---: |
+| Cookie, three pairs | 54.0 / 344 | 86.0 / 336 | 52.6–61.3 / 112 |
+| Set-Cookie with domain and flags | 46.0 / 408 | 88.8 / 432 | 46.5–46.8 / 112 |
+| Set-Cookie pair | 29.3 / 408 | 37.4 / 336 | 30.3–30.4 / 64 |
+| Set-Cookie with extensions | 50.6 / 408 | 74.7 / 440 | 40.2–40.5 / 112 |
+| Set-Cookie with expiration | 63.2 / 488 | 84.1 / 600 | 110.1–110.7 / 144 |
+| Content-Disposition with extended filename | 110.2 / 960 | 169.2 / 872 | 95.7–104.4 / 144 |
+| Content-Disposition with plain filename | 110.4 / 1,224 | 56.3 / 368 | 42.1–42.4 / 96 |
+| Server-Timing | 63.7 / 328 | 99.0 / 368 | 61.5–63.1 / 112 |
+| CDN-Loop | 39.0 / 312 | 69.4 / 352 | 48.0–48.7 / 96 |
+
+Core shows packed cookie-octet loads, unboxed domain label cursors and
+direct copies into the pinned field buffer. The pair-only path avoids
+sizing optional attributes. Writing Expires into the field buffer
+reduced the initial checked date fixture from 95.6 ns and 656 B to
+84.1 ns and 600 B. The extended filename fixture runs the full
+language-tag and percent-escape grammar and copies the original compact
+value for the pointer parser. The Go fixture checks the benchmark's
+language-and-region spelling directly.
+
+### Checked connection, trace and reporting fields
+
+HTTP2-Settings rejects empty or partial six-octet entries before Base64url
+encoding. Unknown setting identifiers and repeated updates retain their
+order. ALPN checks the decoded 1–255 octet bound for every identifier and
+uses uppercase percent escapes. X-Http-Method-Override validates the
+complete extension token and retains its case. [RFC 7540 §3.2.1](https://www.rfc-editor.org/rfc/rfc7540.html#section-3.2.1),
+[RFC 7639 §2.2](https://www.rfc-editor.org/rfc/rfc7639.html#section-2.2),
+[RFC 9110 §9.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.1).
+
+The traceparent writer checks exact-width lowercase hexadecimal
+identifiers, rejects all-zero IDs and the reserved version, and validates
+opaque suffix octets before writing a supported future-version form.
+Tracestate checks both key forms, printable value bytes, unique keys and
+the 32-member bound. Leading value spaces survive, and trailing spaces
+are rejected on authoring because the reader trims them.
+[W3C Trace Context §3.2–3.3](https://www.w3.org/TR/trace-context/#traceparent-header).
+
+NEL checks the stored policy result before emitting a raw authored
+value. Valid JSON field lists retain their spelling and the first valid
+policy. A policy created by the typed authoring API was already
+validated. [Network Error Logging §4.1](https://www.w3.org/TR/network-error-logging/#nel-response-header).
+
+All six regressions failed on the prior writers. An independent
+170,912-case model checked exact bytes, typed round trips and unchanged
+fields on rejection. All 1,345 Hermes, 108 HTTP/1, 126 HTTP/2, 487 aggregate
+HTTP and 137 Connect tests passed. Hermes and aggregate HTTP passed in
+both synchronous and parallel runs.
+
+Sequential Criterion runs on ARM64 macOS measured the public field-line
+API. The Go 1.26.10 counterparts check the same wire shapes. The NEL
+fixtures reuse previously validated policies. Values below are ns per
+write and allocated bytes.
+
+| Fixture | Previous | Checked | Go field lines |
+| --- | ---: | ---: | ---: |
+| ALPN single token | 23.5 / 376 | 11.6 / 88 | 19.4–19.8 / 48 |
+| ALPN list with escape | 55.9 / 472 | 48.3 / 328 | 44.3–45.7 / 80 |
+| HTTP2-Settings | 27.5 / 456 | 30.5 / 472 | 25.6–26.2 / 64 |
+| Standard method override | 7.0 / 96 | 8.0 / 96 | 12.2–12.3 / 48 |
+| Extension method override | 7.6 / 96 | 11.9 / 72 | 26.4–26.7 / 48 |
+| traceparent | 20.6 / 288 | 28.1 / 304 | 40.5–40.6 / 112 |
+| traceparent with extension | 22.5 / 304 | 39.2 / 336 | 47.3–47.6 / 128 |
+| tracestate, two members | 27.2 / 296 | 41.5 / 368 | 47.1–47.2 / 96 |
+| tracestate, 32 members | 259.8 / 920 | 523.9 / 3,224 | 762.7–770.8 / 2,072 |
+| Parsed NEL | 15.1 / 256 | 16.1 / 256 | 12.4–13.6 / 48 |
+| Authored NEL removal | 7.8 / 96 | 7.0 / 72 | 12.2–13.4 / 48 |
+
+The first checked 32-member tracestate writer used the general text set
+and took 1,666 ns and 11,584 B. Packing short keys losslessly into machine
+integers reduced that cost to 524 ns and 3,224 B. Longer keys use the full
+text set. Core shows unboxed key packing and packed value scans, followed
+by direct compact-array copies into the output buffer.
+
+### Checked legacy negotiation, digest and product fields
+
+A-IM and IM check manipulation tokens and their optional parameters.
+The parameter name `q` is reserved for weights, and `identity` is
+reserved for A-IM. A-IM retains the shared normalization for numeric
+weights. Accept-Additions checks the first quality parameter and
+keeps subsequent extension parameters in order. Variant-Vary validates
+field names and reserves the wildcard for the standalone form. The
+conditional Safe value requires a complete token. [RFC 3229 §§10.5.2–10.5.3](https://www.rfc-editor.org/rfc/rfc3229.html#section-10.5.2),
+[RFC 2324 §2.2](https://www.rfc-editor.org/rfc/rfc2324.html#section-2.2),
+[RFC 2295 §8.6](https://www.rfc-editor.org/rfc/rfc2295.html#section-8.6),
+[RFC 2310 §4](https://www.rfc-editor.org/rfc/rfc2310.html#section-4).
+
+The Digest reader and writer share algorithm classification. The
+checked writer validates registered Base64 widths and padding, decimal
+checksum bounds, and hexadecimal widths. Quoted extension values retain
+their escaping and opaque bytes. Want-Digest validates qvalue syntax and
+copies its original spelling, including trailing zeroes and a bare
+decimal point. [RFC 3230 §4.3](https://www.rfc-editor.org/rfc/rfc3230.html#section-4.3).
+
+Server and User-Agent check each product name, optional version and
+comment. The shared writer quotes literal parentheses and backslashes
+and preserves Latin-1 comment octets. Invalid writes leave the previous
+field in place. [RFC 9110 §5.6.5](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.5),
+[RFC 9110 §10.1.5](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.1.5),
+[RFC 9110 §10.2.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.4).
+
+All nine regressions failed on the previous writers. An independent
+60,825-case model covered exact output, typed round trips and preservation
+of prior fields on rejection. It exercised every octet in each registered
+Base64 output position, checksum bounds, qvalue spellings and opaque
+comments and parameters. All 1,354 Hermes, 108 HTTP/1, 126 HTTP/2,
+487 aggregate HTTP and 137 Connect tests passed. Hermes and the aggregate
+HTTP suite passed in both synchronous and parallel runs.
+
+Sequential Criterion runs on ARM64 macOS measured the public field-line
+API. The Go 1.26.10 fixtures validate the same inputs and return field
+lines. Values below are ns per write and allocated bytes.
+
+| Fixture | Previous | Checked | Go field lines |
+| --- | ---: | ---: | ---: |
+| A-IM with parameter and weights | 84.7 / 656 | 97.2 / 448 | 77.8–79.9 / 112 |
+| IM with opaque and token parameters | 59.8 / 472 | 109.9 / 328 | 87.2–88.2 / 96 |
+| Registered Digest algorithms | 49.0 / 368 | 152.3 / 456 | 145.4–154.2 / 152 |
+| Digest with quoted extension | 49.5 / 552 | 93.8 / 640 | 69.8–71.6 / 72 |
+| Want-Digest | 60.4 / 320 | 110.9 / 392 | 104.3–104.8 / 112 |
+| Server | 57.6 / 456 | 78.5 / 320 | 61.2–62.4 / 96 |
+| User-Agent with Latin-1 comment | 83.6 / 656 | 77.1 / 320 | 63.2–64.0 / 96 |
+| Server, bare product | 21.3 / 344 | 30.0 / 208 | 31.8–32.3 / 56 |
+| Accept-Additions | 119.0 / 960 | 111.8 / 424 | 86.1–87.9 / 96 |
+| Variant-Vary | 27.7 / 344 | 52.7 / 296 | 59.0–59.4 / 80 |
+| Safe condition | 23.2 / 344 | 23.9 / 232 | 36.1–37.9 / 64 |
+
+Core shows bounded eight-octet Base64 checks, unboxed decimal scan
+cursors, and direct output buffer copies for product tokens. The quoted
+Digest fixture converts compact text back to its Latin-1 wire octets.
+The Go fixture starts with those octets. Sharing algorithm dispatch kept
+SHA-256 parsing at about 57 ns. Parsing three digests across lines took
+163 ns and 1,136 B, compared with the previous 162 ns and 1,224 B.
+
+### Final write-side checks
+
+Alt-Svc checks canonical protocol percent escapes, authority hosts and
+parameter grammar. From checks mailbox atoms and domain literals and
+preserves the original Latin-1 octets of quoted components. Refresh
+checks that the target fits its isomorphic field-octet encoding.
+[RFC 7838 §3](https://www.rfc-editor.org/rfc/rfc7838.html#section-3),
+[RFC 5322 §3.4](https://www.rfc-editor.org/rfc/rfc5322.html#section-3.4),
+[HTML refresh steps](https://html.spec.whatwg.org/multipage/semantics.html#shared-declarative-refresh-steps).
+
+Expect-CT validates absolute report URIs. Both Public-Key-Pins fields
+also check complete Base64 fingerprints, canonical pad bits, and the
+SHA-256 width. Their report URIs can include a fragment. X-XSS-Protection
+validates a nonempty URI-reference with semicolons percent-encoded.
+[RFC 9163 §2.1](https://www.rfc-editor.org/rfc/rfc9163.html#section-2.1),
+[RFC 7469 §2.1](https://www.rfc-editor.org/rfc/rfc7469.html#section-2.1),
+[Chromium's XSS Auditor documentation](https://chromium.googlesource.com/website/%2B/HEAD/site/developers/design-documents/xss-auditor/index.md).
+
+Meter checks the argument form and applicable message direction. Negotiate
+and TCN validate every entry in the typed directive list. The surrogate
+fields validate capability products, duplicate device identifiers, freshness
+arguments, and device targets. X-Robots-Tag checks every crawler scope and
+recognizes the grammar for each valued directive.
+[RFC 2227 §5.1](https://www.rfc-editor.org/rfc/rfc2227.html#section-5.1),
+[RFC 2295 §§8.4–8.5](https://www.rfc-editor.org/rfc/rfc2295.html#section-8.4),
+[W3C Edge Architecture §2](https://www.w3.org/TR/edge-arch/),
+[Google Search crawler directives](https://developers.google.com/search/docs/crawling-indexing/robots-meta-tag).
+
+All 13 regressions failed against the previous writers. The checked
+writers preserve the previous field lines when any authored entry fails
+validation. A 28,217-case model checked individual wire octets,
+fingerprint padding and widths, boundary values, and exact wire spelling
+for accepted values. All 1,367 Hermes, 108 HTTP/1, 126 HTTP/2, 487
+aggregate HTTP and 137 Connect tests passed on GHC 9.10.3. Hermes and the
+aggregate HTTP suite passed in both synchronous and parallel runs.
+
+Sequential Criterion runs on ARM64 macOS measured the public field-line
+API. The independent Go 1.26.10 fixtures validate and serialize the same
+field values, using the Go standard library for URI parsing and strict
+Base64 decoding. Each cell gives ns per write and allocated bytes.
+
+| Fixture | Previous | Checked | Go field lines |
+| --- | ---: | ---: | ---: |
+| Alt-Svc | 62.4 / 368 | 126.8 / 672 | 92.2–93.8 / 112 |
+| Expect-CT | 33.8 / 344 | 100.5 / 648 | 153.4–153.8 / 272 |
+| From, bare | 49.9 / 360 | 50.5 / 320 | 55.3–57.1 / 72 |
+| From, named | 79.8 / 360 | 94.8 / 368 | 88.7–95.5 / 128 |
+| Meter | 43.5 / 376 | 50.4 / 296 | 60.2–61.3 / 72 |
+| Negotiate | 44.0 / 344 | 86.5 / 280 | 96.3–96.8 / 96 |
+| Public-Key-Pins | 223.6 / 2,096 | 116.3 / 528 | 135.4–136.4 / 240 |
+| Public-Key-Pins-Report-Only | 228.0 / 2,160 | 181.7 / 879 | 259.9–260.0 / 400 |
+| Refresh | 31.0 / 224 | 33.4 / 248 | 33.9–34.1 / 112 |
+| Surrogate-Capability | 37.9 / 208 | 115.6 / 448 | 102.7–110.5 / 96 |
+| Surrogate-Control | 92.1 / 408 | 168.6 / 592 | 179.5 / 128 |
+| TCN | 67.9 / 344 | 91.9 / 296 | 96.9–97.9 / 96 |
+| X-Robots-Tag | 40.7 / 384 | 72.3 / 664 | 107.4–112.4 / 96 |
+| X-XSS-Protection | 31.1 / 344 | 84.7 / 600 | 147.2–158.1 / 256 |
+
+Core shows word-at-a-time fingerprint validation and unboxed scan offsets
+for mailbox atoms and decimal arguments. The renderers copy compact bytes
+into their output buffers. The Alt-Svc writer allocates a pinned
+`ByteString` buffer, writes the numeric ports into it through the
+bytestring decimal primitive, and returns it through the typed optional
+list result. The corresponding Go fixture uses a byte slice inside its
+field-line result. Hermes allocated more per call on every fixture.
+Reader checks measured Surrogate-Control at 152.5 ns and 928 B, down from
+174.5 ns and 1,088 B. The scoped X-Robots-Tag reader moved from 79.7 ns
+and 800 B to 83.0 ns and 680 B. From mailbox reads measured 72.4 ns for
+the bare form and 207.6 ns for the named form, with allocations of
+416 B and 1,776 B respectively.
+
+### Checked method, field-name, and language lists
+
 The typed field-list Criterion fixtures went from 73 to 58 ns for Allow
 and from 124 to 96 ns for Connection. Canonical single-line Vary went from
 286 to 53 ns, and repeated Vary went from 504 to 202 ns. Allocation per
@@ -110,6 +810,49 @@ operation fell from 840 to 544 bytes for Allow, 856 to 656 for Connection,
 1,489 to 520 for single-line Vary, and 3,457 to 2,025 for repeated Vary.
 The measurements cover these fixtures, including canonical lowercase
 common field names in Vary.
+
+Allow and Access-Control-Request-Method check authored method tokens.
+Access-Control-Request-Headers, Connection, Vary, and Upgrade check
+each list member before writing a field line. Upgrade checks the
+optional version independently from the protocol name. Writers preserve
+member order, extension spelling, and existing empty-field forms.
+[RFC 9110 field lists](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.1),
+[Fetch CORS headers](https://fetch.spec.whatwg.org/#http-new-header-syntax).
+
+Accept-Language checks RFC 4647 basic ranges and preserves the shared
+quality-weight formatting. Content-Language checks RFC 5646 tags,
+including private-use and grandfathered forms. [RFC 9110 §8.5.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.5.1),
+[RFC 4647 §2.1](https://www.rfc-editor.org/rfc/rfc4647.html#section-2.1),
+[RFC 5646 §2.1](https://www.rfc-editor.org/rfc/rfc5646.html#section-2.1).
+
+Eight regressions cover rejection before replacing existing field lines.
+The independent model matched 104,464 authored values, including delimiter
+substitutions, non-ASCII octets, and invalid language subtags.
+
+The checked Accept-Language writer validates and sizes the ranges before
+allocating a single output buffer. Its weight suffixes matched the
+builder for 8,043 inputs spanning exact weights, rounding boundaries,
+out-of-range values, infinities, and NaN. Simplified Core shows a bounded
+copy for each tag and direct byte writes for weight digits.
+
+Sequential Criterion runs measure the public typed write entry point.
+The Go 1.26.10 fixtures check the same inputs and emit the same bytes.
+Timings are in nanoseconds and allocations are bytes per operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Allow methods | 128 / 1,320 | 39.7 / 256 | 22.8–24.6 / 24 |
+| Connection options | 24.9 / 256 | 41.8 / 264 | 21.3–23.3 / 24 |
+| Vary field names | 136 / 1,352 | 67.4 / 304 | 35.5–36.1 / 48 |
+| Upgrade protocols | 43.5 / 272 | 81.0 / 312 | 39.5 / 32 |
+| Access-Control-Request-Headers names | 86.8 / 1,032 | 50.8 / 264 | 27.3–27.5 / 32 |
+| Access-Control-Request-Method token | 16.1 / 192 | 19.8 / 192 | 10.7–11.0 / 8 |
+| Content-Language tags | 134 / 1,352 | 73.9 / 576 | 43.7–46.5 / 32 |
+| Weighted Accept-Language ranges | 162 / 1,688 | 111 / 1,192 | 61.8–62.0 / 96 |
+
+The first checked Accept-Language writer used the builder and took
+232 ns and 2,568 bytes. Upgrade remains slightly above the twofold
+reference target in the final run.
 
 Comment validation agreed with an independent recursive implementation on
 2,396,745 inputs. The suite exercises all 256 octets both literally and
@@ -587,6 +1330,8 @@ entries in caller storage. Allocations are rounded bytes per operation.
 
 At that checkpoint tracestate parsing and traceparent rendering took
 more than twice the matching Go fixture time.
+[Rendering typed tracestate fields](#rendering-typed-tracestate-fields)
+updates those comparisons and measures tracestate rendering.
 
 ### HSTS, HPKP and Expect-CT
 
@@ -670,6 +1415,61 @@ boxing overhead on the smallest fixtures. Forwarded retains intermediate
 parsed pairs before checking names and assembling its result. At this
 checkpoint X-Forwarded-For, X-Forwarded-Port, X-Forwarded-Proto, X-Real-IP
 and Max-Forwards exceeded twice the corresponding Go fixture time.
+
+### Checked entity-tag and forwarding writers
+
+ETag, Delta-Base, If-Match, and If-None-Match validate the complete
+opaque payload of every authored tag. Encoders preserve the strength
+marker and bytes, including literal backslashes and bytes above ASCII.
+The list writers preserve wildcard, empty-field, and ordered-list forms.
+Schedule-Tag and If-Schedule-Tag-Match validate their stored quoted-string
+bodies, including existing quoted pairs, and retain their exact spelling.
+[RFC 9110 entity tags](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.8.3),
+[RFC 3229 Delta-Base](https://www.rfc-editor.org/rfc/rfc3229.html),
+[RFC 6638 scheduling tags](https://www.rfc-editor.org/rfc/rfc6638.html#section-8.2).
+
+Host and Alt-Used check the host component before writing its separate
+port. X-Forwarded-Host checks whole authorities across the supplied chain.
+X-Forwarded-For checks the nonempty visible-ASCII node grammar for every
+member, and X-Forwarded-Proto checks the URI scheme grammar. X-Real-IP
+accepts the IPv4 and IPv6 constructors. Via checks protocol tokens,
+the hop identifier, and any comment. Forwarded checks token and
+quoted-string syntax, the value rules for registered parameters, and
+case-insensitive name uniqueness inside each hop.
+[HTTP Host](https://www.rfc-editor.org/rfc/rfc9110.html#section-7.2),
+[Alt-Used](https://www.rfc-editor.org/rfc/rfc7838.html#section-5),
+[HTTP Via](https://www.rfc-editor.org/rfc/rfc9110.html#section-7.6.3),
+[RFC 7239 Forwarded](https://www.rfc-editor.org/rfc/rfc7239.html#section-4).
+
+The 14 regressions check rejection before replacing existing field lines.
+The independent models matched 1,036,810 tag cases and 29,481 forwarding
+cases. All 1,276 Hermes and 487 aggregate HTTP tests passed in synchronous
+and parallel runs. HTTP/1, HTTP/2, and Connect passed as well.
+
+Forwarded writes into one bounded buffer after validation. Simplified
+Core shows unboxed output offsets and bounded copies in the hop and pair
+loops. Common hosts and URI schemes are checked in compact byte storage.
+
+Sequential Criterion runs measured the public typed write entry point.
+The Go 1.26.10 fixtures check their field grammars and emit the same
+bytes. Timings are in nanoseconds and allocations are bytes per operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Strong ETag | 16.7 / 344 | 22.2 / 248 | 21.9–23.8 / 48 |
+| If-None-Match list | 141 / 1,392 | 44.5 / 320 | 21.8–22.0 / 32 |
+| Schedule-Tag | 16.6 / 360 | 23.2 / 232 | 17.1–17.2 / 16 |
+| Host with port | 21.9 / 344 | 28.5 / 280 | 27.2–28.1 / 24 |
+| Via with comment | 49.0 / 584 | 134 / 959 | 65.8–66.7 / 48 |
+| Forwarded two-hop chain | 63.9 / 368 | 241 / 1,256 | 108–114 / 96 |
+| X-Forwarded-For three nodes | 28.1 / 272 | 43.3 / 280 | 28.1–29.4 / 48 |
+| X-Forwarded-Host with port | 17.4 / 328 | 61.7 / 440 | 34.1–34.2 / 16 |
+| X-Forwarded-Proto extension | 13.6 / 192 | 17.5 / 192 | 12.4–12.5 / 16 |
+| X-Real-IP IPv4 | 21.6 / 344 | 21.8 / 344 | 11.2–11.5 / 16 |
+
+The first checked Forwarded writer took 270 ns and allocated 1,631 bytes.
+Forwarded remains above the twofold reference target. If-None-Match and
+Via were slightly above it in the final run.
 
 ### WebDAV core and search
 
@@ -965,6 +1765,88 @@ The previous codec copied the input without validating it. Simplified Core
 for the current bare batch ID path shows a byte scan and one copy into
 compact storage.
 
+### Checked URI metadata authoring
+
+The checked OData-EntityId writer validates UTF-8 as an IRI reference
+before percent-encoding non-ASCII octets for emission. It preserves
+existing escapes and uses the shared outbound URI check for HTTP(S)
+authority and userinfo. OSLC Configuration-Context uses the absolute
+URI grammar with optional fragments. SOAPAction retains the distinction
+between an empty field and a quoted empty reference.
+[OData entity IDs](https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part1-protocol.html#sec_EntityIdsandEntityReferences),
+[RFC 3987 §2.2](https://www.rfc-editor.org/rfc/rfc3987.html#section-2.2),
+[OSLC Configuration Management](https://docs.oasis-open-projects.org/oslc-op/config/v1.0/os/config-resources.html),
+[SOAP 1.1 §6.1.1](https://www.w3.org/TR/soap11/).
+
+Content-ID checks its MIME, batch, and DRP forms, and Differential-ID
+checks every URI in the DRP list. X-Frame-Options checks the full
+ALLOW-FROM address. Label validates UTF-8 and escapes, and Position checks
+the before and after path segments. All eight reject malformed authored
+values before replacing existing field lines. An independent model
+matched 425,566 authored cases. All 1,230 Hermes and 487 aggregate HTTP
+tests passed in synchronous and parallel runs.
+
+Sequential Criterion runs through the typed write entry point measured
+the following fixtures on GHC 9.10.3. The Go 1.26.10 fixture writers
+apply the corresponding field checks and use `net/url` for URI parsing.
+The previous Hermes writers emitted the fixtures without these checks.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| ASCII OData-EntityId | 25–26 ns / 224 B | 99–100 ns / 520 B | 190–199 ns / 240 B |
+| Unicode OData-EntityId | 43–47 ns / 256 B | 201–208 ns / 1,000 B | 467–484 ns / 432 B |
+| Configuration-Context | 17–18 ns / 240 B | 91–100 ns / 472 B | 181–182 ns / 224 B |
+| SOAPAction | 17 ns / 208 B | 117–118 ns / 560 B | 184–189 ns / 208 B |
+| Batch Content-ID | 15–16 ns / 208 B | 45 ns / 200 B | 24 ns / 40 B |
+| Differential-ID | 16 ns / 208 B | 81–87 ns / 504 B | 89–91 ns / 192 B |
+| X-Frame-Options ALLOW-FROM | 20–21 ns / 344 B | 112 ns / 912 B | 176–184 ns / 208 B |
+| Label | 16–17 ns / 328 B | 84–86 ns / 720 B | 90–91 ns / 72 B |
+| Position | 21 ns / 344 B | 59–63 ns / 688 B | 166 ns / 224 B |
+
+### Checked range, version, and isolation authoring
+
+Accept-Ranges checks every member as a nonempty HTTP token and reserves
+`none` for a field by itself. Content-Version and Derived-From share an
+opaque quoted-string encoder that rejects disallowed octets and escapes
+quotes and backslashes. Isolation and OData-Isolation check extension
+tokens while preserving their spelling. OSLC-Core-Version checks the
+complete decimal syntax and minimum major version without converting to
+a bounded integer. [RFC 9110 §5.6.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.4),
+[RFC 9110 §14.3](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.3),
+[RFC 2068 §§19.6.2.2–19.6.2.3](https://www.rfc-editor.org/rfc/rfc2068.html#section-19.6.2.2),
+[OData 4.01 §8.2.6](https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part1-protocol.html#sec_HeaderIsolationODataIsolation),
+[OSLC Core 3.0 §4.2.2](https://docs.oasis-open-projects.org/oslc-op/core/v3.0/os/oslc-core.html).
+
+Six regressions cover rejection before replacing existing field lines.
+An independent model matched 260,202 authored values, including all
+one- and two-octet quoted tags and OSLC versions with thousands of digits.
+All 1,236 Hermes and 487 aggregate HTTP tests passed in synchronous and
+parallel runs. The HTTP/1, HTTP/2, and Connect suites passed as well.
+
+Simplified Core keeps the quote validation loop's input index and
+escape count unboxed. Specialized uses of `renderHeaderLines` reuse
+the complete result for literal `snapshot`, `none`, and `bytes`
+values and the standard `2.0` and `3.0` versions.
+
+The Criterion fixtures measure `renderHeaderLines` through the benchmark
+driver. The Go 1.26.10 fixtures check the same inputs and return a byte
+slice. Timings are in nanoseconds and allocations are bytes per operation.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Accept-Ranges bytes | 20.6 / 240 | 8.5 / 32 | 1.9 / 0 |
+| Accept-Ranges three units | 35.2 / 256 | 57.0 / 264 | 43.6–43.8 / 48 |
+| Content-Version plain tag | 30.8 / 248 | 43.4 / 272 | 31.2–33.8 / 24 |
+| Derived-From escaped tag | 44.2 / 248 | 46.7 / 272 | 28.9–29.4 / 24 |
+| Isolation snapshot | 8.1 / 96 | 5.9 / 32 | 1.8 / 0 |
+| OData-Isolation extension | 17.0 / 328 | 19.5 / 192 | 15.2–16.3 / 16 |
+| OSLC-Core-Version 3.0 | 16.3 / 192 | 9.9 / 32 | 1.9 / 0 |
+| OSLC-Core-Version padded | 14.9 / 192 | 37.0 / 408 | 18.9–21.2 / 16 |
+
+The three literal fixtures improved and still exceed the twofold Go
+timing target. Both the literal result reuse and the remaining gap are
+visible in the measurements of the typed entry point.
+
 ### Content-Base and URI
 
 `Content-Base` requires a single fragmentless absolute URI and rejects
@@ -991,6 +1873,52 @@ read the first field line and skipped validation inside the brackets.
 | URI list parse | 69 ns / 680 B | 110 ns / 512 B | 310–311 ns / 400 B |
 | URI repeated-line parse | 52 ns / 576 B | 134 ns / 840 B | 294–316 ns / 400 B |
 | URI list render | 83 ns / 968 B | 25 ns / 280 B | 26–27 ns / 64 B |
+
+#### Checked URI field writes
+
+`Location`, `Content-Location`, `Referer`, `Content-Base`, and
+`Destination` validate authored references using their field-specific
+syntax. On the write path, an explicit HTTP or HTTPS scheme requires
+an authority with a nonempty host and excludes userinfo. Relative
+references keep their field-specific interpretation. The legacy
+`URI` list validates each member before adding brackets, so authored
+text cannot change the number of entries. `Ping-From` and `Ping-To`
+encode their String constructor input as UTF-8 before applying the
+ASCII browser URL grammar. Valid bytes retain their spelling.
+Rejected writes preserve previous field lines.
+[RFC 9110 §§4.2.1–4.2.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-4.2),
+[RFC 3986 §4](https://www.rfc-editor.org/rfc/rfc3986.html#section-4),
+[RFC 4918 §10.3](https://www.rfc-editor.org/rfc/rfc4918.html#section-10.3),
+[HTML hyperlink auditing](https://html.spec.whatwg.org/multipage/links.html#the-ping-from-and-ping-to-headers).
+
+All eight regressions failed before the fix. The independent model
+matched 445,125 writes, checking exact field bytes, typed lookup of
+accepted results, and retention of previous lines after rejection.
+The receive and structural rendering corpora matched another 229,606
+URI, browser URL, and legacy list fixtures. GHC 9.10.3 passed all
+1,213 Hermes and 487 aggregate HTTP tests in both schedules, plus
+HTTP/1 (108), HTTP/2 (126), and Connect (137).
+
+Sequential Criterion runs on ARM64 macOS measured the full field-line
+result. The prior writers emitted bytes without validating the authored
+references. The Go 1.26.10 reference uses `net/url` with field-specific
+checks and returns the original spelling.
+
+| Fixture | Previous Hermes | Checked writer | Go |
+| --- | ---: | ---: | ---: |
+| Relative Location | 18.1–19.0 ns / 328 B | 60.4 ns / 440 B | 113.5–122.2 ns / 208 B |
+| Absolute Referer | 17.9–18.2 ns / 328 B | 90.8 ns / 456 B | 146.2–148.1 ns / 208 B |
+| Ping-To | 85.6–85.8 ns / 344 B | 146.9 ns / 608 B | 134.5–134.6 ns / 208 B |
+| Content-Base | 16.5–16.8 ns / 224 B | 86.9 ns / 456 B | 226.1–229.3 ns / 264 B |
+| WebDAV Destination | 17.0–18.1 ns / 328 B | 89.9 ns / 456 B | 176.9–178.7 ns / 240 B |
+| Two legacy URI entries | 28.7–29.5 ns / 344 B | 145.1 ns / 1,007 B | 282.9–288.2 ns / 400 B |
+
+Checking ASCII in a separate traversal before packing the String took
+246–250 ns on the Ping-To fixture. Encoding as UTF-8 and validating the
+encoded bytes saved the separate traversal. Optimized Core shows the
+UTF-8 array copied into the pinned ByteString consumed by the parser
+and retained for field output. The benchmark driver measured Ping-To
+at 174.5 ns and all six fixtures within twice the Go reference.
 
 ### Content-Version and Derived-From
 
@@ -1378,9 +2306,9 @@ and rejects repeated lines.
 
 Hobareg decodes `regok` and `reginwork` case-insensitively and renders the
 canonical lowercase forms. An invalid or repeated value has the prescribed
-`reginwork` fallback. The existing Haskell constructors are retained.
-The caller uses the response status to interpret `regok`.
-[RFC 7486 §6.1](https://www.rfc-editor.org/rfc/rfc7486.html#section-6.1).
+`reginwork` fallback. `hobaregRegistrationSucceeded` checks the response
+status and both field sections together.
+[RFC 7486 §6.1.1](https://www.rfc-editor.org/rfc/rfc7486.html#section-6.1.1).
 
 Optional-WWW-Authenticate uses the shared challenge grammar. Typed lookup
 combines field lines in order, preserves quoted commas, and rejects a
@@ -1928,8 +2856,79 @@ value. Allocations are bytes per operation.
 Core shows unboxed input cursors in the token and URI scanners, with typed
 allocation at member boundaries. Parser boundaries reduced the two modules'
 combined optimized object size from 1.6 MiB to approximately 1.0 MiB compared
-with the initial implementation. Throughput against a full external typed
-decoder remains unmeasured.
+with the initial implementation.
+
+#### Checked text authoring and an independent Accept-Features decoder
+
+Checked emission through the legacy text constructors now parses the
+complete field. Invalid values leave the previous field lines intact.
+Validated typed values reuse their original wire bytes directly.
+Accept-Features still supports a present, empty field. Alternates
+requires a nonempty list and checks attribute and fallback uniqueness.
+Both write regressions failed on the previous implementation.
+[RFC 2295 §§8.2–8.3](https://www.rfc-editor.org/rfc/rfc2295.html#section-8.2).
+
+An independent Go decoder matched Hermes on acceptance and the decoded
+tags, operators, values, and extension octets across 5,274 cases. The
+corpus covers every literal and escaped octet, percent decoding,
+case-insensitive tags, all expression forms, and malformed extensions.
+Apache's negotiation module generates Alternates responses. The
+independent Go timing comparison covers Accept-Features.
+[Apache mod_negotiation source](https://raw.githubusercontent.com/apache/httpd/trunk/modules/mappers/mod_negotiation.c#L2236-L2402).
+
+An Alternates attribute bit-mask experiment agreed with the current
+parser on 47,840 combinations, including case variants and duplicate
+extension names. It added 192 bytes per typed parse and had no consistent
+timing advantage. The parser uses the existing set to track names.
+
+On ARM64 macOS, the retained GHC 9.10.3 build parsed the five-entry
+Accept-Features fixture in 214 ns with 1,568 allocated bytes. Go 1.26.10
+took 229–231 ns and 1,012 bytes with a growing result slice, or 160–161 ns
+and 564 bytes with space reserved for eight entries. Both implementations
+build typed records and preserve the original field bytes. The retained
+Hermes Alternates fixture took 549 ns at this checkpoint.
+
+A second fixture consumes every decoded condition, tag, value and
+extension using the same projection in both decoders. Hermes took
+217–218 ns and 1,568 bytes. The growing Go slice took 230–255 ns and
+1,012 bytes. The reserved Go slice took 169–177 ns and 564 bytes.
+The benchmark driver measured 220 ns for the full projection and
+553 ns for the Hermes Alternates fixture.
+
+All 1,172 Hermes and 487 aggregate HTTP tests passed in synchronous and
+parallel runs. The HTTP/1 (108), HTTP/2 (126), and Connect (137) loopback
+suites passed as well.
+
+#### Independent Alternates decoder comparison
+
+The projected Criterion fixtures consume source quality, URI and media
+parameters, languages, lengths, nested predicates and ranges, exact
+decimal factors, descriptions, opaque extension bytes and proxy versions.
+They cover the mixed variant list, the captured Apache response, and a
+list containing every registered attribute. The independent Go reader
+checks duplicate names and fallback uniqueness, owns its compact tokens,
+and uses arbitrary precision for lengths and range endpoints past
+64 bits. For URI references and language tags, the comparison covers the
+forms exercised by the fixtures and the test corpus.
+[RFC 2295 §§5, 6.3–6.4, 8.3](https://www.rfc-editor.org/rfc/rfc2295.html#section-5).
+
+Both decoders agreed on acceptance and the full projection for all 2,499
+inputs. The corpus includes reordered and repeated attributes, spelling
+variants, invalid quality factors, fallback duplicates, quoted
+extensions, and open and oversized feature ranges.
+
+Two sequential runs per fixture on ARM64 macOS compared GHC 9.10.3 and
+Go 1.26.10. The Go reserved variant allocates room for four top-level
+entries. Attributes and nested values grow as needed in both Go runs.
+
+| Fixture | Hermes | Go growing output | Go reserved output |
+| --- | ---: | ---: | ---: |
+| Mixed variant list | 559–588 ns / 3,488 B | 737–758 ns / 2,096 B | 699–714 ns / 1,776 B |
+| Apache response | 682–689 ns / 4,096 B | 923–924 ns / 3,904 B | 936–937 ns / 4,000 B |
+| All attributes and extensions | 1.28–1.55 µs / 7,128 B | 1.83–1.87 µs / 5,192 B | 1.87–2.21 µs / 4,872 B |
+
+The benchmark driver measured 561 ns for the mixed list, 726 ns for
+the Apache response, and 1.28 µs for the fixture with every attribute.
 
 
 ### OSCORE and Token Binding
@@ -1984,6 +2983,48 @@ encoding follow-up below corrects the short-option benchmark fixture.
 The codecs return the original wire bytes when rendering a parsed field.
 
 
+#### Checked proof, nonce, and binary field writes
+
+Checked writes use the receive grammar for `DPoP` (token68),
+`DPoP-Nonce` (NQCHAR), and `Replay-Nonce` (canonical unpadded
+Base64url). The legacy `OSCORE` and `Sec-Token-Binding` constructors
+check their input before emitting it. Parsed values and values built
+from checked binary constructors reuse their encoded bytes. Valid
+field text keeps its spelling, including surrounding spaces and tabs,
+and rejected writes preserve the previous field lines.
+[RFC 9449 §§4.1 and 8.1](https://www.rfc-editor.org/rfc/rfc9449.html#section-4.1),
+[RFC 8555 §6.5.1](https://www.rfc-editor.org/rfc/rfc8555.html#section-6.5.1),
+[RFC 8613 §11.1](https://www.rfc-editor.org/rfc/rfc8613.html#section-11.1),
+[RFC 8473 §2](https://www.rfc-editor.org/rfc/rfc8473.html#section-2).
+
+All five regressions failed before the fix. The independent corpora
+matched 447,262 authored singleton values and 695,091 typed wire and
+binary cases across the two existing test sets. The authoring comparison
+checks exact field bytes and preservation of the previous value on
+rejection. GHC 9.10.3 passed all 1,205 Hermes and 487 aggregate HTTP
+tests in both schedules, plus HTTP/1 (108), HTTP/2 (126), and Connect
+(137).
+
+Sequential Criterion runs on ARM64 macOS measured the checked
+field-line output. The previous writer copied or returned the input
+bytes without checking the legacy constructor. Go 1.26.10 validates
+the text inputs and returns one field line. The parsed binary fixtures
+reuse previously validated wire bytes in both implementations.
+
+| Fixture | Previous Hermes | Checked writer | Go |
+| --- | ---: | ---: | ---: |
+| 358-byte DPoP | 20.2–21.5 ns / 543 B | 97.6–101.3 ns / 815 B | 163–177 ns / 400 B |
+| DPoP-Nonce | 14.9–15.8 ns / 208 B | 38.7–41.3 ns / 424 B | 27.1–27.3 ns / 40 B |
+| Replay-Nonce | 16.3–17.2 ns / 208 B | 40.4–41.8 ns / 480 B | 37.3–37.4 ns / 40 B |
+| Raw OSCORE | 15.4–15.6 ns / 192 B | 37.7–38.4 ns / 544 B | 35.6–39.5 ns / 27 B |
+| Parsed OSCORE | 7.6–7.9 ns / 96 B | 6.8–8.0 ns / 88 B | 11.1–11.9 ns / 24 B |
+| Parsed Sec-Token-Binding | 8.0–8.5 ns / 96 B | 7.2–8.3 ns / 88 B | 11.1–11.9 ns / 24 B |
+
+The benchmark driver measured all six fixtures within twice the Go
+reference. Optimized Core uses bounded word loads for the DPoP and
+Replay-Nonce scans and an unboxed byte cursor for DPoP-Nonce. The
+text writers return the same ByteString used for validation.
+
 ### Cookie2 and Set-Cookie2
 
 Cookie2 parses one case-insensitive version directive, accepts quoted
@@ -2033,6 +3074,54 @@ unboxed input cursors in the response parser. Common attribute spellings
 reuse static keys, reducing allocation on the one-cookie fixture from
 2,192 bytes in the first typed parser to 1,936 bytes.
 
+#### Checked legacy cookie writes
+
+Checked Cookie2 emission validates the complete version directive. A
+Set-Cookie2 batch checks all authored lines before replacing existing
+lines. It preserves previously decoded lines and the order of accepted
+lines. Tests cover a malformed line in every position, quoted commas,
+duplicate attributes and an empty batch. The standalone structural
+builders remain available for inspecting authored text.
+[RFC 2965 §§3.2.2, 3.3.5](https://www.rfc-editor.org/rfc/rfc2965.html#section-3.2.2).
+
+Typed lookup caches the bare and quoted spellings of version one. The
+typed constructor also reuses the bare spelling. The singleton decoder
+checks for the exact wire length and safely compares two overlapping
+words. Sixteen slice alignments are covered for each spelling. The
+general parser handles mixed case, quoted pairs, field whitespace and
+unbounded decimal values. Optimized Core uses unboxed word comparisons
+and branches directly to the cached version on an exact match.
+
+Both malformed authoring regressions failed before the change. The
+197,079-case Go comparison passed with checked emission of the decoded
+fields. Another 110,869 single-line checks verified raw authoring against
+typed lookup, including mixed batches with a pre-parsed opaque cookie.
+CPython's CookieJar again agreed on the request version and on folded
+and repeated response fields. All 1,187 Hermes and 487 aggregate HTTP
+tests passed in both schedules, along with HTTP/1 (108), HTTP/2 (126) and
+Connect (137).
+
+Two alternating Criterion pairs ran on ARM64 macOS. The version lookup
+fixtures use separately backed input bytes. The Go 1.26.10 comparison
+checks the same exact strings and returns a cached version. Its general
+quoted parser took 23.8–24.4 ns on the same input.
+
+| Fixture | Previous Hermes | Current Hermes | Go cached lookup |
+| --- | ---: | ---: | ---: |
+| Read quoted version one | 32.8–33.9 ns / 432 B | 4.50–4.84 ns / 32 B | 2.21–2.26 ns / 0 B |
+| Read bare version one | 31.3–33.0 ns / 432 B | 4.43–4.55 ns / 32 B | 2.01–2.73 ns / 0 B |
+| Construct and write version one | 20.8–22.7 ns / 424 B | 6.74–7.17 ns / 72 B | |
+| Write two parsed Set-Cookie2 lines | 17.4–18.2 ns / 248 B | 11.1–11.2 ns / 152 B | |
+| Read and project one Set-Cookie2 definition | 231–242 ns / 1,936 B | 234–258 ns / 1,936 B | |
+| Read and project two folded definitions | 311–322 ns / 2,384 B | 299–321 ns / 2,384 B | |
+
+The cached lookup is slightly above twice the fastest Go run for both
+spellings. Both Set-Cookie2 parser fixtures returned to their previous
+allocation levels after inlining the shared field parser.
+The benchmark driver measured 4.68 ns for quoted lookup, 4.77 ns for
+bare lookup, 6.82 ns for version-one authoring and 12.57 ns for writing
+two parsed Set-Cookie2 lines.
+
 
 ### Early cross-site access and Security-Scheme
 
@@ -2079,9 +3168,35 @@ and render figures are measured separately.
 
 Core shows that standard methods avoid the extension-token scan and that
 the S-HTTP fallback compares its eight-byte prefix as an unboxed word.
-The IPv6 referer-root fixture remains above the repository's twofold
-throughput bar. The typed timestamp and origin retain the original
-validated bytes for rendering.
+The IPv6 referer-root fixture was above the repository's twofold bar
+at that checkpoint. [Referer-Root parsing and projection](#referer-root-parsing-and-projection)
+updates the comparison. The typed timestamp and origin retain the
+original validated bytes for rendering.
+
+#### Referer-Root parsing and projection
+
+Typed lookup constructs the result inside the shared parser callback.
+Projection inlines the cached-origin path and calls the grammar for a
+legacy raw value. Optimized Core constructs the typed header directly
+from a successful parser result and invokes the shared IPv6 scanner
+for a bracketed address. The original field bytes are available for
+rendering. [W3C Cross-site Access draft](https://www.w3.org/TR/2007/WD-access-control-20071126/).
+
+The early-access corpus matched the Go reference on all 160,009
+cases. A focused test exercises IPv4-mapped IPv6 and IPvFuture
+hosts through both typed lookup and the legacy constructor, including
+invalid literals and ports. GHC 9.10.3 passed 1,154 Hermes tests in
+both schedules.
+
+Two sequential Criterion pairs on ARM64 macOS measured numeric
+projection of the IPv6 root at 39.3–44.0 ns and 480 B per operation,
+compared with 43.3–44.5 ns and 496 B before fusing the parse result.
+The Go 1.26.10 fixture took 36.7–38.6 ns and 16 B. The fresh Hermes
+baseline and both updated runs were within twice the Go time.
+The typed null fixture went from 7.32–7.46 ns and 64 B to
+6.62–6.72 ns and 48 B. The Go null fixture took 4.95–5.32 ns and 0 B.
+The benchmark driver measured 41.9 ns for the IPv6 projection and
+6.75 ns for null.
 
 ## Proxy cache notification
 
@@ -2132,6 +3247,47 @@ parser allocated 160 additional bytes per operation, so the measured
 implementation uses the shared token scanner followed by the DNS
 checker. The typed instruction and allocation gaps against Go remain
 open.
+
+### Checked writes for legacy access and proxy fields
+
+`Method-Check`, `Method-Check-Expires`, `Referer-Root`, `Security-Scheme`,
+`Proxy-Features`, and `Proxy-Instruction` validate legacy text before
+writing it through `renderHeaderLines` or `setHeader`. Valid text retains
+its spelling, including surrounding spaces and tabs. Rejected values
+leave existing field lines intact. The expiry writer uses the supplied
+HTTP-date settings for legacy text. Timestamp authoring checks that the
+date can be rendered as IMF-fixdate, including a four-digit year from
+1900 through 9999 and valid seconds within the UTC day. The checked
+writer can reuse the bytes of a successfully parsed expiry date.
+
+Seven regressions failed before the fix and passed after it. The original
+Go comparison matched all 238,730 lookup cases with checked emission in
+place of structural rendering. The raw-constructor comparison checked
+158,202 representable singleton inputs for exact spelling and preservation
+of previous fields on rejection. GHC 9.10.3 passed all 1,194 Hermes and
+487 aggregate HTTP tests in both schedules, plus HTTP/1 (108), HTTP/2
+(126), and Connect (137).
+
+The GHC 9.10.3 Criterion driver on ARM64 macOS measured the following
+one-line writes. The input was already parsed, except for the canonical
+Security-Scheme literal. The baseline emitted the same valid inputs
+without checking legacy authoring values.
+
+| Field | Previous Hermes | Checked writer |
+| --- | ---: | ---: |
+| Proxy-Features | 7.9–8.3 ns / 96 B | 7.6 ns / 88 B |
+| Proxy-Instruction | 8.2–8.3 ns / 96 B | 7.9 ns / 88 B |
+| Method-Check | 8.0–8.7 ns / 96 B | 8.2 ns / 96 B |
+| Method-Check-Expires | 7.4–8.2 ns / 96 B | 7.7 ns / 88 B |
+| Referer-Root | 7.8–8.1 ns / 96 B | 7.0 ns / 88 B |
+| Security-Scheme | 14.1–15.2 ns / 192 B | 8.9 ns / 72 B |
+
+The Go 1.26.10 reference took 11.5–13.3 ns to return a new one-line
+slice around validated bytes and 12.4–12.6 ns for the canonical
+Security-Scheme check and write. Both allocated 24 B. The Method-Check
+reader now shares the optional-whitespace method validator. Its
+standalone typed parse took 7.4–7.7 ns, compared with 8.2–8.5 ns before
+the change, at 48 B per operation throughout.
 
 ## HTTP Extension Framework
 
@@ -2448,6 +3604,48 @@ the emitted field for the typed value. The end-to-end fixture still
 allocates more than the AMP Packager.
 
 
+## Checked extension and policy field writes
+
+Man, Opt, PEP, PEP-Info, P3P, and AMP-Cache-Transform now run authored
+legacy text through the corresponding read grammar before emitting it.
+All ten header codecs that use the shared retained-list representation
+now validate the legacy text constructor on checked writes. Previously
+decoded values emit their retained physical lines directly. Ext accepts
+an empty acknowledgement and optional field whitespace. Rejected writes
+preserve the existing field lines.
+[RFC 2774 §4](https://www.rfc-editor.org/rfc/rfc2774.html#section-4),
+[November 1997 PEP draft](https://www.w3.org/TR/WD-http-pep-971121),
+[P3P](https://www.w3.org/TR/P3P/),
+[AMP cache transform](https://raw.githubusercontent.com/ampproject/amphtml/main/docs/spec/amp-cache-transform.md).
+
+AMP version negotiation still evaluates version constraints per
+alternative. A syntactically valid quoted constraint survives authoring
+and can be skipped during selection. The regression also exercises a
+valid version string split across received field lines.
+
+All seven checked-write regressions failed before the change. The
+independent corpora still matched on 36,173 framework fields, 44,289
+PEP fields, and 40,684 AMP fields. A separate set of 12,009 cases
+agreed with AMP Packager's Go selector. Another 142,356 single-line
+checks compared checked authoring with typed lookup and verified
+that rejects preserve the previous map and accepts preserve spelling.
+All 1,184 Hermes and 487 aggregate HTTP tests passed under synchronous
+and parallel scheduling. HTTP/1 (108), HTTP/2 (126), and Connect (137)
+loopback suites passed.
+
+Two alternating Criterion pairs measured checked field-line output on
+ARM64 macOS. The Man and AMP inputs were prepared by typed lookup.
+The AMP input had two physical lines and a split quoted version list.
+
+| Fixture | Previous Hermes | Checked writer |
+| --- | ---: | ---: |
+| Write the parsed Man declaration | 11.25–11.33 ns / 144 B | 10.72–11.15 ns / 136 B |
+| Write the parsed AMP alternatives | 12.14–12.89 ns / 144 B | 7.89–8.01 ns / 112 B |
+| Write the canonical empty Ext acknowledgement | 14.32–14.65 ns / 176 B | 12.10–12.23 ns / 152 B |
+
+The benchmark driver measured 10.25 ns for Man, 8.56 ns for AMP, and
+12.42 ns for Ext, with the same allocations as the alternating runs.
+
 ## OSCORE and WebDAV If encoding follow-up
 
 The OSCORE benchmark now uses the three octets `09 05 25` in both
@@ -2545,6 +3743,39 @@ rendering to 23.7 ns before this pass.
 | Tracestate parse | 79.5 ns / 904 B | 72.2 ns / 728 B | 38.0–39.5 ns / 0 B |
 | Traceparent field rendering | 23.7 ns / 280 B | 16.3 ns / 224 B | 19.8–21.0 ns / 64 B |
 
+### Rendering typed tracestate fields
+
+The strict typed writer sizes one buffer with checked arithmetic
+and copies each compact key and value into it. It inserts commas and
+equals signs in member order. The standalone builder uses the
+shared separator renderer. Optimized Core shows direct byte-array
+copies and an unboxed write offset. [W3C tracestate format](https://www.w3.org/TR/trace-context-1/#tracestate-header).
+
+Tests compare the strict writer and builder for parsed and authored
+values and the explicit empty state. The list limit test covers a
+populated member at either end of a 32-slot list. An independent
+model agreed on 96,396 parse and render cases. GHC 9.10.3 passed
+1,154 Hermes, 486 aggregate HTTP, 137 Connect, 108 HTTP/1, 126
+HTTP/2, and 18 WAI tests. Hermes, aggregate HTTP, and Connect passed
+under both schedules. TLS and minimal gRPC passed. Full gRPC passed
+91 with one existing pending case.
+
+Two sequential Criterion pairs on ARM64 macOS measured the new
+tracestate render fixture at 23.1–23.4 ns and 232 B, down from
+76–83 ns and 920 B with the builder-based field writer. The Go
+1.26.10 fixture sizes and copies the same parsed entries.
+
+| Fixture | Current Hermes | Go |
+| --- | ---: | ---: |
+| Traceparent parse | 38.4–40.4 ns / 448 B | 30.8–36.6 ns / 0 B |
+| Tracestate parse | 60.0–61.3 ns / 632 B | 37.7–38.3 ns / 0 B |
+| Traceparent render | 15.7–17.3 ns / 224 B | 16.4–16.5 ns / 64 B |
+| Tracestate render | 23.1–23.4 ns / 232 B | 18.9–20.1 ns / 48 B |
+
+All four fixtures were within twice the Go time. The Go parser
+borrows the input strings and uses caller-supplied state storage.
+The benchmark driver measured 22.5 ns for tracestate rendering.
+
 
 ## Forwarding singleton follow-up
 
@@ -2614,6 +3845,60 @@ All 1,036 Hermes tests and 65 focused HTTP client tests passed. The
 independent parse and render corpus passed 90,312 cases, including byte
 substitutions, case-sensitive duplicate detection, and values on both
 sides of the offer scan limit.
+
+### Checked writes for WebSocket and Content-MD5
+
+Typed writes check the decoded width before encoding `Content-MD5`
+and `Sec-WebSocket-Key` (16 bytes each) or `Sec-WebSocket-Accept` (20 bytes).
+Version numbers must be in 0–255. Subprotocol offers require distinct,
+case-sensitive HTTP tokens. Extension names, parameter names, and
+present parameter values each require an HTTP token. A rejected write
+preserves previous field lines. With explicit message settings, a
+request writes only one version and a response writes only one selected
+subprotocol. [RFC 1864 §2](https://www.rfc-editor.org/rfc/rfc1864.html#section-2),
+[RFC 6455 §4.3](https://www.rfc-editor.org/rfc/rfc6455.html#section-4.3),
+[RFC 6455 §9.1](https://www.rfc-editor.org/rfc/rfc6455.html#section-9.1).
+
+The shared token check processes bounded eight-byte chunks containing
+letters, digits, dashes, and underscores. The byte scanner handles the
+complete HTTP token alphabet and short tails. The validated
+subprotocol list and extensions write directly into a single sized
+buffer. Version `13` uses a prebuilt wire value.
+
+Six regressions failed before the fix. The independent authoring model
+covered 364,297 inputs, including every pair of legal version numbers
+in each message context and token substitutions across word boundaries.
+It also checked exact spelling, typed round-trips, and preservation of
+existing lines on rejected writes. All 90,312 earlier WebSocket wire
+cases matched when valid reads were rendered through the checked API.
+GHC 9.10.3 passed 1,200 Hermes and 487 aggregate HTTP tests in both
+schedules, plus WebSocket (63), HTTP/1 (108), HTTP/2 (126), and
+Connect (137).
+
+Sequential Criterion runs on ARM64 macOS measured checked field-line
+output. The earlier writers emitted these valid fixtures without
+testing their public constructor arguments. The Go 1.26.10 writer
+returns a new one-line slice. For a single subprotocol it can borrow
+the input byte slice, while Hermes copies its compact ShortText into
+the ByteString returned by the API.
+
+| Fixture | Previous Hermes | Checked writer | Go |
+| --- | ---: | ---: | ---: |
+| Content-MD5 | 19.1–20.2 ns / 264 B | 19.7–21.3 ns / 272 B | 25.9–27.3 ns / 48 B |
+| WebSocket key | 18.9–20.5 ns / 264 B | 19.3–20.0 ns / 272 B | 25.9–27.3 ns / 48 B |
+| WebSocket accept | 20.1–20.5 ns / 264 B | 20.3–21.3 ns / 272 B | 27.0–28.2 ns / 56 B |
+| Version `13` | 40.9–41.4 ns / 672 B | 7.2–7.5 ns / 72 B | 10.6–10.7 ns / 24 B |
+| Single subprotocol | 41.5–42.3 ns / 672 B | 22.8–23.7 ns / 208 B | 13.0–15.2 ns / 24 B |
+| Two subprotocol offers | 81.6–86.5 ns / 1,032 B | 36.2–38.3 ns / 264 B | 28.6–28.7 ns / 40 B |
+| Extension with two parameters | 57.0–57.1 ns / 672 B | 68.4–68.7 ns / 384 B | 48.3–48.4 ns / 104 B |
+
+A byte-by-byte token check followed by the existing builder took
+188–192 ns for the extension. The bounded token scan brought this to
+99 ns before switching to exact-sized rendering. The optimized Core
+probe shows an unboxed length check before Base64 encoding and bounded
+word loads for compact token validation. The benchmark driver measured
+35.7 ns for the two offers and 74.4 ns for the extension. All seven
+driver fixtures took less than twice the corresponding Go time.
 
 ## HTTP/1 Host and CONNECT authorities
 
@@ -3086,6 +4371,48 @@ The aggregate suite passed under both schedules, and the TLS smoke
 and minimal gRPC suites passed. The full gRPC suite passed 91 tests
 with one existing pending test.
 
+### Checked PICS and JEPI field writes
+
+Checked emission validates authored text for Protocol, Protocol-Request,
+Protocol-Info, Protocol-Query, and PICS-Label with their read grammars.
+When validation fails, the existing field lines remain intact. A
+previously decoded value reuses its original bytes and physical lines.
+Typed construction of the exact PICS response declaration reuses the
+cached singleton. Optimized Core shows that it skips rendering and
+reparsing the declaration.
+[PICS 1.1 HTTP field grammar](https://www.w3.org/TR/REC-PICS-labels-961031),
+[August 1996 PEP draft](https://www.w3.org/TR/WD-http-pep-960820.html).
+
+All five new write regressions failed against the previous writers. The
+62,235-entry PICS and JEPI corpus still agreed with the Go reference on
+acceptance, decoded entries, and emitted lines. A separate check covered
+28,835 valid-UTF-8 single-line protocol cases and 15,094 PICS-Label cases
+from those corpora. It compared checked authoring against typed lookup
+and verified that rejected values preserve the existing header map.
+GHC 9.10.3 passed all 1,177 Hermes and 487 aggregate HTTP tests in both
+schedules, plus HTTP/1 (108), HTTP/2 (126), and Connect (137).
+
+The singleton decoder checks for exactly 31 bytes, then compares four
+in-bounds, possibly unaligned words. The final load overlaps the third
+by one byte. The target byte order determines the constants. Optimized
+Core combines the differences with unboxed word operations and returns
+the cached entry on an exact match. A regression checks sixteen starting
+alignments, and the wire corpus covers every octet substitution.
+
+Sequential Criterion pairs on ARM64 macOS exercised the cloned wire
+input and the typed authoring API. The Go authoring reference selects a
+cached field-line slice for the singleton declaration.
+
+| Fixture | Previous Hermes | Current Hermes | Go 1.26.10 |
+| --- | ---: | ---: | ---: |
+| Project the canonical response | 4.97–5.10 ns / 32 B | 4.36–4.52 ns / 32 B | 2.29–2.35 ns / 0 B |
+| Author and emit the canonical response | 186–187 ns / 1,320 B | 6.65–7.29 ns / 32 B | 1.65–1.66 ns / 0 B |
+
+A Criterion control that returned the prebuilt field lines took
+5.28–5.43 ns. The authoring result still exceeds twice the Go time.
+The benchmark driver measured 4.41 ns for projection and 7.05 ns for
+authoring.
+
 ## Structured Fields parsing and canonical rendering
 
 The shared Structured Fields codec joins repeated field lines with
@@ -3148,6 +4475,230 @@ All 1,040 Hermes, 116 HTTP/2, and 318 aggregate HTTP tests passed on the
 final build. Aggregate HTTP passed under both schedules. The TLS smoke
 and minimal gRPC suites passed. The full gRPC suite passed 91 tests with
 one existing pending test.
+
+## Authoring browser hints
+
+The typed `Accept-CH` renderer checks that each hint is both an HTTP
+field name and a Structured Fields Token. `Save-Data` validates its
+Token Items and `Sec-Purpose` validates its full List, including Items
+inside Inner Lists. Both normalize each parameter dictionary by keeping
+the first key position and the last value, then validate the surviving
+keys and values. [Accept-CH](https://www.rfc-editor.org/rfc/rfc8942.html#section-3.1),
+[Save-Data](https://wicg.github.io/savedata/),
+[Sec-Purpose](https://wicg.github.io/nav-speculation/prefetch.html#sec-purpose-header),
+[Structured Fields serialization](https://www.rfc-editor.org/rfc/rfc9651.html#section-4.1).
+
+`KnownHeader.renderToHeadersChecked` lets a singleton field reject an
+authored value. `renderHeaderLines` then emits no line and `setHeader`
+preserves the map. An explicitly empty `Save-Data` or `Sec-Purpose` still
+clears the old field. Empty `Accept-CH` still emits a blank reset field.
+The three checked builder functions expose serialization errors. The
+existing singleton `renderToHeaders` types still return a `ByteString`.
+
+Both regressions failed on the baseline. One exercised invalid hint names,
+items, and parameters. The other exercised replacements within an Item
+and on an Inner List. The independent model matched 4,265 authored writes,
+covering token bytes, invalid parameter keys, nested members, and numeric
+bounds. The HTTP Working Group corpus matched all required outcomes on
+1,607 cases, with two optional Base64 rejections. GHC 9.10.3 passed all
+1,157 Hermes and 486 aggregate HTTP tests under both schedules. HTTP/1
+(108), HTTP/2 (126), and Connect (137) also passed.
+
+Two sequential Criterion pairs used GHC 9.10.3 on ARM64 macOS, with
+the corresponding Go 1.26.10 httpsfv serializations. Go's parameter maps
+already have unique keys. The Hermes typed renderer validates and
+normalizes the caller's parameter entries before rendering.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| `Accept-CH` with three names | 114 ns / 1,344 B | 60–61 ns / 288 B | 106–109 ns / 104 B |
+| Bare `Save-Data` | 11.8–12.3 ns / 120 B | 8.3–8.6 ns / 32 B | 40.7–42.4 ns / 64 B |
+| Parameterized `Save-Data` list | 95–96 ns / 984 B | 92–101 ns / 752 B | 97–98 ns / 112 B |
+| Bare `Sec-Purpose` | 11.8–11.9 ns / 120 B | 8.5–8.9 ns / 32 B | 40.8–41.0 ns / 64 B |
+| `Sec-Purpose` with an Inner List | 48 ns / 368 B | 91–96 ns / 488 B | 121–122 ns / 176 B |
+| `setHeader` for ordinary `Content-Length` | 29.6–29.8 ns / 272 B | 29.8–30.9 ns / 272 B | |
+
+GHC Core scans `Accept-CH` names with unboxed byte-array offsets and
+copies them directly into the output buffer. Specialization removes
+the new rejection branch from the ordinary `Content-Length` setter.
+The manifest run measured 59 ns for `Accept-CH`, 96 ns for the nested
+`Sec-Purpose` list, and 31 ns for the `Content-Length` setter.
+
+## Authoring reporting endpoints and permissions policies
+
+The checked `Reporting-Endpoints` writer validates the surviving dictionary
+keys and URI references after applying ordered replacement. The writer and
+parser share the URI validator. Relative references keep their original
+spelling, and the recipient resolves them against the response URL and
+applies its trust policy. [Reporting API §3.2](https://www.w3.org/TR/reporting-1/#header).
+
+The checked `Permissions-Policy` writer applies ordered replacement to
+dictionary keys and to parameter keys on Items and Inner Lists. It validates
+the surviving Structured Fields entries and preserves syntactically valid
+extensions. The typed projections also use the final occurrence of each
+feature and each `report-to` parameter.
+[Permissions Policy §5.2](https://w3c.github.io/webappsec-permissions-policy/#structured-header-serialization),
+[RFC 9651 §4.1](https://www.rfc-editor.org/rfc/rfc9651.html#section-4.1).
+
+For both fields, the checked builder exposes a serialization failure and
+`setHeader` preserves the previous value. An explicitly empty dictionary
+clears the field. Both regressions failed before the change. An independent
+model matched 1,839 authored cases. The receive-side comparisons matched
+42,343 Reporting-Endpoints cases and 96,395 Permissions-Policy cases.
+GHC 9.10.3 passed 1,159 Hermes and 486 aggregate HTTP tests under both
+schedules, plus HTTP/1 (108), HTTP/2 (126), and Connect (137).
+
+Two alternating Criterion pairs used GHC 9.10.3 on ARM64 macOS. The Go
+1.26.10 fixture parses both endpoint references with `net/url` before
+serialization. The Go Permissions-Policy dictionary already has unique
+keys. Both Hermes render fixtures include write-side validation and
+replacement. Core shows bounded byte indexing in key validation and
+direct copies of the compact endpoint bytes into the builder output.
+
+| Fixture | Previous Hermes | Checked Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Render two reporting endpoints | 67–71 ns / 312 B | 260–293 ns / 1,095 B | 400–408 ns / 568 B |
+| Render three policy entries | 77–80 ns / 336 B | 146–157 ns / 576 B | 157–163 ns / 272 B |
+| Parse the policy | 329–418 ns / 1,992 B | 400–410 ns / 2,040 B | 758–802 ns / 1,152–1,154 B |
+| Parse the policy from repeated lines | 366–389 ns / 2,160 B | 347–392 ns / 2,208 B | 783–795 ns / 1,217–1,218 B |
+| Parse and project reporting parameters | 350–387 ns / 1,872 B | 358–391 ns / 1,984 B | 864–898 ns / 1,613–1,615 B |
+
+The benchmark driver measured 256 ns for checked endpoint rendering,
+164 ns for checked policy rendering, and 339 ns for policy parsing.
+
+## Authoring digest dictionaries
+
+Content-Digest, Repr-Digest, Want-Content-Digest, and Want-Repr-Digest
+validate the final algorithm keys and parameters before rendering.
+The renderer checks each surviving member after applying dictionary
+replacement. A checked renderer reports invalid keys, parameters, or
+preference weights. `setHeader` leaves existing fields in place if
+serialization fails. An explicitly empty dictionary clears its field.
+The shared Byte Sequence renderer uses the package's padded Base64
+encoder. [RFC 9530 §§2–4](https://www.rfc-editor.org/rfc/rfc9530.html#section-2),
+[RFC 9651 §4.1](https://www.rfc-editor.org/rfc/rfc9651.html#section-4.1).
+
+The regression failed on the previous build, which replaced a valid
+Content-Digest with an invalid dictionary. All 1,155 Hermes tests passed
+in synchronous and parallel runs, along with HTTP/1 (108), HTTP/2 (126),
+and aggregate HTTP (486 in both schedules). The independent checks
+covered 4,664 authored digest cases and matched all 73,985 Base64 outputs
+against the previous encoder. The HTTP Working Group corpus passed all
+1,607 required outcomes, with two optional Base64 rejections.
+
+In GHC 9.10.3 Core, the algorithm-key check uses unboxed byte-array
+indices. The shared Base64 encoder still returns an intermediate buffer.
+Two sequential Criterion pairs on ARM64 macOS put Content-Digest
+rendering at 71–73 ns and 936 bytes per call, down from 116–118 ns
+and 1,200 bytes. The representative typed fixtures and Go 1.26.10
+httpsfv comparisons measured the following.
+
+| Fixture | Hermes | Go |
+| --- | ---: | ---: |
+| Content-Digest parse | 84–89 ns / 832 B | 177–187 ns / 560 B |
+| Content-Digest render | 71–73 ns / 936 B | 80–88 ns / 168 B |
+| Repr-Digest parse, repeated lines | 304 ns / 2,824 B | 497–514 ns / 1,201 B |
+| Repr-Digest render, two entries | 119 ns / 1,512 B | 112–115 ns / 152 B |
+| Want-Content-Digest and Want-Repr-Digest parse, repeated lines | 206–212 ns / 1,776 B | 394–397 ns / 1,160 B |
+| Want-Content-Digest and Want-Repr-Digest render, three entries | 118–120 ns / 832 B | 130–138 ns / 152 B |
+
+The manifest driver ran the full `structured-headers` group and measured
+70 ns for the Content-Digest render at the same allocation.
+
+## Accept-Ranges, Hobareg, Trailer, and Upgrade fixtures
+
+The typed codecs reuse cached results for bare `Accept-Ranges: bytes`,
+case-insensitive `none`, bare `Upgrade: websocket`, and the two common
+spellings of `Trailer: Content-Digest`. Repeated lines still go through
+the ordered field-list parser. `Hobareg` needs one complete `regok` to
+signal success. The matcher skips SP and HTAB, checks the remaining
+length before reading a native word and byte, and checks the suffix for
+field whitespace. Invalid or repeated field lines produce `reginwork`.
+[Trailer](https://www.rfc-editor.org/rfc/rfc9110.html#section-6.6.2),
+[Upgrade](https://www.rfc-editor.org/rfc/rfc9110.html#section-7.8),
+[Accept-Ranges](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.3),
+[RFC 7486 §6.1](https://www.rfc-editor.org/rfc/rfc7486.html#section-6.1).
+
+The three list renderers write into one sized buffer. Upgrade copies
+each protocol's name and optional version with the intervening slash.
+Simplified GHC Core shows unboxed counts for the Hobareg whitespace
+scan, length checks before the native loads, and direct byte-array
+copies for the versioned protocols.
+
+Sequential Criterion runs on ARM64 macOS used GHC 9.10.3. The Go
+1.26.10 reference performs the same classification and copies parsed
+extension tokens into strings. The table compares two baseline runs
+with the final build.
+
+| Fixture | Previous Hermes | Current Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Parse `Accept-Ranges: bytes` | 28.1–28.4 ns / 392 B | 5.18 ns / 48 B | 4.84–5.57 ns / 0 B |
+| Parse `Accept-Ranges: NoNe` | 26.1–27.1 ns / 336 B | 4.55 ns / 48 B | 12.6–12.7 ns / 0 B |
+| Render three range units | 109 ns / 1,280 B | 27.2 ns / 192 B | 17.5–17.6 ns / 24 B |
+| Parse padded, mixed-case `Hobareg` | 18.4–18.6 ns / 256 B | 6.97 ns / 32 B | 6.48–6.60 ns / 0 B |
+| Parse repeated `Hobareg` | 6.25–6.81 ns / 32 B | 3.40 ns / 32 B | 1.64 ns / 0 B |
+| Render `Hobareg: regok` | 3.80–4.06 ns / 32 B | 4.09 ns / 32 B | 1.53–1.54 ns / 0 B |
+| Parse `Trailer: Content-Digest` | 32.4–33.0 ns / 344 B | 4.99 ns / 48 B | 4.85–4.89 ns / 0 B |
+| Render three trailer names | 131 ns / 1,312 B | 31.6 ns / 256 B | 18.6–22.0 ns / 48 B |
+| Parse `Upgrade: websocket` | 28.8–31.0 ns / 368 B | 4.93 ns / 48 B | 4.86 ns / 0 B |
+| Render three Upgrade protocols | 138–139 ns / 1,312 B | 41.2 ns / 232 B | 25.6–26.3 ns / 32 B |
+
+The repeated-list fixtures in the direct run were within twice the Go
+timings. The manifest run of the identical executable measured 40.8 ns
+for Trailer rendering, 178 ns for repeated Upgrade parsing, and 61.8 ns
+for Upgrade rendering. A sequential retest measured 33.1 ns, 96.4 ns,
+and 41.8 ns for those paths. The corresponding Go retest measured
+20.6–21.5 ns, 69.0–69.9 ns, and 25.2–25.4 ns. Hermes allocated 56 extra
+bytes for each repeated Trailer and Upgrade parse relative to its
+baseline. The constant Hobareg render and repeated-field fallback
+are still above the twofold target in the single-call fixtures.
+
+The independent model agreed on 16,680 Hobareg cases, 20,240 list-field
+cases, and 21 builder parity checks. These include all 32 case variants
+of `regok`, sliced-buffer alignments, repeated lines, and malformed field
+names and versions. All 1,155 Hermes and 486 aggregate HTTP tests passed
+in synchronous and parallel runs. HTTP/1 (108) and HTTP/2 (126) passed.
+
+### Hobareg registration responses
+
+The response helper requires a 2xx status and one valid `regok` across
+the header and trailer sections. Presence in both sections counts as a
+repeated field. Both entry points check the same complete, case-insensitive
+wire token. The exact-length parser path reads a bounded word and byte
+directly. Padded values use the field whitespace scanner. The builder and
+typed field renderer use the same static bytes, whose lengths appear as
+constants in optimized Core.
+[RFC 7486 §6.1.1](https://www.rfc-editor.org/rfc/rfc7486.html#section-6.1.1).
+
+An independent model matched 589,824 combinations of status code and
+field-section layout. The existing 16,680 Hobareg grammar and sliced-buffer
+cases also passed. GHC 9.10.3 passed all 1,166 Hermes and 487 aggregate HTTP
+tests under both schedules, plus HTTP/1 (108), HTTP/2 (126), and Connect
+(137).
+
+The GHC 9.10.3 benchmark driver and Go 1.26.10 comparison ran on ARM64
+macOS. The parse batch consumes 64 valid, padded, repeated, and in-progress
+inputs. The render batch consumes output lengths for 64 packed input
+flags. The builder fixture materializes the field value.
+
+| Fixture | Hermes driver | Go |
+| --- | ---: | ---: |
+| Parse bare `regok` | 4.31 ns / 32 B | 5.15–5.23 ns / 0 B |
+| Parse padded, mixed-case `regok` | 7.14 ns / 32 B | 6.65 ns / 0 B |
+| Parse repeated lines | 3.56 ns / 32 B | 1.71–1.72 ns / 0 B |
+| Render `regok` | 4.24 ns / 32 B | 1.64–1.65 ns / 0 B |
+| Parse and consume 64 fields | 181 ns / 48 B | 288–291 ns / 0 B |
+| Render and consume 64 fields | 38.5 ns / 48 B | 17.9–22.7 ns / 0 B |
+| Materialize `regok` with a builder | 15.8 ns / 296 B | 9.35–9.39 ns / 8 B |
+
+The alternating standalone runs measured a 5.38–5.46 ns baseline for
+bare `regok`. The separate before-and-after harness measured 196–197 ns
+and 187–188 ns for the parse batch. The builder took 15.3–16.1 ns before
+the change and 14.7–15.7 ns after it, with allocation rising from 280 to
+296 bytes. Identity controls for the Criterion single-result fixtures
+measured 3.14–3.49 ns for the enum and 4.10–4.46 ns for the ByteString,
+both at 32 bytes. The standalone repeated-field and render measurements
+remain above the twofold bar.
 
 ## Link targets and parameters
 
@@ -3220,6 +4771,58 @@ The other run timed out in the previously observed HTTP/2 interleaved
 streams test. The eight focused concurrency tests passed across seeds
 42–52. The TLS smoke and minimal gRPC suites passed. The full gRPC suite
 passed 91 tests with one existing pending test.
+
+### Checked Link and WebDAV field writes
+
+Checked Link output validates every target and parameter before sizing
+the field. Each entry requires a single valid `rel`. The writer checks
+extension relation URIs, anchors, language hints, and media type hints,
+and rejects duplicates of `rel`, `media`, `title`, `title*`, and `type`.
+Extended titles use unquoted UTF-8 extended values. Media queries use
+the HTTP token or quoted parameter representation. Quoted authoring
+rejects prohibited control octets before encoding.
+[RFC 8288 §§3.1–3.4](https://www.rfc-editor.org/rfc/rfc8288.html#section-3.1),
+[RFC 8187 §3.2](https://www.rfc-editor.org/rfc/rfc8187.html#section-3.2).
+
+Checked WebDAV output verifies embedded absolute URIs for `Lock-Token`,
+`DASL`, `DAV`, and `Status-URI`. `Status-URI` also checks that all
+status codes are in 100–599. `If` validates the condition tree for both
+legacy and typed authoring, including resource tags, state tokens,
+and opaque entity tags. `Ordering-Type` and `Redirect-Ref` check their
+absolute and general reference grammars, respectively. An invalid
+entry rejects the complete write and preserves previous field lines.
+[RFC 4918 §10](https://www.rfc-editor.org/rfc/rfc4918.html#section-10),
+[RFC 5323 §3.2](https://www.rfc-editor.org/rfc/rfc5323.html#section-3.2),
+[RFC 2518 §9.7](https://www.rfc-editor.org/rfc/rfc2518.html#section-9.7),
+[RFC 3648 §5.1](https://www.rfc-editor.org/rfc/rfc3648.html#section-5.1),
+[RFC 4437 §12.1](https://www.rfc-editor.org/rfc/rfc4437.html#section-12.1).
+
+Eight regressions failed before the fix. The independent model
+matched 350,032 authored values, verifying exact field bytes, typed
+lookup of accepted results, and retention of existing lines after
+rejection. Earlier receive and structural rendering models matched
+38,603 Link and 38,200 WebDAV fixtures, plus 1,112,064 Unicode scalar
+values across three structural Link render paths. GHC 9.10.3 passed
+1,221 Hermes and 487 aggregate HTTP tests in both schedules, plus
+HTTP/1 (108), HTTP/2 (126), and Connect (137).
+
+Sequential Criterion measurements on ARM64 macOS forced the checked
+field-line output. The previous writer emitted the same valid inputs
+without constructor validation. The Go 1.26.10 comparison uses
+`net/url` and validates the parameter and condition forms used by
+these fixtures.
+
+| Fixture | Previous Hermes | Checked writer | Go |
+| --- | ---: | ---: | ---: |
+| Preload Link | 37.7–38.4 ns / 336 B | 155–159 ns / 1,056 B | 163–166 ns / 280 B |
+| Three Link entries | 112–117 ns / 560 B | 521–532 ns / 2,807 B | 660–662 ns / 864 B |
+| WebDAV If tree | 41.9–43.1 ns / 304 B | 121.5–121.9 ns / 928 B | 159.6–170.7 ns / 376 B |
+| Two Status-URI entries | 98.7–100.4 ns / 960 B | 223–226 ns / 1,615 B | 249–268 ns / 454 B |
+| Single DASL grammar | 28.5–29.6 ns / 448 B | 55.3–59.0 ns / 600 B | 83.7–83.9 ns / 192 B |
+
+The benchmark driver measured 160 ns for the preload Link and
+522 ns for three Link entries. All five fixtures took less time
+than the corresponding Go checks in the paired runs and the driver.
 
 ## Prefer and Preference-Applied
 
@@ -3297,13 +4900,48 @@ Sequential Criterion fixtures force the same name and parameter lengths
 as the local Go comparison, which keeps byte slices into the input.
 GHC 9.10.3 Core shows the cached singleton branch comparing the byte
 length and using `memcmp` for distinct pointers. It shares the typed
-value. The projected singleton remains above twice the Go time.
+value. At that checkpoint the projected singleton exceeded twice the Go
+time.
 
 | Fixture | Before | After | Go comparison |
 | --- | ---: | ---: | ---: |
 | Parse canonical 100-continue | 54 ns / 600 B | 5.9 ns / 48 B | 2.3–2.5 ns / 0 B |
 | Parse extension with quoted parameters | 421 ns / 4,296 B | 119 ns / 1,088 B | 183–188 ns / 272 B |
 | Render extension list | 102 ns / 968 B | 50 ns / 280 B | 52–56 ns / 112 B |
+
+### Matching the canonical continue field
+
+Typed decoding and transport recognition share a length-checked match for
+the exact spelling. GHC 9.10.3 Core checks the size before issuing an
+unaligned eight-byte load and a four-byte load. The match keeps the
+input alive and uses the cached typed result. Case variants, extensions,
+and repeated lines go through the existing list grammar.
+
+Two sequential before-and-after Criterion pairs ran the existing fixtures
+on ARM64 macOS. A separate manifest runner invocation measured 5.37 ns
+for the canonical field. The Go 1.26.10 comparison takes a slice of field
+lines, bypasses joining for one line, and otherwise combines the lines
+before parsing. The earlier Go comparison that starts with a single
+already combined string still takes about 2.34 ns. The allocation
+figures include the Criterion result for the Haskell scoring function.
+The projection's Core returns an unboxed score from the worker and
+boxes it at the Criterion boundary. Inlining the cached expectation
+retained this wrapper. Loading the comparison words from a string
+literal left additional loads in Core and was slower.
+
+| Fixture | Previous Hermes | Current Hermes | Go field-line comparison |
+| --- | ---: | ---: | ---: |
+| Parse canonical 100-continue | 6.06–6.21 ns / 48 B | 5.09–5.17 ns / 48 B | 2.95–3.19 ns / 0 B |
+| Parse extension with quoted parameters | 126–128 ns / 968 B | 119–121 ns / 968 B | 175–178 ns / 272 B |
+| Render extension list | 48.8–51.0 ns / 280 B | 50.3–51.1 ns / 280 B | 49.6–51.3 ns / 112 B |
+
+The independent grammar and rendering check passed all 22,550 cases,
+including every single-byte substitution of the canonical spelling and
+all 256 ASCII case variants. The Hermes suite checks slices at eight
+starting offsets. GHC 9.10.3 passed 1,147 Hermes, 485 aggregate HTTP,
+137 Connect, 108 HTTP/1, 126 HTTP/2, 18 WAI, and one TLS test. Hermes,
+aggregate HTTP, and Connect passed under both schedules. Minimal gRPC
+passed. Full gRPC passed 91 tests with one existing pending case.
 
 ## HTTP/2 Expect
 
@@ -3894,7 +5532,7 @@ The parse comparisons clone the projected tokens and use
 caller-provided storage in Go. Hermes also constructs its public
 parameter representation. The Go render fixture uses a fixed initial
 capacity. Hermes computes a checked bound from the supplied value.
-The render fixture still takes about 2.3× the Go time.
+At that checkpoint the render fixture took about 2.3× the Go time.
 
 GHC 9.10.3 passed 1,076 Hermes, 95 HTTP/1, 125 HTTP/2, and 329
 aggregate HTTP tests. Aggregate passed under both schedules. TLS
@@ -3945,6 +5583,44 @@ aggregate HTTP tests. Aggregate passed under both schedules. TLS smoke
 and minimal gRPC passed. Full gRPC passed 91 tests with one existing
 pending case.
 
+### Keep-Alive short values and numeric hints
+
+The shared parameter writer emits one- and two-byte tokens with direct
+byte stores. Empty values and values that require quoting use the same
+quoting rules, including escaping quotes and backslashes and recovering
+Latin-1 octets. The size pass combines the per-value bound with one
+checked addition when the bound fits an `Int`. The individual checks
+handle larger bounds.
+[HTTP Keep-Alive draft §2](https://datatracker.ietf.org/doc/html/draft-thomson-hybi-http-timeout-03#section-2),
+[RFC 9110 §5.6.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.4).
+
+The typed timeout and request-count accessors scan the original parameter
+list. Duplicate hints still take precedence over malformed values. The
+one-through-nine-digit path reads the compact value directly. Longer or
+other values use the existing bounded decimal parser.
+
+The existing 66,036-case Keep-Alive corpus still matches the typed parser,
+renderer, and builder. A separate model matched 26,523 compact and regular
+decimal inputs. Optimized Core shows bounded byte indexing and direct
+stores for short values. GHC 9.10.3 passed all 1,166 Hermes and 487 aggregate
+HTTP tests under both schedules, along with HTTP/1 (108), HTTP/2 (126),
+and Connect (137).
+
+Two alternating Criterion pairs on ARM64 macOS measured these paths.
+The Go 1.26.10 renderer starts with a fixed 64-byte capacity. Hermes
+checks the bound for the supplied values and allocates a pinned output
+buffer. The fixed-buffer experiment reduced common-case timing in the
+standalone harness and increased allocation from 439 to 568 bytes on the
+larger field that needed a second buffer.
+
+| Fixture | Previous Hermes | Current Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Render the combined field | 61.2–64.3 ns / 232 B | 52.4–54.0 ns / 232 B | 28.6–29.6 ns / 64 B |
+| Parse and read both numeric hints | 109.7–115.6 ns / 1,104 B | 89.6–90.4 ns / 832 B | 63.8–67.7 ns / 16 B |
+
+The benchmark driver measured 56.7 ns for rendering and 90.8 ns for
+parsing and reading both hints.
+
 ## Cache-Status forwarding and Proxy-Status ALPN
 
 Cache-Status retains forwarding-only parameters in wire order when
@@ -3984,6 +5660,190 @@ across 1,607 fixtures, with two permitted Base64 rejections. GHC
 HTTP tests. Aggregate passed under both schedules. TLS smoke and
 minimal gRPC passed. Full gRPC passed 91 tests with one existing case
 pending.
+
+### Authoring Proxy-Status
+
+The writer checks that each intermediary identifier is a Structured
+Fields Token or String with valid bytes. It checks parameter keys and
+the wire representation of each retained value after applying the
+last-value-wins rule. An invalid nonempty replacement preserves
+every existing field line. An explicitly empty list clears them.
+The standalone renderer produces no bytes for invalid values.
+[RFC 9209 §2](https://www.rfc-editor.org/rfc/rfc9209.html#section-2),
+[RFC 9651 §4.1](https://www.rfc-editor.org/rfc/rfc9651.html#section-4.1).
+
+The independent authoring model matched all 197,379 cases for identifier
+Tokens, identifier Strings, and parameter keys. The 69,890 ALPN cases,
+120 Cache-Status cases, and 1,607 HTTP Working Group fixtures also
+passed, with two permitted Base64 rejections. GHC 9.10.3 passed all
+1,152 Hermes, 485 aggregate HTTP, 137 Connect, 108 HTTP/1, 126 HTTP/2,
+and 18 WAI tests. Hermes, aggregate HTTP, and Connect passed under both
+schedules. TLS and minimal gRPC passed. Full gRPC passed 91 with one
+existing pending case.
+
+Optimized Core uses unboxed offsets to check compact keys and values.
+The renderer validates normalized parameters before building bytes.
+Two sequential Criterion runs on ARM64 macOS measured 210–221 ns and
+856 bytes per operation for the two-member renderer, compared with
+177 ns and 1,304 bytes for the previous unchecked renderer. The
+equivalent Go 1.26.10 httpsfv fixture measured 252–275 ns and 432 bytes.
+The benchmark driver measured 229 ns at the same allocation.
+Combining validation and builder construction in one recursive pass
+took 273–323 ns and allocated 1,776–1,896 bytes in the tested versions.
+
+### Writing typed Proxy-Status parameters
+
+`proxyInfoFromParameters` builds a member from a Token or String identifier,
+the five registered parameters, and optional extension entries. The
+constructor checks each supplied value and reserves the registered names,
+including when the corresponding typed field is absent. Extension keys keep
+their first position and last value. A valid ALPN identifier supplied as
+bytes becomes a Token when its ASCII spelling permits that form.
+[RFC 9209 §2.1](https://www.rfc-editor.org/rfc/rfc9209.html#section-2.1).
+
+The raw syntax API can still forward syntactically valid received entries.
+The typed projection checks registered parameter types and bounds when a
+caller interprets those entries. The new writer validates complete values
+before a member can be supplied to `setHeader`.
+
+The normalizer checks distinct keys in lists of five through eight entries
+and reuses the original list if that check succeeds. Duplicate keys and
+longer lists use the existing ordered replacement path. Optimized Core
+compares compact key bytes directly in the bounded check.
+
+Independent models matched 2,513 typed authoring cases, 169 parameter-list
+cases, and 69,890 receive-side ALPN spellings. GHC 9.10.3 passed 1,163
+Hermes and 486 aggregate HTTP tests under both schedules, plus HTTP/1
+(108), HTTP/2 (126), and Connect (137).
+
+Two sequential Criterion samples on ARM64 macOS measured the following.
+The Go 1.26.10 `httpsfv` authoring fixture constructs and marshals the
+same member and checks its status and ALPN bounds. The render-only
+fixture in both languages starts with two prepared members.
+
+| Fixture | Previous Hermes | Current Hermes | Go httpsfv |
+| --- | ---: | ---: | ---: |
+| Author and render a seven-parameter member | 729–741 ns / 4,383 B | 548–553 ns / 2,159 B | 632–633 ns / 1,312 B |
+| Render two prepared members | 225 ns / 856 B | 230–244 ns / 856 B | 265 ns / 432 B |
+
+The first authoring column is the implementation before the bounded
+distinct-key check. The read-and-project fixture went from 530–548 ns
+and 3,184 bytes to 518–523 ns and 3,064 bytes.
+The benchmark driver measured 539 ns for authoring and rendering,
+233 ns for rendering prepared values, and 498 ns for reading and
+projecting the typed fields.
+
+### Promoting Proxy-Status trailers
+
+`lookupProxyStatusWithTrailers` parses the two field sections and returns the
+effective typed chain. Trailer entries replace the first header member with
+the same case-sensitive identifier text across Token and String forms.
+The entire trailer member takes that position, including its parameters and
+identifier form. A later update to the same intermediary replaces the
+earlier update. Unmatched trailers leave the chain as it was.
+[RFC 9209 §2](https://www.rfc-editor.org/rfc/rfc9209.html#section-2).
+
+For one or two updates, the worker compares compact identifier bytes and
+shares the header suffix after each replacement. Larger batches index the
+last trailer per identifier in the shared hash table and consume each
+replacement once as they walk the header chain. An independent sequential
+model matched 116,281 combinations of identifiers, forms, and member
+orders, plus four batches with more than 2,000 header members.
+
+All 1,165 Hermes and 487 aggregate HTTP tests passed under both schedules.
+The new aggregate case promoted a trailer received over HTTP/1.1 and HTTP/2.
+The standalone HTTP/1 (108), HTTP/2 (126), and Connect (137) suites passed.
+
+On ARM64 macOS, the shared hash table reduced the 13-update fixture from
+1.11 µs and 7,656 bytes to 572–580 ns and 1,528 bytes. Scanning the header
+directly for two updates reduced that fixture from 97–103 ns and 464 bytes
+to 38–41 ns and 272 bytes. The Go 1.26.10 reference builds a native map
+for batches and copies its header slice when a match is found. Both timed
+implementations consume the same status codes.
+
+| Fixture | Hermes | Go httpsfv |
+| --- | ---: | ---: |
+| Apply one prepared update | 23 ns / 136 B | 38–39 ns / 64 B |
+| Apply two prepared updates | 38–41 ns / 272 B | 117–120 ns / 64 B |
+| Apply 13 prepared updates to 26 members | 572–580 ns / 1,528 B | 783–804 ns / 1,032 B |
+| Parse both field sections and promote one update | 396–418 ns / 3,392 B | 1,044–1,102 ns / 2,440 B |
+
+The benchmark driver measured 24 ns for one update, 38 ns for two updates,
+565 ns for the batch, and 410 ns for lookup across both field sections.
+
+### Authoring Cache-Status extensions
+
+The renderer uses the parser's classification of registered parameters.
+An extension with the same name as a typed parameter cannot introduce
+a second value for it. `fwd-status`, `stored`, and `collapsed` still
+round-trip as extension data on members that have no `fwd` reason.
+Other extension keys keep their first position and last value.
+[RFC 9211 §2](https://www.rfc-editor.org/rfc/rfc9211.html#section-2),
+[RFC 9651 §4.2.3.2](https://www.rfc-editor.org/rfc/rfc9651.html#section-4.2.3.2).
+
+The typed map regression starts with two field lines, attempts to
+overwrite registered values through the extension list, and checks the
+emitted field and the parsed result. It failed against the previous
+renderer, which emitted the conflicting parameters.
+
+The renderer now writes members with the shared separated builder.
+GHC 9.10.3 Core walks the original member list and threads the output
+buffer through it. The extension loop skips registered names before
+emitting a parameter. Two sequential Criterion pairs used prebuilt
+render inputs. The Go 1.26.10 `httpsfv` reference parsed the same field
+lines before timing and checked that it emitted the same bytes.
+
+| Fixture | Previous Hermes | Current Hermes | Go httpsfv |
+| --- | ---: | ---: | ---: |
+| Render one member with registered parameters | 57 ns / 608 B | 35 ns / 384 B | 80–81 ns / 80 B |
+| Render two members with extensions | 238–244 ns / 1,712 B | 191–193 ns / 1,200 B | 290–453 ns / 320 B |
+
+The package's `Cache-Status` decode fixture measured 521–536 ns after
+the change and kept its 3,176 bytes per operation. The status corpus
+passed 120 `Cache-Status` and 69,890 `Proxy-Status` cases. All 1,607
+HTTP Working Group vectors passed at their required outcomes, with
+two permitted Base64 rejections. All 1,149 Hermes tests passed in
+synchronous and parallel runs.
+
+### Validating Cache-Status and CDN-Cache-Control writes
+
+The checked `Cache-Status` renderer validates the identifier and forwarding
+reason as Structured Fields, checks the forwarding status and TTL bounds,
+and validates cache keys, details, and surviving extensions. If any member
+is invalid, `renderHeaderLines` emits no field and `setHeader` preserves the
+existing lines. An explicit empty list clears them. Forwarding-only
+parameters on hits still round-trip as extensions.
+[RFC 9211 §2](https://www.rfc-editor.org/rfc/rfc9211.html#section-2),
+[RFC 9651 §4.1](https://www.rfc-editor.org/rfc/rfc9651.html#section-4.1).
+
+An authored `CDN-Cache-Control` directive places its key in dictionary
+order before the renderer validates its value. A valid later occurrence can
+replace an invalid earlier value while keeping the first position. An
+invalid final entry leaves any existing lines in place.
+[RFC 9213 §2.1](https://www.rfc-editor.org/rfc/rfc9213.html#section-2.1).
+
+Both regressions failed before the change. An independent model matched
+1,509 authored cases, including byte-by-byte key and identifier checks,
+status and integer bounds, and ordered directive replacement. The
+existing corpus matched 120 Cache-Status and 69,890 Proxy-Status cases.
+GHC 9.10.3 passed 1,161 Hermes and 486 aggregate HTTP tests under both
+schedules, plus HTTP/1 (108), HTTP/2 (126), and Connect (137).
+
+Two sequential Criterion runs used GHC 9.10.3 on ARM64 macOS. The
+previous Cache-Status renderer used the same values in its standalone
+Criterion harness. The Go fixtures prepare Structured Fields values before
+timing using Go 1.26.10 for Cache-Status and 1.26.5 for CDN-Cache-Control.
+Core shows unboxed byte indexing for compact names and a direct call into
+the builder on the valid typed path.
+
+| Fixture | Previous Hermes | Current Hermes | Go httpsfv |
+| --- | ---: | ---: | ---: |
+| Render one Cache-Status member | 34–36 ns / 384 B | 44–46 ns / 384 B | 81–82 ns / 80 B |
+| Render two Cache-Status members with extensions | 193–194 ns / 1,200 B | 226–240 ns / 1,240 B | 292–293 ns / 320 B |
+| Render three CDN-Cache-Control directives | 83–90 ns / 920 B | 93–107 ns / 1,072 B | 110–112 ns / 104 B |
+
+The benchmark driver measured 43 ns and 233 ns for the two Cache-Status
+fixtures and 99 ns for CDN-Cache-Control.
 
 ## Set-Cookie extension attributes
 
@@ -5425,6 +7285,38 @@ fixtures. The matching Go 1.26.10 fixture clones the validated token.
 | Extension with surrounding whitespace | 40.3–42.4 ns / 624 B | 34.0–36.3 ns / 512 B | 17.4–18.3 ns / 16 B |
 | Bare extension | 26.1–26.3 ns / 424 B | 26.0–26.8 ns / 424 B | 17.1–19.3 ns / 16 B |
 
+### Validating the trimmed method token
+
+`mkMethodWithOWS` recognizes bare standard methods before looking
+for padding. The extension path finds the token bounds before validation
+and uses one slice for a padded input. This avoids a failed validation
+of the original field. Both paths validate one complete, case-sensitive
+method and retain an owned copy for extensions.
+[RFC 9110 §§5.6.3 and 9.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.3).
+
+Two sequential Criterion pairs on ARM64 macOS used the current header
+fixtures. The Go 1.26.10 comparison clones the validated token.
+
+| Fixture | Previous Hermes | Current Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Extension with surrounding whitespace | 34.8–35.5 ns / 520 B | 28.5–28.6 ns / 432 B | 15.2–15.5 ns / 16 B |
+| Bare extension | 25.6–26.1 ns / 432 B | 26.7–27.4 ns / 432 B | 14.9–15.2 ns / 16 B |
+| Bare standard method | 4.77–4.81 ns / 48 B | 4.78–4.89 ns / 48 B | |
+
+The benchmark driver measured 28.0 ns for the padded extension and
+27.7 ns for the bare extension. Both fixtures were within twice the
+Go time in the paired runs and the driver run.
+
+Optimized Core uses unboxed offsets in the two whitespace scans.
+The 1,048,765-slice corpus again matched the independent octet model
+and the previous header decoder. The new constructor also agreed
+with applying `mkMethod` to an independently trimmed slice, including
+the specific errors it reports. GHC 9.10.3 passed 1,154 Hermes, 486
+aggregate HTTP, 137 Connect, 108 HTTP/1, 126 HTTP/2, and 18 WAI tests.
+Hermes, aggregate HTTP, and Connect passed under both schedules.
+TLS and minimal gRPC passed. Full gRPC passed 91 with one existing
+pending case.
+
 ## X-UA-Compatible document modes and rendering
 
 The IE mode accessor matches ASCII letters directly in the compact
@@ -5482,7 +7374,7 @@ Two sequential before-and-after Criterion runs used the same
 checked-in fixtures. Go 1.26.10 used the previous projection and
 rendering references, with three fresh runs. All measured projection
 fixtures now take less than twice their Go time. The canonical render
-still exceeds that target.
+exceeded that target at this checkpoint.
 
 | Fixture | Previous Hermes | Current Hermes | Go |
 | --- | ---: | ---: | ---: |
@@ -5490,6 +7382,108 @@ still exceeds that target.
 | Project emulation | 12.9–14.5 ns / 48 B | 10.9–11.3 ns / 48 B | 9.0–9.1 ns / 0 B |
 | Project numbered mode | 9.5–10.5 ns / 48 B | 7.5–8.0 ns / 48 B | 6.3–6.4 ns / 0 B |
 | Render canonical edge | 5.8–6.0 ns / 32 B | 6.0–6.1 ns / 32 B | 2.4–2.6 ns / 0 B |
+
+### Comparing the mode tokens a word at a time
+
+The document-mode projection and typed renderer check the two- and
+four-byte lengths before loading the native words for `IE` and `edge`.
+The projection folds ASCII case. The renderer retains the authored
+spelling and returns the shared `IE=edge` field on an exact match.
+The mode and `Expect` matchers use GHC's target byte order. Optimized
+Core for ARM64 folds the mode constants into the comparisons.
+Unpacking the direct encoder's result had also made the caller rebuild
+the cached `ByteString`. Keeping the encoder opaque to worker/wrapper
+lets the optimized renderer return the shared object directly.
+[GHC 9.10 guide](https://downloads.haskell.org/~ghc/9.10.2.20250807/docs/users_guide/exts/pragmas.html#opaque-pragma).
+
+Three sequential comparisons used the existing Criterion and Go 1.26.10
+fixtures on ARM64 macOS. The canonical fixture still exceeds twice the
+Go time in these pairs. Two-directive rendering allocates 24 fewer
+bytes per call, with slightly higher measured time.
+
+| Fixture | Previous Hermes | Current Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Render canonical edge | 5.83–6.55 ns / 32 B | 5.27–5.58 ns / 32 B | 2.32–2.58 ns / 0 B |
+| Render two directives | 23.9–24.9 ns / 208 B | 24.8–25.7 ns / 184 B | 20.7–21.0 ns / 24 B |
+
+The final build with explicit target byte order measured 5.83 ns and
+24.64 ns in the same two Criterion fixtures, with the same allocations.
+The public tests check all 64 ASCII case variants, neighboring token
+lengths, and a different byte at each position. All 344,097 projection
+and rendering checks and 16,328 `X-UA-Compatible` wire checks passed.
+The shared corpus also passed all 30,122 `Refresh` cases. All 22,550
+`Expect` grammar and projection checks passed after the byte-order change.
+Hermes (1,148), aggregate HTTP (485), and Connect (137) passed under
+both schedules. HTTP/1 (108), HTTP/2 (126), WAI (18), TLS, and minimal
+gRPC passed. Full gRPC passed 91 tests with one existing pending case.
+
+### Checking the EmulateIE prefix
+
+The projection checks that nine bytes are available, matches `EmulateI`
+with one native word load, and checks the final `E` separately. Both
+comparisons fold ASCII case. The decimal suffix uses the same checked
+accumulator. GHC 9.10.3 Core places the length check before both reads.
+[Microsoft document modes](https://learn.microsoft.com/en-us/previous-versions/aa769237(v=vs.85)).
+
+Two sequential Criterion pairs on ARM64 macOS measured the emulated
+mode projection at 10.51–12.05 ns before and 6.71–6.78 ns after, with
+48 bytes allocated per call. The equivalent Go 1.26.10 projection
+took 9.35–9.42 ns and allocated zero bytes. The renderer experiment
+that combined the two lengths and the two word comparisons had mixed
+results, so the renderer uses the earlier checks. In two alternating
+before-and-after runs the canonical render measured 5.37–5.61 ns and
+32 bytes, compared with 2.44–2.57 ns and zero bytes in Go. This fixture
+still exceeds the twofold target.
+
+All 1,154 Hermes tests passed in synchronous and parallel runs. The
+projection and rendering comparison passed all 346,401 cases, including
+every Latin-1 character substituted at each of the nine prefix positions.
+
+### Checked X-UA-Compatible field writes
+
+The checked writer requires a nonempty HTTP token on each side of
+`=` in every directive. A rejected write leaves the previous field
+lines intact. Valid extension modes retain their bytes and order. The
+canonical `IE=edge` singleton returns the cached field directly. The
+structural renderer remains available for inspecting authored values.
+[Microsoft comma-delimited modes](https://learn.microsoft.com/en-us/previous-versions/aa769237(v=vs.85)),
+[RFC 9110 §5.6.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.2).
+
+The regression failed on the earlier writer, which emitted `=edge`.
+An independent model matched 197,506 checks across both token positions,
+later list members, empty and long inputs, and one- and two-character
+Latin-1 combinations. It checked exact structural rendering, typed
+round-trip for valid values, and preservation of the previous field
+for invalid values. GHC 9.10.3 passed all 1,170 Hermes and 487 aggregate
+HTTP tests under both schedules, plus HTTP/1 (108), HTTP/2 (126), and
+Connect (137).
+
+The writer validates and sizes each directive in one pass. It allocates
+one output buffer after the complete list passes validation. Optimized
+Core keeps the size accumulator unboxed and checks the compact token
+lengths before the canonical word loads. Inlining the output writer
+preserved the earlier renderer's allocation for two directives.
+
+Two alternating Criterion pairs on ARM64 macOS measured the checked
+field-line output and the structural field value separately. The
+Go 1.26.10 checked reference validates the same directives and returns
+an owned one-element slice.
+
+| Fixture | Previous Hermes | Current Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Checked canonical field line | 9.3–10.1 ns / 96 B | 6.3–6.9 ns / 32 B | 10.9–12.2 ns / 16 B |
+| Checked field line with two directives | 27.4–27.6 ns / 248 B | 49.6–52.2 ns / 304 B | 34.3–34.5 ns / 40 B |
+| Structural canonical field value | 6.0–6.1 ns / 32 B | 5.4–5.6 ns / 32 B | 2.4–2.6 ns / 0 B |
+| Structural field value with two directives | 24.4–24.5 ns / 184 B | 24.6–25.2 ns / 184 B | 19.6–19.8 ns / 24 B |
+
+The earlier checked entry point emitted the field without validating
+tokens. The benchmark driver measured 7.1 ns for the checked singleton
+and 51.2 ns for the checked two-directive field lines. It measured 6.0 ns
+and 29.6 ns for the corresponding structural values. The single
+structural result still exceeds twice the Go time.
+For comparison, returning a prebuilt field value through the Criterion
+fixture took 4.0–4.4 ns. The prebuilt field-line result took 5.2–5.3 ns.
+The Go prebuilt controls took 1.6–1.7 ns.
 
 ## Connection-specific fields in the HTTP cache
 
@@ -5929,6 +7923,56 @@ WAI, 95 HTTP/1, and 125 HTTP/2 tests. Aggregate HTTP and Connect passed
 under both schedules. TLS and minimal gRPC passed. Full gRPC passed 91
 tests with one existing pending case.
 
+### Authoring signature labels
+
+Signature, Signature-Input, and Accept-Signature check the authored
+dictionary labels against the Structured Fields key grammar before
+building a field. Reading and writing share the duplicate check and
+retain entry order. A typed write with an invalid or repeated label
+preserves the existing field. The builder functions emit no bytes for
+those values.
+[RFC 9421 §§4–5.1](https://www.rfc-editor.org/rfc/rfc9421.html#section-4),
+[RFC 9651 §3.2](https://www.rfc-editor.org/rfc/rfc9651.html#section-3.2).
+
+The regression failed on the baseline. It covers duplicate pairs,
+non-adjacent duplicates, invalid characters and empty labels, and
+round-trips valid keys in their authored order through the typed map.
+All 1,150 Hermes tests passed in synchronous and parallel runs.
+In one sequential Criterion comparison on GHC 9.10.3, the existing
+Signature-Input renderer fixture went from 194 to 177 ns and from
+1,040 to 912 bytes allocated per operation.
+
+### Authoring signature components and metadata
+
+Signature-Input and Accept-Signature check component identifiers,
+parameter keys, and bare item values before writing. The reader and
+writer share the registered parameter rules, including the required
+String name for `@query-param` and the different meanings of
+`created` and `expires` in the two fields. Each parameter keeps its
+first position and last value. Component equivalence uses those
+retained parameters and treats an explicit true and a bare flag as
+the same value. An invalid entry preserves all existing field lines.
+[RFC 9421 §§2–2.3](https://www.rfc-editor.org/rfc/rfc9421.html#section-2)
+and [§5.1](https://www.rfc-editor.org/rfc/rfc9421.html#section-5.1).
+
+The regression failed before validation was added. Independent checks
+matched acceptance and canonical output for 50,000 authored entries and
+30,000 wire inputs. GHC 9.10.3 passed all 1,153 Hermes, 485 aggregate HTTP,
+137 Connect, 108 HTTP/1, 126 HTTP/2, and 18 WAI tests. Hermes, aggregate
+HTTP, and Connect passed under both schedules. TLS and minimal gRPC
+passed. Full gRPC passed 91 with one existing pending case.
+
+Optimized Core scans compact names and parameter values with unboxed
+byte offsets. The common parameter-free component reaches the writer
+without entering the parameter checker. Two sequential Criterion pairs
+on ARM64 macOS measured the Signature-Input renderer at 325–332 ns and
+1,008 B, up from 172 ns and 912 B before checking component and metadata
+values. The Go 1.26.10 httpsfv serializer took 296–315 ns and 552 B for
+the same Structured Fields dictionary. Hermes also checks the RFC 9421
+component and metadata rules. The benchmark driver measured 338 ns
+at the same allocation. Parsing allocated 1,992 B for
+Signature-Input and 1,888 B for Accept-Signature in both versions.
+
 ## Pairing message signature fields
 
 `lookupMessageSignatures` and `lookupMessageSignaturesWithTrailers`
@@ -6086,3 +8130,1030 @@ fixtures allocate the same amount as the absent-field selection.
 The shared selection scan retained the media fixtures' allocation
 counts. In the repeat run, media selection took 14.2 ns for the first
 exact offer and 104 ns for the parameterized offers.
+
+## Selecting a charset with Accept-Charset
+
+`acceptedCharsetQuality` compares concrete charset names using ASCII
+case folding. An explicit entry takes precedence over the wildcard,
+including a zero-weight exclusion. Wire order breaks ties between
+duplicate names or wildcards. An absent field accepts every offer.
+An empty field or unmatched name without a wildcard has quality zero.
+`preferredCharset` picks the highest positive quality and uses offer
+order to break ties.
+[RFC 9110 §8.3.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.3.2),
+[RFC 9110 §12.5.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.2),
+and [RFC 7231 §5.3.3](https://www.rfc-editor.org/rfc/rfc7231.html#section-5.3.3).
+
+An independent model agreed on 10,017 requests and 160,272 charset
+qualities. The cases include repeated lines, mixed-case names, exact
+name boundaries, duplicate entries, and explicit exclusions.
+GHC 9.10.3 passed 1,126 Hermes, 471 aggregate HTTP, 137 Connect,
+18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and Connect passed under
+both schedules. TLS and minimal gRPC passed. Full gRPC passed 91
+tests with one existing pending case.
+
+Criterion selects from parsed preferences and prebuilt offers. The Go
+1.26.10 reference applies the same ranking to slices of prebuilt entries
+and returns a pointer into the offers.
+
+| Selection fixture | Hermes | Go |
+| --- | ---: | ---: |
+| Absent field | 3.28 ns / 48 B | 1.66–1.67 ns / 0 B |
+| First offered charset matches exactly | 8.66 ns / 48 B | 5.06–5.17 ns / 0 B |
+| Named weights, wildcard, and exclusion | 51.3 ns / 48 B | 27.4–27.6 ns / 0 B |
+
+Hoisting the offered byte length out of the scan and comparing folded
+bytes only when their original values differ reduced the mixed fixture
+from 78.5 ns and 208 B to 51.3 ns and 48 B. GHC Core holds lengths and
+weights unboxed and follows the existing linked lists of offers and
+parsed entries. Go walks contiguous slices. The media-selection retest
+took 12.4 ns for the exact fixture and 103 ns for the parameterized
+fixture, with the previous allocation counts of 48 B and 96 B.
+
+## Authoring Accept qualities in the HTTP client
+
+The HTTP client uses the Hermes quality renderer when it populates
+the request's `Accept` field. A preference of 0.9995 is now sent as
+`q=1`. The previous renderer emitted `q=0.1` when rounding carried
+into a fourth digit. The shared renderer uses at most three
+fractional digits and treats NaN as zero. The client smart constructor
+applies the same normalization for language, charset, and coding
+preferences. [RFC 9110 §12.4.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.4.2).
+
+A request-capture test verifies the value handed to the transport.
+An independent model matched 9,008 authored weights, including values
+on both sides of every half-thousandth boundary, NaN, and infinities.
+GHC 9.10.3 passed 1,126 Hermes, 474 aggregate HTTP, 137 Connect,
+18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and Connect passed
+under both schedules. TLS and minimal gRPC passed. Full gRPC passed
+91 tests with one existing pending case.
+
+The client writes multiple offers into one builder. Token parameters
+and quoted values that need no escapes copy their original bytes.
+Values that need escaping still use the Hermes quoted-string renderer.
+An independent model agreed on 66,305 parameter values, including
+every one- and two-octet combination. GHC Core shows direct byte
+copies on the parameter fast paths, unboxed quality rounding, and a
+separate concatenation path for a single unweighted bare type.
+
+| Criterion fixture | Previous client | Current client | Go reference |
+| --- | ---: | ---: | ---: |
+| Single unweighted type | 31.6 ns / 480 B | 24.1 ns / 200 B | 15.7–15.8 ns / 16 B |
+| Four offers with weights and parameters | 374 ns / 3,759 B | 148 ns / 1,160 B | 118–119 ns / 240 B |
+
+The Go 1.26.10 reference writes the same prebuilt offers through a
+`strings.Builder` and checks the resulting header bytes. The
+client uses the shared pinned byte-array builder for the weighted
+field and returns the final strict ByteString.
+
+## Dispatching HTTP response decoders by media parameters
+
+The HTTP client's decoder alternatives use the parsed `Content-Type`
+to check every media-range parameter required by the first decoder.
+Extra response parameters are allowed. Parameter names and charset
+values compare case-insensitively, and other values compare by their
+decoded bytes. The first occurrence of a response parameter supplies
+its value. The second decoder is the fallback when the first has
+no matching range. [RFC 9110 §§8.3 and 12.5.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.3).
+
+For compatibility with the shipped UTF-8 decoders, a JSON or plain-text
+response with no charset can satisfy a UTF-8 requirement. An explicit
+charset is checked against the range. Transport tests exercise
+different profiles of the same type, quoted parameters, legacy
+responses with an omitted charset, and explicit charset mismatches.
+
+An independent model agreed on 25,576 selections, including
+wildcards, duplicate parameters, mixed-case tokens, and opaque
+quoted values. GHC 9.10.3 passed 1,126 Hermes, 476 aggregate HTTP,
+137 Connect, 18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and
+Connect passed under both schedules. TLS and minimal gRPC passed.
+Full gRPC passed 91 tests with one existing pending case.
+
+GHC Core shows that the parameter search passes the value or absence
+through an unboxed result. The matcher scans byte strings only when
+their exact spelling differs. The prepared dispatch fixtures allocate
+the same amount with or without parameters. The field fixtures include
+parsing before dispatch. The Go 1.26.10 comparison uses prebuilt
+decoders for dispatch and `mime.ParseMediaType` for field input.
+
+| Criterion fixture | HTTP client | Go reference |
+| --- | ---: | ---: |
+| Prepared bare type | 9.1 ns / 32 B | 4.1–4.5 ns / 0 B |
+| Prepared quoted profile and charset | 52.9 ns / 32 B | 23.9–24.1 ns / 0 B |
+| Prepared response with a different profile | 29.3 ns / 32 B | 10.2–10.6 ns / 0 B |
+| Parse bare field and dispatch | 120 ns / 944 B | 45.4–45.7 ns / 48 B |
+| Parse quoted field and dispatch | 300 ns / 2,296 B | 210–212 ns / 344 B |
+
+The [projection follow-up](#projecting-content-type-into-the-http-client)
+updates the two field measurements. The [comparison follow-up](#comparing-content-type-names-and-parameters)
+updates the prepared dispatch measurements.
+
+## Projecting Content-Type into the HTTP client
+
+Hermes validates both media names through the shared scanner. The
+HTTP client projects their byte slices directly, and normalizes only
+names with uppercase ASCII. Lowercase names can share the field's
+input buffer. The shared parameter parser decodes quoted values and
+preserves opaque bytes.
+[RFC 9110 §8.3.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.3.1).
+
+Successful client parses validate the entire field in one pass
+through the parser driver. The error path recovers the original
+diagnostics. Hermes's typed singleton lookup uses the shared
+complete-field driver and rejects repeated lines.
+
+The previous client and the new projection agreed on decoded values
+and error messages for 10,525 inputs. The corpus uses bounded slices
+and covers all octets in media names and parameter values, as well as
+mixed case, field whitespace, wildcards, and trailing input. GHC
+9.10.3 passed 1,126 Hermes, 478 aggregate HTTP, 137 Connect, 18 WAI,
+95 HTTP/1, and 125 HTTP/2 tests. HTTP and Connect passed under both
+schedules. TLS and minimal gRPC passed. Full gRPC passed 91 tests
+with one existing pending case.
+
+GHC Core constructs each name slice from the start address, byte
+length, and input buffer reference. The parser returns the
+projection directly on success.
+
+| Criterion fixture | Previous | Current | Go reference |
+| --- | ---: | ---: | ---: |
+| Client parse bare field and dispatch | 116 ns / 944 B | 76 ns / 512 B | 43.8–44.4 ns / 48 B |
+| Client parse quoted field and dispatch | 307 ns / 2,296 B | 252 ns / 1,832 B | 207–212 ns / 344 B |
+| Hermes typed parse of a multipart field | 121 ns / 1,024 B | 103 ns / 824 B | |
+
+Both client parse-and-dispatch fixtures are within twofold of the
+Go 1.26.10 reference, which uses `mime.ParseMediaType`. The client
+projects ordered parameters and retains their decoded bytes in its
+public media type. The Go fixture uses the parsed parameter map to
+select a decoder.
+
+## Comparing Content-Type names and parameters
+
+The HTTP client compares equal-length byte strings of up to 16 bytes
+with bounded unaligned loads. Each load fits within the slice. The
+comparator evaluates the result while both backing buffers are alive.
+Longer values use the standard byte-string comparison. Parameter
+names and charset values use ASCII folding when their bytes differ.
+
+The decoder suite checks equal and unequal slices across each load
+width. A guard-page probe passed 8,836 comparisons through 64 bytes,
+including empty slices at both ends and a distinct byte at every
+position. The independent model agreed on 25,576 decoder selections.
+GHC 9.10.3 passed 1,126 Hermes, 479 aggregate HTTP, 137 Connect,
+18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and Connect passed under
+both schedules. TLS and minimal gRPC passed. Full gRPC passed 91
+tests with one existing pending case. Two HTTP/2 stress cases timed
+out on the first concurrent run, then passed in isolation and on
+the full concurrent retry.
+
+Optimized Core checks length and address equality before entering
+the word-load routine and keeps both buffers alive until it returns.
+The measurements use the same prepared decoders and field fixtures
+as the earlier dispatch benchmarks.
+
+| Criterion fixture | Previous | Current | Go reference |
+| --- | ---: | ---: | ---: |
+| Prepared bare type | 10.1 ns / 32 B | 9.1 ns / 32 B | 4.0 ns / 0 B |
+| Prepared quoted profile and charset | 49.9 ns / 32 B | 29.5 ns / 32 B | 23.2–24.1 ns / 0 B |
+| Prepared response with a different profile | 30.1 ns / 32 B | 20.0 ns / 32 B | 10.0–10.2 ns / 0 B |
+| Parse bare field and dispatch | 73.8 ns / 512 B | 64.3 ns / 512 B | 45.9–46.6 ns / 48 B |
+| Parse quoted field and dispatch | 258 ns / 1,832 B | 246 ns / 1,832 B | 220–233 ns / 344 B |
+
+At that checkpoint, prepared bare dispatch exceeded the twofold
+target. [Prepared bare Content-Type dispatch](#prepared-bare-content-type-dispatch)
+updates the comparison.
+
+### Prepared bare Content-Type dispatch
+
+A decoder alternative with one concrete media type and no required
+parameters prepares the exact-name matcher when the alternative is
+built. Response dispatch compares the type and subtype bytes and
+invokes the selected decoder. Optimized Core inspects the accepted
+range before building the hot closure. That closure checks the two
+names and passes the status, media type, and body to the chosen
+decoder. The fixtures cover mismatch on either name, mixed-case
+wire names, and a response with extra parameters.
+[RFC 9110 §§8.3.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.3.1)
+and [12.5.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.1).
+
+The independent model agreed on all 25,576 decoder selections.
+GHC 9.10.3 passed 1,153 Hermes, 486 aggregate HTTP, 137 Connect, 108
+HTTP/1, 126 HTTP/2, and 18 WAI tests. Hermes, aggregate HTTP, and Connect
+passed under both schedules. TLS and minimal gRPC passed. Full gRPC
+passed 91 with one existing pending case.
+
+Three paired Criterion runs on ARM64 macOS measured the fixtures
+below. Go 1.26.10 uses a decoder returning an integer. The client
+calls decoders with the status and body and consumes their typed
+result. Allocation for each Hermes fixture was the same in both
+versions.
+
+| Criterion fixture | Previous Hermes | Current Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Prepared bare type | 9.22–9.87 ns / 32 B | 7.57–8.08 ns / 32 B | 4.25–4.39 ns / 0 B |
+| Prepared quoted profile and charset | 30.8–33.2 ns / 32 B | 31.2–32.4 ns / 32 B | 24.3–24.6 ns / 0 B |
+| Prepared response with a different profile | 20.3–20.5 ns / 32 B | 20.3–21.8 ns / 32 B | 11.0–11.2 ns / 0 B |
+| Parse bare field and dispatch | 70.7–77.4 ns / 512 B | 69.1–74.7 ns / 512 B | 45.8–46.0 ns / 48 B |
+| Parse quoted field and dispatch | 237–254 ns / 1,832 B | 251–259 ns / 1,832 B | 209–211 ns / 344 B |
+
+The benchmark driver measured 7.62 ns for prepared bare dispatch.
+All three paired bare measurements were within twice the Go time.
+
+## Resolving byte ranges and If-Range conditions
+
+`resolveByteRange` resolves a parsed or authored byte range against a
+known Word64 length and returns its offset and count. The operation
+clips a closed end or an oversized suffix, rejects invalid or
+unsatisfiable spans, and represents a nonzero suffix of an empty
+representation as a zero-byte span. The HTTP client projects its
+existing range constructors through the same calculation.
+[RFC 9110 §14.1.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.1.2).
+
+`ifRangeMatches` compares opaque entity-tag bytes using strong
+equality. It compares dates exactly and takes the representation's
+Last-Modified date only when the caller can establish that it is a
+strong validator. An unmatched condition means the recipient ignores
+Range. [RFC 9110 §13.1.5](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.5).
+
+An independent interval model agreed on 20,652 typed Range requests,
+including zero-length content, reversed bounds, and Word64 limits.
+GHC 9.10.3 passed 1,129 Hermes, 480 aggregate HTTP, 137 Connect,
+18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and Connect passed under
+both schedules. TLS and minimal gRPC passed. Full gRPC passed
+91 tests with one existing pending case.
+
+Optimized GHC Core uses unboxed Word64 arithmetic and checks the
+bounds before doing any subtraction. The consumed benchmarks
+aggregate the resolved offsets and lengths or count matching
+validators. The 64-element fixtures allocate the same 48 bytes as
+one consumed range. The Go 1.26.10 reference uses prebuilt slices,
+the same interval rules, and byte equality for strong tags.
+
+| Criterion fixture | Hermes | Go reference |
+| --- | ---: | ---: |
+| Single consumed range | 3.7–4.1 ns / 48 B | 1.53–1.60 ns / 0 B |
+| 64 mixed ranges | 127 ns / 48 B | 86–89 ns / 0 B |
+| Single matching strong tag | 6.7 ns / 32 B | 1.55 ns / 0 B |
+| 64 mixed tag validators | 196 ns / 48 B | 79–80 ns / 0 B |
+
+The single-operation fixtures and mixed tag fixture exceeded the
+twofold target at that checkpoint.
+
+### Comparing opaque validators
+
+Strong and weak comparison share a byte matcher. Equal-sized tags of
+8–16 bytes use two bounded, native-endian word comparisons. The reads
+overlap for intermediate lengths and cover every byte. Other nonempty
+lengths use the general byte-array comparison. Strong comparison still
+requires two strong tags, and `If-Range` dates require an exact strong
+date. [RFC 9110 §8.8.3.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.8.3.2).
+
+The Core projection with a selected tag and no date inlines the
+`If-Range` matcher. It checks tag strength and byte-array length before
+the loads. The mixed fixture's loop accumulates an unboxed count, and
+the single match returns a shared Boolean. Two sequential Criterion
+pairs on ARM64 macOS used the existing fixtures. The manifest runner
+measured 5.16 ns for the single match and 156 ns for the mixed batch.
+
+| Criterion fixture | Previous Hermes | Current Hermes | Go 1.26.10 |
+| --- | ---: | ---: | ---: |
+| Single matching strong tag | 6.53–6.91 ns / 32 B | 5.32–5.42 ns / 32 B | 1.62–1.63 ns / 0 B |
+| 64 mixed tag validators | 200–202 ns / 48 B | 146–153 ns / 48 B | 82–83 ns / 0 B |
+
+The mixed fixture is within twofold. A separate Go comparison with
+typed tag-or-date dispatch and optional selected validators measured
+2.33–2.41 ns for a single strong match. The Hermes singleton still
+exceeds twice that time. For the single-range fixture, Core eliminates
+the `Maybe` and `ResolvedByteRange` constructors where the benchmark
+consumes them, leaving one boxed score at the Criterion boundary. The
+single range resolver remains above the twofold target.
+
+The regression checks strong and weak comparison at 38 lengths,
+including empty tags, unequal lengths, and a changed opaque octet at
+each position. Hermes (1,148), aggregate HTTP (485), and Connect (137)
+passed under both schedules. HTTP/1 (108), HTTP/2 (126), WAI (18), TLS,
+and minimal gRPC passed. Full gRPC passed 91 tests with one existing
+pending case.
+
+### Range endpoints and strong validator matches
+
+The byte-range resolver computes the clipped exclusive end before
+checking the start and subtracting. A requested inclusive end of
+`maxBound` is clipped before incrementing, preventing overflow.
+For equal-sized 8–16 byte tags, the validator combines the differences
+from two bounded loads per tag. The 16-byte path uses fixed offsets at zero
+and eight. Optimized Core consumes resolved ranges without constructing
+the intermediate `Maybe` or range record, and compares tag words
+directly from their byte arrays.
+[RFC 9110 §14.1.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.1.2)
+and [§8.8.3.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.8.3.2).
+
+Two sequential Criterion comparisons on ARM64 macOS and the Go
+1.26.10 references gave these results. The Go validator cases use
+tag-or-date dispatch with an optional selected validator, including
+in the mixed batch.
+
+| Criterion fixture | Previous Hermes | Current Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Single closed range | 4.19–4.26 ns / 48 B | 4.17–4.26 ns / 48 B | 1.64–1.65 ns / 0 B |
+| 64 mixed ranges | 131–136 ns / 48 B | 127–129 ns / 48 B | 91–92 ns / 0 B |
+| Single matching strong tag | 4.82–5.02 ns / 32 B | 4.94–5.23 ns / 32 B | 2.39–2.40 ns / 0 B |
+| 64 mixed tag validators | 145–157 ns / 48 B | 125–129 ns / 48 B | 133–136 ns / 0 B |
+
+The single-call fixtures remain above the twofold target. Unpacking
+the range's optional endpoint and the tagged If-Range payload made
+the measured paths slower. The range parser also allocated more with
+the unpacked endpoint. The benchmark driver measured 4.50 ns for a
+single closed range, 128 ns for the mixed range batch, 5.42 ns for the
+single strong match, and 122 ns for the mixed validator batch.
+
+The independent comparisons agreed on 20,652 range requests and
+14,154 opaque tag pairs. GHC 9.10.3 passed 1,153 Hermes, 485 aggregate
+HTTP, 137 Connect, 108 HTTP/1, 126 HTTP/2, and 18 WAI tests. Hermes,
+aggregate HTTP, and Connect passed under both schedules. TLS and
+minimal gRPC passed. Full gRPC passed 91 with one existing pending case.
+
+### Compact byte-range endpoints
+
+Closed byte ranges now store two unpacked `Word64` endpoints. Open-ended
+and suffix ranges each store one. `ByteRangeInt first end` remains a
+bundled constructor pattern, with its existing matching and `Show`
+forms. Constructing a closed range now evaluates its endpoint to store
+the number directly. Parsing and rendering use the internal constructors,
+and the parser passes a present endpoint directly to the closed-range
+continuation. Simplified Core reads both endpoint words directly and
+returns an unboxed score before Criterion boxes it. The range still
+clips the inclusive endpoint before adding one.
+[RFC 9110 §14.1.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.1.2).
+
+The final sequential Criterion pair and the Go 1.26.10 reference ran
+on ARM64 macOS. Allocation includes the Criterion result. The single
+closed-range resolver remains above twice the Go timing.
+
+| Fixture | Previous Hermes | Current Hermes | Go |
+| --- | ---: | ---: | ---: |
+| Parse one closed range | 45.5 ns / 544 B | 44.6 ns / 528 B | |
+| Parse three range forms | 91.8 ns / 904 B | 89.1 ns / 880 B | |
+| Resolve one closed range | 4.30 ns / 48 B | 3.81 ns / 48 B | 1.66–1.69 ns / 0 B |
+| Resolve 64 mixed ranges | 126 ns / 48 B | 126 ns / 48 B | 92.8–94.5 ns / 0 B |
+
+Two If-Range comparison experiments were dropped. Combining the tag
+length checks reduced the single-call timing in one run and increased
+the mixed batch from about 127 ns to 131–134 ns. Storing the opaque tag
+directly in If-Range changed the single strong match from about 5.0 ns
+to 4.9–5.0 ns and increased the mixed batch to 169–170 ns.
+The retained matcher measured 4.91 ns against Go's 2.38–2.39 ns for a
+single strong match and 126 ns against 135–141 ns for the mixed batch.
+The manifest run measured 4.04 ns for single-range resolution and
+5.11 ns for the single strong match. Both remain above the twofold bar.
+
+All 1,155 Hermes tests and 486 aggregate HTTP tests passed under both
+schedules. The independent models agreed on 20,652 typed range requests
+and 14,154 opaque tag pairs. An external module compiled with exhaustive
+matching enabled and verified the bundled imports and `Show` output.
+
+### Checked writes for range fields
+
+The typed writers for Range, Content-Range, and If-Range validate the
+field value before materializing a field line. A rejected value leaves
+the current field intact when written with `setHeader`. Range requires
+ordered endpoints and validates the unit and opaque members of an
+extension range. Content-Range requires ordered endpoints and a known
+complete length for the unsatisfied form. When a satisfied form has a
+known complete length, the last endpoint must be smaller. If-Range
+requires a strong entity-tag with valid opaque bytes or a date within
+the HTTP-date codec's supported bounds. The request caller supplies
+the accompanying Range and establishes the strength of a date validator.
+The structural builders remain available for inspecting received values.
+[RFC 9110 §13.1.5](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.5),
+[§14.1.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.1.1),
+and [§14.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4).
+
+The independent writer model matched 1,230 cases across opaque octets,
+unit characters, endpoint and complete-length boundaries, and dates. It
+checked both rejection without mutation and typed lookup after a valid
+write. GHC 9.10.3 passed all 1,169 Hermes and 487 aggregate HTTP tests
+under synchronous and parallel scheduling. The HTTP/1 (108), HTTP/2
+(126), and Connect (137) loopback suites also passed.
+
+Two sequential Criterion runs on ARM64 macOS measured complete typed
+field writes. The Go 1.26.10 reference validates the same prepared values
+and returns an allocated byte slice. The Hermes fixtures force the field
+line and its result wrapper. The allocations below include that wrapper.
+
+| Fixture | Hermes | Go |
+| --- | ---: | ---: |
+| Write a closed and a suffix Range | 37.3 ns / 464 B | 22.6–25.8 ns / 32 B |
+| Write a satisfied Content-Range | 39.4–39.6 ns / 472 B | 19.0 ns / 32 B |
+| Write a strong If-Range tag | 35.7–36.6 ns / 464 B | 13.6–13.7 ns / 24 B |
+| Resolve one closed range | 3.78–3.89 ns / 48 B | 1.64 ns / 0 B |
+| Resolve 64 mixed ranges | 115–124 ns / 48 B | 90.3–93.2 ns / 0 B |
+| Match one strong If-Range tag | 4.96–5.03 ns / 32 B | 2.36–2.60 ns / 0 B |
+
+The checked Range writer and mixed resolver met the twofold timing target.
+At this checkpoint, the checked Content-Range and If-Range writers and
+the single closed-range resolver exceeded it. The single validator
+comparison straddled the target. Three alternate resolver expressions
+gave no consistent benefit across single and mixed fixtures. Optimized
+Core compares the closed endpoints as unboxed words before invoking the
+writer.
+The benchmark driver measured 37.6 ns for the checked Range writer,
+40.1 ns for Content-Range, and 38.3 ns for If-Range. It measured 3.83 ns
+for single-range resolution and 4.93 ns for the single strong-tag match.
+
+#### Direct rendering for checked If-Range and Content-Range
+
+The typed If-Range writer validates complete eight-octet groups, then
+scans any remaining bytes with the shared entity-tag predicate. It
+allocates the wire length and copies the opaque octets between two
+quotes. The Content-Range writer shares its validation with the checked
+builder, writes the unit and delimiters to a bounded buffer, and uses the
+same decimal primitive as the structural builder. Optimized Core shows
+bounded word loads, direct byte stores and array copies. The date and
+structural builder paths retain their previous rendering.
+
+Two alternating Criterion pairs measured the checked field-line result
+on ARM64 macOS. The Go 1.26.10 reference validates the same values and
+returns one allocated byte slice.
+
+| Fixture | Previous Hermes | Direct writer | Go |
+| --- | ---: | ---: | ---: |
+| Write a strong If-Range tag | 37.2–37.5 ns / 464 B | 20.1–20.3 ns / 248 B | 13.7–16.7 ns / 24 B |
+| Write a satisfied Content-Range | 38.6–39.3 ns / 472 B | 28.5–28.7 ns / 328 B | 19.5–19.6 ns / 32 B |
+
+The benchmark driver measured 20.1 ns for the If-Range writer and
+28.7 ns for Content-Range. Both took under twice the Go time in all runs.
+
+The original 1,230-case checked authoring corpus still matches. An
+independent check matched 554,034 entity-tag cases across compact
+lengths and every replacement octet at each position. Another 728
+Content-Range cases matched the builder and typed lookup across decimal
+width boundaries, optional totals and extension unit sizes. All 1,169
+Hermes and 487 aggregate HTTP tests passed in both schedules. HTTP/1
+(108), HTTP/2 (126), and Connect (137) loopback suites passed.
+
+## Freshening a cache entry from a caller's 304
+
+When a caller's condition matches the selected stored 200 and cache
+policy requires forwarding the request, the cache sends the caller's
+field lines and returns the origin response. A 304 can also refresh
+the selected snapshot if its validators identify that representation.
+A strong ETag requires strong equality. A weak ETag uses weak equality.
+With no ETag in the 304, an exact Last-Modified date can identify the
+stored response. A validator-free 304 can refresh the sole selected
+entry when it has neither validator.
+[RFC 9111 §§4.3.2 and 4.3.4](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.3.4).
+
+The cache uses the same metadata merge and conditional publication as
+its own revalidation. It keeps the stored payload and its byte metadata,
+and checks the selected snapshot again before storing an update. Tests
+cover repeated caller validators, strong and weak response tags,
+Last-Modified, missing validators, different variants, malformed or
+connection-scoped fields, and an in-flight 304 that arrives after a
+replacement was stored.
+
+GHC 9.10.3 passed 69 cache, 482 aggregate HTTP, 1,129 Hermes,
+137 Connect, 18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. HTTP and
+Connect passed under both schedules after an isolated retry of
+HTTP/2 stress timeouts and a full concurrent retry. TLS and minimal
+gRPC passed. Full gRPC passed 91 tests with one existing pending case.
+
+The in-process Criterion fixture stores a decoded gzip response and
+then receives a matching 304 from a stub transport. The caller path
+took 3.31 µs and allocated 51,228 B. The cache-owned path, which
+replays the stored body for the current request, took 3.49 µs and
+allocated 53,433 B.
+
+## HTTP/2 header stress fixture
+
+On GHC 9.10.3 on arm64 macOS, two of ten concurrent aggregate
+suite runs timed out in the HPACK stress test. A stage trace caught
+the stall at the test listener's numeric `getAddrInfo` call, before
+bind or a client connection. The fixture binds IPv4 loopback
+directly on an ephemeral port and brackets the listener thread.
+
+The HPACK fixture checks the exact response status, request ID,
+and per-stream custom header returned for each of 15 streams.
+The server echoes the header decoded from the request, so the
+assertion exercises both header directions.
+
+All 30 repeat runs passed the 482-test aggregate suite with four
+capabilities and the same three-second per-test timeout as the baseline.
+The standard verification also passed 1,129 Hermes, 137 Connect,
+18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. Aggregate HTTP and Connect
+passed under both schedules. TLS and minimal gRPC passed. Full gRPC
+passed 91 tests with one existing pending case.
+
+## Buffered HTTP/1.1 response trailers
+
+A nonempty typed `Trailer` declaration selects chunked framing for
+HTTP/1.1 empty, buffered, and streaming responses that can carry content.
+The server combines repeated declaration lines, removes `Content-Length`,
+and preserves any preceding transfer codings when adding the final
+`chunked` coding. The buffered path sends the head and first chunk
+together, then evaluates the trailer callback. HEAD responses omit the
+payload and trailers without calling the producer.
+[RFC 9110 §6.6.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-6.6.2),
+[RFC 9112 §7.1.2](https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1.2).
+
+The loopback test checks buffered and empty bodies, existing chunked and
+gzip transfer codings, repeated declaration lines, and a subsequent
+response on the same connection. GHC 9.10.3 passed 1,129 Hermes,
+483 aggregate HTTP, 137 Connect, 18 WAI, 95 HTTP/1, and 125 HTTP/2 tests.
+Aggregate HTTP and Connect passed under both schedules. TLS and minimal
+gRPC passed. Full gRPC passed 91 tests with one existing pending case.
+
+The HTTP/1.x hello-world GET Criterion fixture, which opens a
+connection for each request and does not declare trailers, measured
+165 µs and 81,427 B allocated before the change and 181 µs and
+81,509 B after it. The timing and allocation intervals overlap.
+The after run was retried separately after a socket address error
+during the back-to-back run.
+
+## File-backed HTTP/1.1 response trailers
+
+A typed `Trailer` declaration selects chunked framing for file
+responses too. The TCP writer sends the extent as one data chunk
+through `sendfile` and writes the final CRLF and trailer block together.
+The transport fallback reads up to 64 KiB at a time at explicit offsets.
+It preserves the application-owned descriptor and its current position.
+If the file ends before the promised extent, the server closes the
+connection without producing trailers or sending another response.
+[RFC 9112 §7.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1).
+
+The TCP and duplex integration tests cover a path, a shared descriptor,
+a nonzero offset, a payload over 1 MiB, a zero-length extent, HEAD,
+connection reuse, and early EOF. The duplex test exercises the file
+writer used for TLS and other transports without a raw socket.
+
+GHC 9.10.3 passed 1,129 Hermes, 483 aggregate HTTP, 137 Connect,
+18 WAI, 97 HTTP/1, and 125 HTTP/2 tests. Aggregate HTTP and Connect
+passed under both schedules. TLS and minimal gRPC passed. Full gRPC
+passed 91 tests with one existing pending case.
+
+A Criterion loopback fixture reused one TCP connection and a cached
+file descriptor. It drained each response and checked the trailer
+fields. Allocations include both endpoints.
+
+| File extent | Fixed-length | Chunked with a trailer |
+| --- | ---: | ---: |
+| 4 KiB | 31.9 µs / 25,252 B | 52.2 µs / 39,785 B |
+| 1 MiB | 117.3 µs / 1,095,980 B | 118.9 µs / 1,100,811 B |
+
+In optimized Core the raw-socket branch calls the sendfile worker
+directly. The transport fallback calls `pread` with unboxed offsets
+and allocates a bounded byte buffer for each read.
+
+## Precomputed HTTP/1.1 response trailers
+
+`precomputeResponse` prepares the head and optional data chunk once.
+The server sends that prefix and calls the trailer producer for each
+eligible response. HEAD sends the cached metadata and skips the callback.
+An HTTP/1.0 request receives a fixed-length slice of the cached payload
+when only the outer chunking needs to be removed. A preceding transfer
+coding requires transcoding for HTTP/1.0, so GET fails before writing the
+response and HEAD can still send metadata.
+[RFC 9112 §§6.1 and 7.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1).
+
+The loopback test verifies repeated sends with different trailer values,
+empty data, a preceding gzip coding, both HEAD and HTTP/1.0 fallback,
+connection reuse, and the byte sequence on a connection that closes.
+The 1 MiB fixture covers the ordinary and corked paths when the
+payload exceeds the 256 KiB send ring. The writer reserves space once
+for small responses and publishes larger cached bytes in segments.
+The pure helper rejects a deferred file body before baking a response.
+
+GHC 9.10.3 passed 1,129 Hermes, 483 aggregate HTTP, 137 Connect,
+18 WAI, 99 HTTP/1, and 125 HTTP/2 tests. Aggregate HTTP and Connect
+passed under both schedules. TLS and minimal gRPC passed. Full gRPC
+passed 91 tests with one existing pending case.
+
+Two sequential Criterion runs reused a TCP connection, drained the
+whole response, and checked the trailer on every iteration.
+Allocations include both endpoints. Cached timings varied, and
+the timing intervals overlapped at both sizes.
+
+| Payload | Dynamic response | Cached prefix |
+| --- | ---: | ---: |
+| 4 KiB | 30.2–30.7 µs / 30.9 kB | 33.5–33.9 µs / 29.7 kB |
+| 1 MiB | 134–135 µs / 1,111 kB | 136–155 µs / 1,103 kB |
+
+## Outbound trailer field validation
+
+The high-level client and both HTTP transports share the same
+case-insensitive check for common fields that must be processed before
+trailers can arrive. Applications remain responsible for checking that
+their extension field definitions permit trailer use. The parser still
+decodes the `Trailer` announcement as a field-name list, and receivers
+keep trailer fields separate from the initial headers.
+[RFC 9110 §§6.5.1–6.5.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-6.5.1).
+
+HTTP/1 validates the whole generated block before writing the chunk
+terminator. The same writer handles streaming, buffered, precomputed,
+and file responses. An invalid generated block ends the connection if
+the response has started. HTTP/2 applies the policy to fixed and
+streamed requests, responses, and engine trailer makers. A failure
+after a stream has opened resets that stream.
+
+Tests cover mixed-case field names, checksum and extension fields,
+invalid generated HTTP/1.1 fields, fixed and streaming HTTP/2
+requests and responses, and engine trailer makers. They also verify
+that an unrelated HTTP/2 request succeeds after a rejected trailer block.
+
+GHC 9.10.3 passed 1,130 Hermes, 483 aggregate HTTP, 137 Connect,
+18 WAI, 100 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect
+passed under both schedules. TLS and minimal gRPC passed. Full gRPC
+passed 91 tests with one existing pending case.
+
+Criterion compared HTTP/2 wire-syntax validation with the outbound
+validator, which also checks field placement.
+
+| Fixture | Wire syntax | Outbound validation |
+| --- | ---: | ---: |
+| gRPC status | 17.0 ns / 32 B | 18.4 ns / 32 B |
+| Content-Digest, gRPC status, and an extension field | 61.0 ns / 32 B | 77.7 ns / 32 B |
+
+Dispatch by the first byte avoids scanning the built-in names for
+common extension fields. Optimized Core and STG show unboxed byte
+comparisons and a loop without a captured closure.
+
+## Deferred trailers for buffered HTTP/2 responses
+
+The unified adapter passes empty, buffered, and streaming responses'
+trailer actions to the HTTP/2 writer. The writer sends the initial
+headers and content before evaluating the action. A nonempty result
+ends the stream with trailing HEADERS. An empty result uses an empty
+DATA frame with END_STREAM, which the client consumes as framing.
+Callback failure resets the stream after any content already sent.
+[RFC 9113 §8.1](https://www.rfc-editor.org/rfc/rfc9113.html#section-8.1).
+
+HEAD, 204, 205, and 304 end the stream on the initial HEADERS block.
+The writer skips both producers and preserves the allowed
+`Content-Length` metadata on HEAD and 304. Informational responses
+leave the stream open. The writer omits `Content-Length` on
+informational responses and 204.
+[RFC 9110 §§8.6 and 9.3.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.6).
+
+Loopback tests hold the trailer action open while the client reads
+headers and content. They cover an empty response, a buffered
+response with and without trailers, callback suppression, and
+stream reset after invalid generated fields.
+
+GHC 9.10.3 passed 1,130 Hermes, 484 aggregate HTTP, 137 Connect,
+18 WAI, 100 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect
+passed under both schedules. TLS and minimal gRPC passed. Full gRPC
+passed 91 tests with one existing pending case.
+
+The aggregate HTTP/2 hello-world GET Criterion fixture measured
+358.9 µs and 230,751 B allocated before, and 361.7 µs and
+231,672 B after. Both the timing and allocation intervals overlap.
+Optimized Core passes the state from the buffered send worker
+directly to the trailer action.
+
+## HTTP/1.0 response framing and persistence
+
+When either side selects HTTP/1.0, the managed HTTP/1 writer uses
+fixed-length or close-delimited framing and omits trailer fields.
+A stream with a valid `Content-Length` writes raw data and counts
+the advertised bytes before allowing reuse. An unknown-length
+stream sends `Connection: close` and ends at EOF, even when the
+client requested keep-alive. When a request upload is still open,
+the server closes its write side before draining the remaining input.
+[RFC 9112 §§6.1, 6.3, and 9.3](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3).
+
+The writer omits an explicit outer chunked coding when it owns
+the body framing. An earlier transfer coding requires transcoding,
+so a response with content fails before the writer sends its head.
+HEAD omits the stream and preserves its available representation
+metadata.
+[RFC 9110 §9.3.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.2).
+
+Loopback coverage includes HTTP/1.0 requests, HTTP/1.0 responses to
+HTTP/1.1 requests, a pending upload, HEAD and fixed-length response
+reuse, and closure after both short and overlong streams.
+
+GHC 9.10.3 passed 1,130 Hermes, 484 aggregate HTTP, 137 Connect,
+18 WAI, 103 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect
+passed under both schedules. TLS and minimal gRPC passed. Full gRPC
+passed 91 tests with one existing pending case.
+
+Optimized Core shows an unboxed Word64 remaining-byte counter in
+the fixed-length stream writer. The ordinary HTTP/1.1 hello-world
+GET Criterion fixture measured 177.3 µs and 81,952 B before, and
+175.8 µs and 81,678 B after. The timing intervals overlap. The
+after run was retried following a local socket address error.
+
+## Explicit HTTP/1.1 response framing
+
+`Content-Length` selects the fixed-length writer for a managed
+stream. The writer checks the byte count, skips the trailer callback,
+and allows reuse after a complete response. Managed buffered and file
+responses check a supplied length against the size of the body or
+file extent before sending the head.
+
+An explicit `Transfer-Encoding` field or a valid `Trailer`
+declaration selects chunked framing. The writer removes
+`Content-Length`, preserves earlier transfer codings, and ensures
+that chunked is final. Precomputed buffered responses use the same
+chunked preparation. Invalid coding or a known length mismatch fails
+before the head is sent. A streamed length mismatch closes the
+connection after whatever response bytes have already been sent.
+[RFC 9112 §§6.1–6.3](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1).
+
+Loopback tests cover fixed-stream reuse, short and overlong streams,
+explicit chunked framing for buffered, cached, and file responses,
+and gzip followed by chunked framing. GHC 9.10.3 passed 1,130 Hermes,
+484 aggregate HTTP, 137 Connect, 18 WAI, 106 HTTP/1, and 126 HTTP/2
+tests. Aggregate HTTP and Connect passed under both schedules. TLS
+and minimal gRPC passed. Full gRPC passed 91 tests with one existing
+pending case.
+
+Core shows a single header walk for the common framing decision.
+The ordinary HTTP/1.1 hello-world GET Criterion fixture measured
+166.3 µs and 81,814 B before, and 166.5 µs and 81,911 B after.
+Both the timing and allocation intervals overlap.
+
+## Fixed-length HTTP/1 file responses
+
+The fixed-length writer opens the file and checks the file offset
+range before publishing the head. Plain TCP requires `sendfile` to
+transfer every promised byte. TLS and other transports share the bounded positional
+reader used for chunked file responses, preserving the caller's
+descriptor and its offset. Early EOF closes the connection and
+surfaces as an incomplete response to the client.
+[RFC 9112 §6.3](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3).
+
+TCP and duplex tests cover cached descriptor reuse, nonzero offsets,
+an empty extent, HEAD metadata for an unavailable path, and an open
+failure before the head. The tests also truncate a file after selecting
+the extent and verify the partial wire response and the eager client's
+typed EOF error on a fresh connection.
+
+GHC 9.10.3 passed 1,130 Hermes, 484 aggregate HTTP, 137 Connect,
+18 WAI, 108 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect
+passed under both schedules. TLS and minimal gRPC passed. Full gRPC
+passed 91 tests with one existing pending case.
+
+Two sequential Criterion runs used a persistent TCP connection and
+a cached descriptor. Allocations include both endpoints. Timing
+intervals overlap at both sizes.
+
+| File extent | Before | After |
+| --- | ---: | ---: |
+| 4 KiB | 31.8–33.7 µs / 25.4–25.5 kB | 31.9–37.6 µs / 25.7–26.4 kB |
+| 1 MiB | 113–117 µs / 1,096 kB | 113–116 µs / 1,096–1,097 kB |
+
+Optimized Core shows the raw-socket branch calls the exact sendfile
+worker directly. The positional copy loops call `pread` with
+unboxed offsets and bounded read sizes.
+
+## Parsing Content-Disposition and reading extended filenames
+
+For two parameters, the parser compares ASCII-case-insensitive names
+directly in compact byte arrays. Longer lists use a set of folded
+names. Filename lookup decodes the extended wire value directly using
+the shared charset, language tag, and percent-encoding rules. It
+preserves the original wire spelling and uses the plain filename when
+the extended value cannot be decoded.
+[RFC 6266 §4](https://www.rfc-editor.org/rfc/rfc6266.html#section-4),
+[RFC 8187 §3.2](https://www.rfc-editor.org/rfc/rfc8187.html#section-3.2).
+
+Tests cover case-insensitive duplicates at both list sizes, distinct
+punctuation in names, mixed-case charset names, empty extended
+filenames, literal plus signs, and fallback for malformed values
+supplied through the record constructor. The metadata and text
+decoders agree across all Latin-1 octets.
+
+GHC 9.10.3 passed 1,131 Hermes, 484 aggregate HTTP, 137 Connect, 18
+WAI, 108 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect
+passed in synchronous and concurrent runs. TLS and minimal gRPC
+passed. Full gRPC passed 91 tests with one existing pending case.
+
+Two local Criterion comparisons ran in opposite orders. Timing ranges
+span the point estimates for the two runs and allocations are rounded
+to the nearest byte per operation.
+
+| Fixture | Before | After |
+| --- | ---: | ---: |
+| Ordinary field parse | 75.6–81.6 ns / 552 B | 72.2–78.3 ns / 552 B |
+| Field parse with plain and extended filenames | 175.7–184.4 ns / 1,088 B | 149.6–152.2 ns / 744 B |
+| Preferred extended filename lookup | 186.7–188.6 ns / 1,184 B | 134.4–134.7 ns / 960 B |
+| Field render | 104.8–105.2 ns / 896 B | 110.5–111.5 ns / 896 B |
+
+Optimized Core shows the two-name check loops over unboxed offsets.
+The text decoder dispatches known charsets directly and skips
+construction of the extended-value record. The render worker's Core
+is identical up to local binding names despite the measured timing
+difference.
+
+## Typed Link language and media type hints
+
+`linkLanguages` validates each `hreflang` with the shared BCP 47 grammar
+and returns the tags in field order. `linkMediaType` validates the first
+`type` value using the RFC 6838 name alphabet and the 127-byte limit per
+name. Both accessors accept token and quoted forms where the value fits
+the HTTP token grammar, and report malformed or valueless hints as
+errors. The typed field codec retains the input parameters for forwarding.
+[RFC 8288 §3](https://www.rfc-editor.org/rfc/rfc8288.html#section-3),
+[RFC 6838 §4.2](https://www.rfc-editor.org/rfc/rfc6838.html#section-4.2).
+
+Parameter lookup compares ASCII names directly in compact storage.
+`linkTitle` uses the shared direct RFC 8187 decoder, keeping the
+first-match rule for each spelling and falling back to `title` when the
+first extended value cannot be decoded.
+[RFC 8288 §3.4.1](https://www.rfc-editor.org/rfc/rfc8288.html#section-3.4.1).
+
+Tests cover combined typed field parsing and rendering, the media name
+length and alphabet boundaries, mixed-case parameter names, token and
+quoted language hints, and precedence between duplicate title parameters.
+GHC 9.10.3 passed 1,134 Hermes, 484 aggregate HTTP, 137 Connect, 18 WAI,
+108 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect passed under
+both schedules. TLS and minimal gRPC passed. Full gRPC passed 91 tests
+with one existing pending case.
+
+The Link Criterion group measures parsing, rendering, and projection
+from a typed value. GHC Core shows compact parameter comparison with
+unboxed indices and a media name length check before copying each name.
+The existing parse and render fixtures allocated the same amount in
+both binaries.
+
+| Projection | Before | After |
+| --- | ---: | ---: |
+| Plain title | 204 ns / 1,215 B | 28 ns / 96 B |
+| Extended title | 278 ns / 2,031 B | 119 ns / 928 B |
+| Plain title fallback | 299 ns / 2,423 B | 125 ns / 1,136 B |
+| Mixed-case parameter lookup | 78 ns / 544 B | 11 ns / 48 B |
+| Two language hints | | 54 ns / 352 B |
+| Media type hint | | 77 ns / 584 B |
+
+## CORS allow lists and exposed response fields
+
+`allowMethodsMatches` and `allowHeadersMatches` match a parsed request
+method or field name against the corresponding response allow list.
+Methods compare case-sensitively and field names compare with ASCII
+case folding. A standalone `*` works in a singleton or mixed list and
+is literal in credentials mode `include`. `Authorization` requires an
+explicit match in every mode.
+[Fetch §3.3.5](https://fetch.spec.whatwg.org/#cors-protocol-and-credentials),
+[Fetch §4.8](https://fetch.spec.whatwg.org/#cors-preflight-fetch).
+
+`exposesResponseHeader` applies the response safelist even when
+`Access-Control-Expose-Headers` is absent, and excludes `Set-Cookie`
+and `Set-Cookie2` for explicit lists and wildcards. The tests exercise
+the projections through typed lookup with repeated lines, mixed name
+case, and all three credentials modes.
+[Fetch §2.2.2](https://fetch.spec.whatwg.org/#cors-safelisted-response-header-name).
+
+The matching loops take the credentials mode and compact name as arguments.
+Optimized Core compares byte arrays and keeps the list walk free of
+per-entry allocations. Sequential Criterion runs measured the projections
+on already-parsed fields.
+
+| Fixture | Initial selector | Final selector |
+| --- | ---: | ---: |
+| Match the second allowed method | 11.4 ns / 80 B | 8.2 ns / 32 B |
+| Match explicit Authorization after a wildcard | 25.3 ns / 32 B | 25.3 ns / 32 B |
+| Match an exposed custom response field | 26.8 ns / 88 B | 27.2 ns / 32 B |
+
+The new parse fixtures for Allow-Methods, Allow-Origin, Expose-Headers,
+and Request-Headers took 46–53 ns and allocated 424–488 bytes per parse.
+GHC 9.10.3 passed 1,136 Hermes, 484 aggregate HTTP, 137 Connect, 18 WAI,
+108 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect passed with
+synchronous and concurrent scheduling. TLS and minimal gRPC passed.
+Full gRPC passed 91 tests with one existing pending case.
+
+## CORS origin serialization and response checks
+
+`parseCorsRequestOrigin` captures one serialized request origin or the
+opaque value `null`. `corsCheck` compares those bytes with the single
+`Access-Control-Allow-Origin` field after removing field-line spaces and
+tabs. Credentials mode `include` requires an exact origin and a single
+case-sensitive `Access-Control-Allow-Credentials: true` field. The other
+modes also accept a wildcard. Regressions cover alternate IPv6 and port
+spellings, absent and repeated fields, and comma-joined values.
+[Fetch §4.10](https://fetch.spec.whatwg.org/#cors-check).
+
+The Origin and Access-Control-Allow-Origin codecs accept host spellings
+emitted by WHATWG URL serialization, including a trailing dot, an
+underscore, and the permitted quote, grave accent, and brace bytes.
+A corpus of 293 distinct origins from Node 22's URL implementation
+passed typed lookup and rendering for both fields and the exact CORS
+check in all three credentials modes.
+[Fetch request origin serialization](https://fetch.spec.whatwg.org/#serializing-a-request-origin),
+[URL host parsing and serialization](https://url.spec.whatwg.org/#host-parsing).
+
+Optimized Core compares the existing byte buffers on the exact-match
+path. The credentialed fixture also uses the singleton `true` decoder's
+literal path. Sequential Criterion runs used prebuilt response field maps.
+
+| CORS check | Initial implementation | Final implementation |
+| --- | ---: | ---: |
+| Wildcard with omitted credentials | 16.5 ns / 88 B | 16.4 ns / 96 B |
+| Exact origin with credentials | 38.7 ns / 328 B | 26.4 ns / 80 B |
+| Exact origin with field-line padding | 25.6 ns / 200 B | 33.8 ns / 264 B |
+
+In the final comparison the bracketed IPv6 Allow-Origin parse measured
+53.9 ns before the changes and 54.9 ns after, with overlapping timing
+intervals and 488 bytes allocated in both runs. The DNS fixture measured
+67.4 ns and 424 bytes.
+
+GHC 9.10.3 passed 1,138 Hermes, 484 aggregate HTTP, 137 Connect, 18 WAI,
+108 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect passed with
+synchronous and concurrent scheduling. TLS and minimal gRPC passed.
+Full gRPC passed 91 tests with one existing pending case.
+
+## Timing-Allow-Origin checks
+
+The typed Timing-Allow-Origin codec preserves ordered origin spellings
+and supports browser host punctuation outside the list delimiters. The
+Fetch check scans the raw field list in wire order and compares complete
+members with the serialized request origin or the wildcard. It tracks
+quotes and quoted escapes across physical field lines and trims field
+member spaces and tabs.
+[Resource Timing §3.5.2](https://www.w3.org/TR/resource-timing/#sec-timing-allow-origin),
+[Fetch §4.11](https://fetch.spec.whatwg.org/#tao-check).
+
+`timingAllowCheck` applies the request's prior failure flag, navigation
+origin relation, and response tainting. `navigationTimingAllowCheck`
+requires every participating response field list to allow the final
+destination origin. Package regressions exercise both checks and the raw
+member scanner. A separate regular-expression model agreed on 279,513
+field-list cases, including split lines, unmatched quotes, escaped
+quotes, empty members, and exact matches for three serialized origins.
+
+Sequential Criterion comparisons ran in opposite orders. The typed
+two-origin parse took 124–130 ns before and 123–126 ns after, allocating
+464 bytes in both cases. The response matching fixtures used prebuilt
+header maps.
+
+| Match fixture | Time | Allocation |
+| --- | ---: | ---: |
+| Singleton wildcard | 12.6 ns | 72 B |
+| Exact match in the second member | 40–48 ns | 72 B |
+| Quoted member followed by an exact match on another line | 59–62 ns | 280 B |
+
+Optimized Core shows unboxed byte offsets in the scanner. The
+single-line path scans the original buffer. For repeated fields, the
+scanner joins the lines once to apply quoting across separators.
+
+GHC 9.10.3 passed 1,140 Hermes, 484 aggregate HTTP, 137 Connect, 18 WAI,
+108 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect passed with
+synchronous and concurrent scheduling. TLS and minimal gRPC passed.
+Full gRPC passed 91 tests with one existing pending case.
+
+## Origin-server request preconditions
+
+`Network.HTTP.Server.evaluatePreconditions` applies the origin-server
+checks before a handler performs the method or evaluates a range.
+`If-Match` uses strong comparison and takes precedence over
+`If-Unmodified-Since`. `If-None-Match` uses weak comparison and takes
+precedence over `If-Modified-Since`. A failed read validator returns the
+304 decision for GET or HEAD. A failed modification precondition
+returns the 412 decision. The request's ordinary status and method
+determine whether to evaluate the conditions.
+[RFC 9110 §13.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.2).
+
+The evaluator uses the typed Hermes fields, including the supplied
+origin clock for RFC 850 dates. Invalid or repeated date fields are
+ignored. Malformed entity-tag lists return the typed parse error.
+The HTTP/1 loopback regression covers 304, 412, malformed tags and a
+successful write with conflicting date and entity-tag preconditions.
+Exactly one request reached the handler's mutation step.
+
+The ordinary request path scans field names for the case-folded `if-`
+prefix once. Optimized Core shows the prefix check before the typed
+lookup and parsing paths. Sequential Criterion runs used prebuilt
+request records.
+
+| Fixture | Initial evaluator | Final evaluator |
+| --- | ---: | ---: |
+| GET with two ordinary fields | 36.6 ns / 152 B | 12.2 ns / 32 B |
+| GET with a matching weak entity tag | 63.5 ns / 640 B | 78.1 ns / 640 B |
+| GET with a matching modification date | 160.6 ns / 1,096 B | 173.6 ns / 1,096 B |
+
+GHC 9.10.3 passed 1,140 Hermes, 485 aggregate HTTP, 137 Connect, 18 WAI,
+108 HTTP/1, and 126 HTTP/2 tests. Aggregate HTTP and Connect passed with
+synchronous and concurrent scheduling. TLS and minimal gRPC passed.
+Full gRPC passed 91 tests with one existing pending case.
+
+### Single-pass precondition lookup
+
+The evaluator now collects the four relevant fields in one pass.
+It preserves entity-tag line order and tracks repeated date fields
+before applying precedence. A differential matrix agreed with the
+earlier evaluator on 373,248 combinations of methods, statuses,
+representations, field spellings, duplicates, and malformed inputs.
+The full loopback suites passed with the counts above.
+
+Optimized Core dispatches on the field-name length before comparing
+the candidate bytes. Sequential Criterion runs compared the previous
+prefix scan with the single-pass evaluator.
+
+| Fixture | Previous | Single pass |
+| --- | ---: | ---: |
+| GET with two ordinary fields | 12.3 ns / 32 B | 9.3 ns / 32 B |
+| GET with twelve ordinary fields | 55.5 ns / 32 B | 35.9 ns / 32 B |
+| GET with a matching weak entity tag | 78.2 ns / 640 B | 42.9 ns / 544 B |
+| GET with a matching modification date | 176.6 ns / 1,096 B | 132.7 ns / 1,032 B |
+| GET with a matching tag after twelve ordinary fields | 209.5 ns / 640 B | 72.3 ns / 544 B |
+| GET with repeated entity-tag fields | 194.7 ns / 1,088 B | 127.2 ns / 1,008 B |

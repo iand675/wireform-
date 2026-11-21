@@ -25,7 +25,7 @@ import qualified Data.ByteString.Short as SBS
 import qualified Data.Text.Short as ST
 import Network.HTTP.Grammar.Parser
 import Network.HTTP.Grammar.Rendering (shortText)
-import Network.HTTP.Grammar.URIReference (uriReference)
+import Network.HTTP.Grammar.URIReference (outboundURIReferenceBytes, uriReference, validURIText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSoapAction)
 import qualified Network.HTTP.Headers.Mason as M
@@ -80,6 +80,12 @@ instance KnownHeader SoapAction where
   renderToHeaders _ SoapActionNoIntent = ""
   renderToHeaders _ value@(QuotedSoapAction uri) =
     WB.toStrictByteStringExact (BSI.checkedAdd "SOAPAction" 2 (SBS.length (ST.toShortByteString uri))) (renderSoapAction value)
+
+
+  renderToHeadersChecked _ SoapActionNoIntent = Just ""
+  renderToHeadersChecked settings value@(QuotedSoapAction uri)
+    | validURIText outboundURIReferenceBytes uri = Just (renderToHeaders settings value)
+    | otherwise = Nothing
 
 
   headerName _ = hSoapAction

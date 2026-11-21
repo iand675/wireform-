@@ -20,7 +20,7 @@ module Network.HTTP.Headers.CertNotAfter (
 
 import Data.Time.Clock (UTCTime)
 import Network.HTTP.Headers
-import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate)
+import Network.HTTP.Headers.Date (dateParser, dateParserWith, renderDate, renderDateBytesChecked)
 import Network.HTTP.Headers.HeaderFieldName (hCertNotAfter)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -41,6 +41,9 @@ instance KnownHeader CertNotAfter where
 
 
   renderToHeaders _ = M.toStrictByteString . renderCertNotAfter
+
+
+  renderToHeadersChecked _ = renderDateBytesChecked . certNotAfterTime
 
 
   headerName _ = hCertNotAfter

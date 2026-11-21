@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -92,9 +93,14 @@ import Control.Monad.Combinators (between)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
+import qualified Data.ByteString.Builder.Prim as Prim
+import qualified Data.ByteString.Builder.Prim.Internal as Prim
 import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short.Internal as SBS
 import Data.Char (isAsciiUpper, toLower)
 import qualified Data.CharSet as CharSet
+import Data.Either (isLeft, isRight)
 import Data.Foldable1
 import Data.Hashable
 import Data.List.NonEmpty (NonEmpty (..))
@@ -103,12 +109,14 @@ import Data.Text.Short (ShortText)
 import qualified Data.Text.Short as TS
 import qualified Data.Text.Short.Unsafe as TSU
 import Data.Validation (Validation (..))
+import Foreign.Ptr (minusPtr, plusPtr)
 import GHC.Generics
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.Rendering.Util (renderHttpQuotedString, shortText)
+import Network.HTTP.Headers.Rendering.Util (foldHttpQuotedShortBytes, renderHttpQuotedString, shortText)
+import Wireform.Encode.Direct (dWord8)
 import Wireform.Parser.Driver (parseByteString)
 import Prelude
 
@@ -143,6 +151,8 @@ instance KnownHeader CacheControl where
       _ -> parseListFieldLines "Cache-Control" (httpList directiveParser) fields
   renderToHeaders _ CacheControlEmpty = [""]
   renderToHeaders _ (CacheControl dirs) = [M.toStrictByteString (renderCacheDirectives dirs)]
+  renderToHeadersChecked _ CacheControlEmpty = Just [""]
+  renderToHeadersChecked _ (CacheControl dirs) = pure <$> encodeCacheDirectivesChecked dirs
   headerName _ = hCacheControl
 
 
@@ -231,6 +241,23 @@ qualifiedFieldNames :: ByteString -> Maybe (NonEmpty HeaderFieldName)
 qualifiedFieldNames arg = do
   names <- either (const Nothing) Just (parseByteString (httpList rfc9110TokenBS <* eof) arg)
   fmap (unsafeUnknownHeaderFromBytestring . foldName) <$> NE.nonEmpty names
+
+
+validCacheDirective :: CacheControlDirective -> Bool
+validCacheDirective = \case
+  Private fields -> all validFieldList fields
+  NoCache fields -> all validFieldList fields
+  Unknown key value -> isHttpTokenText key && isExtensionName key && all isHttpQuotedText value
+  _ -> True
+  where
+    validFieldList text =
+      isHttpTokenText text || isRight (parseByteString fieldList (TS.toByteString text))
+    fieldList =
+      ows *> skipMany separator *> tokenBytes <* ows
+        <* skipMany (separator *> optional_ (tokenBytes <* ows)) <* eof
+    separator = $(char ',') *> ows
+    isExtensionName key =
+      isLeft (parseByteString (withKnownCacheDirective (const eof)) (TS.toByteString key))
 
 
 instance Hashable CacheControlDirective
@@ -417,43 +444,51 @@ foldName key
 
 
 directiveParser :: ParserT st e CacheControlDirective
-directiveParser = embedError (knownDirective <|> unknownDirective) (const failed)
+directiveParser = embedError (withKnownCacheDirective whole <|> unknownDirective) (const failed)
   where
-    knownDirective =
-      $( switchAsciiCI
-           [|
-             case _ of
-               "max-age" -> whole (numeric MaxAge)
-               "no-cache" -> whole (qualifiedDirective NoCache)
-               "no-store" -> whole (bare NoStore)
-               "public" -> whole (bare Public)
-               "private" -> whole (qualifiedDirective Private)
-               "s-maxage" -> whole (numeric SMaxAge)
-               "no-transform" -> whole (bare NoTransform)
-               "must-revalidate" -> whole (bare MustRevalidate)
-               "proxy-revalidate" -> whole (bare ProxyRevalidate)
-               "immutable" -> whole immutableDirective
-               "stale-while-revalidate" -> whole (numeric StaleWhileRevalidate)
-               "stale-if-error" -> whole (numeric StaleIfError)
-               "max-stale" -> whole maxStaleDirective
-               "min-fresh" -> whole (numeric MinFresh)
-               "only-if-cached" -> whole (bare OnlyIfCached)
-               "must-understand" -> whole (bare MustUnderstand)
-             |]
-       )
     -- An invalid argument for a known name must not become an extension.
     whole action =
       notFollowedBy (skipSatisfyAscii (\c -> CharSet.member c tokenCharSet)) *> (action <|> err ())
-    numeric make = $(char '=') *> (make <$> directiveDelay)
-    bare value = value <$ notFollowedBy $(char '=')
-    maxStaleDirective = MaxStale <$> withOption $(char '=') (const (Just <$> directiveDelay)) (pure Nothing)
-    immutableDirective = withOption $(char '=') (const (Immutable <$ (tokenBytes <|> (() <$ httpQuotedBytes)))) (pure Immutable)
     unknownDirective = do
       name <- rfc9110Token
       withOption
         $(char '=')
         (const (Unknown name . Just <$> (rfc9110Token <|> (TS.fromText <$> httpQuotedString))))
         (pure (Unknown name Nothing))
+
+
+-- Both the reader and the extension-name check use this exact dispatch.
+withKnownCacheDirective
+  :: (ParserT st e CacheControlDirective -> ParserT st e a)
+  -> ParserT st e a
+withKnownCacheDirective whole =
+  $( switchAsciiCI
+       [|
+         case _ of
+           "max-age" -> whole (numeric MaxAge)
+           "no-cache" -> whole (qualifiedDirective NoCache)
+           "no-store" -> whole (bare NoStore)
+           "public" -> whole (bare Public)
+           "private" -> whole (qualifiedDirective Private)
+           "s-maxage" -> whole (numeric SMaxAge)
+           "no-transform" -> whole (bare NoTransform)
+           "must-revalidate" -> whole (bare MustRevalidate)
+           "proxy-revalidate" -> whole (bare ProxyRevalidate)
+           "immutable" -> whole immutableDirective
+           "stale-while-revalidate" -> whole (numeric StaleWhileRevalidate)
+           "stale-if-error" -> whole (numeric StaleIfError)
+           "max-stale" -> whole maxStaleDirective
+           "min-fresh" -> whole (numeric MinFresh)
+           "only-if-cached" -> whole (bare OnlyIfCached)
+           "must-understand" -> whole (bare MustUnderstand)
+         |]
+   )
+  where
+    numeric make = $(char '=') *> (make <$> directiveDelay)
+    bare value = value <$ notFollowedBy $(char '=')
+    maxStaleDirective = MaxStale <$> withOption $(char '=') (const (Just <$> directiveDelay)) (pure Nothing)
+    immutableDirective = withOption $(char '=') (const (Immutable <$ (tokenBytes <|> (() <$ httpQuotedBytes)))) (pure Immutable)
+{-# INLINE withKnownCacheDirective #-}
 
 
 cacheControlHeaderParser :: ParserT st e (NonEmpty CacheControlDirective)
@@ -499,25 +534,89 @@ renderCacheDirectives :: NonEmpty CacheControlDirective -> M.Builder
 renderCacheDirectives = M.intersperse "," . fmap renderCacheDirective
 
 
+data CacheDirectiveWire
+  = DirectiveFlag !SBS.ShortByteString
+  | DirectiveSeconds !SBS.ShortByteString {-# UNPACK #-} !Word
+  | DirectiveFields !SBS.ShortByteString !ShortText
+  | DirectiveExtension !ShortText !(Maybe ShortText)
+
+
+cacheDirectiveWire :: CacheControlDirective -> CacheDirectiveWire
+cacheDirectiveWire = \case
+  Public -> DirectiveFlag "public"
+  Private v -> maybe (DirectiveFlag "private") (DirectiveFields "private") v
+  NoCache v -> maybe (DirectiveFlag "no-cache") (DirectiveFields "no-cache") v
+  NoStore -> DirectiveFlag "no-store"
+  MaxAge v -> DirectiveSeconds "max-age" v
+  MaxStale v -> maybe (DirectiveFlag "max-stale") (DirectiveSeconds "max-stale") v
+  MinFresh v -> DirectiveSeconds "min-fresh" v
+  SMaxAge v -> DirectiveSeconds "s-maxage" v
+  MustRevalidate -> DirectiveFlag "must-revalidate"
+  MustUnderstand -> DirectiveFlag "must-understand"
+  ProxyRevalidate -> DirectiveFlag "proxy-revalidate"
+  NoTransform -> DirectiveFlag "no-transform"
+  OnlyIfCached -> DirectiveFlag "only-if-cached"
+  Immutable -> DirectiveFlag "immutable"
+  StaleWhileRevalidate v -> DirectiveSeconds "stale-while-revalidate" v
+  StaleIfError v -> DirectiveSeconds "stale-if-error" v
+  Unknown key val -> DirectiveExtension key val
+{-# INLINE cacheDirectiveWire #-}
+
+
+encodeCacheDirectivesChecked :: NonEmpty CacheControlDirective -> Maybe ByteString
+encodeCacheDirectivesChecked directives@(first :| rest)
+  | all validCacheDirective directives =
+      Just $ BSI.unsafeCreateUptoN capacity $ \ptr -> writeDirective ptr 0 first >>= writeRest ptr rest
+  | otherwise = Nothing
+  where
+    capacity = foldl' (\n item -> add (add n 1) (directiveSize item)) (directiveSize first) rest
+    add = BSI.checkedAdd "Cache-Control field"
+    textSize = SBS.length . TS.toShortByteString
+    directiveSize item = case cacheDirectiveWire item of
+      DirectiveFlag name -> SBS.length name
+      DirectiveSeconds name _ -> add (SBS.length name) 21
+      DirectiveFields name value -> add (add (SBS.length name) 3) (textSize value)
+      DirectiveExtension name Nothing -> textSize name
+      DirectiveExtension name (Just value) ->
+        let size = textSize value
+        in add (add (textSize name) 3) (add size size)
+
+    writeRest _ [] !offset = pure offset
+    writeRest ptr (item : more) !offset = do
+      start <- dWord8 ptr offset 44
+      writeDirective ptr start item >>= writeRest ptr more
+    writeDirective ptr offset item = case cacheDirectiveWire item of
+      DirectiveFlag name -> copy ptr offset name
+      DirectiveSeconds name seconds -> do
+        end <- copy ptr offset name
+        start <- dWord8 ptr end 61
+        next <- Prim.runB Prim.word64Dec (fromIntegral seconds) (ptr `plusPtr` start)
+        pure (next `minusPtr` ptr)
+      DirectiveFields name value -> do
+        end <- copy ptr offset name
+        start <- dWord8 ptr end 61 >>= \equals -> dWord8 ptr equals 34
+        close <- copy ptr start (TS.toShortByteString value)
+        dWord8 ptr close 34
+      DirectiveExtension name value -> do
+        end <- copy ptr offset (TS.toShortByteString name)
+        case value of
+          Nothing -> pure end
+          Just text -> do
+            start <- dWord8 ptr end 61
+            let bytes = TS.toShortByteString text
+            if isHttpTokenBytes bytes then copy ptr start bytes else foldHttpQuotedShortBytes (dWord8 ptr) start bytes
+    copy ptr offset bytes = do
+      let size = SBS.length bytes
+      SBS.copyToPtr bytes 0 (ptr `plusPtr` offset) size
+      pure $! offset + size
+
+
 renderCacheDirective :: CacheControlDirective -> M.Builder
-renderCacheDirective = \case
-  Public -> "public"
-  Private v -> "private" <> foldMap (("=" <>) . renderHttpQuotedString . TS.toText) v
-  NoCache v -> "no-cache" <> foldMap (("=" <>) . renderHttpQuotedString . TS.toText) v
-  NoStore -> "no-store"
-  MaxAge v -> "max-age=" <> M.wordDec v
-  MaxStale v -> "max-stale" <> foldMap (("=" <>) . M.wordDec) v
-  MinFresh v -> "min-fresh=" <> M.wordDec v
-  SMaxAge v -> "s-maxage=" <> M.wordDec v
-  MustRevalidate -> "must-revalidate"
-  MustUnderstand -> "must-understand"
-  ProxyRevalidate -> "proxy-revalidate"
-  NoTransform -> "no-transform"
-  OnlyIfCached -> "only-if-cached"
-  Immutable -> "immutable"
-  StaleWhileRevalidate v -> "stale-while-revalidate=" <> M.wordDec v
-  StaleIfError v -> "stale-if-error=" <> M.wordDec v
-  Unknown k v -> shortText k <> foldMap (("=" <>) . extensionValue) v
+renderCacheDirective item = case cacheDirectiveWire item of
+  DirectiveFlag name -> M.shortByteString name
+  DirectiveSeconds name v -> M.shortByteString name <> "=" <> M.wordDec v
+  DirectiveFields name v -> M.shortByteString name <> "=" <> renderHttpQuotedString (TS.toText v)
+  DirectiveExtension k v -> shortText k <> foldMap (("=" <>) . extensionValue) v
   where
     extensionValue value
       | not (BS.null bytes) && BC.all (\c -> CharSet.member c tokenCharSet) bytes = shortText value

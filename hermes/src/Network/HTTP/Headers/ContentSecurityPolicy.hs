@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -26,9 +28,13 @@ module Network.HTTP.Headers.ContentSecurityPolicy (
   policyListParser,
   parsePolicyFieldLines,
   renderPolicyList,
+  encodePolicyListChecked,
 ) where
 
+import Data.Bits ((.&.), (.|.), complement, xor)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short.Internal as SBS
 import Data.Char (isAsciiUpper, toLower)
 import qualified Data.CharSet as CharSet
 import Data.List.NonEmpty (NonEmpty (..))
@@ -36,11 +42,16 @@ import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Short as ST
+import Data.Word (Word8, Word64)
+import Foreign.Ptr (plusPtr)
+import GHC.Exts (Int (I#), indexWord8ArrayAsWord64#)
+import GHC.Word (Word64 (W64#))
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hContentSecurityPolicy)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Wireform.Encode.Direct (dWord8, directEncode)
 
 
 -- | A directive's wire spelling and its whitespace-separated tokens.
@@ -103,6 +114,9 @@ instance KnownHeader ContentSecurityPolicy where
 
 
   renderToHeaders _ = M.toStrictByteString . renderContentSecurityPolicy
+
+
+  renderToHeadersChecked _ = encodePolicyListChecked . cspPolicies
 
 
   headerName _ = hContentSecurityPolicy
@@ -195,6 +209,103 @@ renderDirectiveSet = R.renderSeparated "; " renderDirective
 
 renderPolicyList :: NonEmpty CSPPolicy -> M.Builder
 renderPolicyList = R.renderSeparated ", " (renderDirectiveSet . policyDirectives) . filter (not . null . policyDirectives) . NE.toList
+
+
+-- | Check names and tokens before emitting the full list of policies.
+encodePolicyListChecked :: NonEmpty CSPPolicy -> Maybe ByteString
+encodePolicyListChecked policies = measurePolicies 0 entries
+  where
+    entries = NE.toList policies
+    add = BSI.checkedAdd "CSP policy list"
+    measurePolicies !size [] = Just $ directEncode size $ \ptr start -> writePolicies ptr start entries
+    measurePolicies !size (CSPPolicy [] : rest) = measurePolicies size rest
+    measurePolicies !size (CSPPolicy directives : rest) =
+      let end = measureDirectives size directives
+      in if end < 0 then Nothing else measurePolicies (add end (if size == 0 then 0 else 2)) rest
+    measureDirectives !size [] = size
+    measureDirectives !size (Directive name values : rest)
+      | validCompactToken nameWord nameByte name
+      , let end = measureValues (add size (width name)) values
+      , end >= 0 = case rest of
+          [] -> end
+          _ -> measureDirectives (add end 2) rest
+      | otherwise = -1
+    measureValues !size [] = size
+    measureValues !size (value : rest)
+      | validCompactToken valueWord valueByte value = measureValues (add (add size 1) (width value)) rest
+      | otherwise = -1
+    writePolicies _ !offset [] = pure offset
+    writePolicies ptr !offset (CSPPolicy [] : rest) = writePolicies ptr offset rest
+    writePolicies ptr !offset (CSPPolicy directives : rest) = do
+      start <- if offset == 0 then pure offset else dWord8 ptr offset 44 >>= \comma -> dWord8 ptr comma 32
+      end <- writeDirectives ptr start directives
+      writePolicies ptr end rest
+    writeDirectives _ !offset [] = pure offset
+    writeDirectives ptr !offset (Directive name values : rest) = do
+      nameEnd <- copyText ptr offset name
+      end <- writeValues ptr nameEnd values
+      case rest of
+        [] -> pure end
+        _ -> do
+          semicolon <- dWord8 ptr end 59
+          start <- dWord8 ptr semicolon 32
+          writeDirectives ptr start rest
+    writeValues _ !offset [] = pure offset
+    writeValues ptr !offset (value : rest) = do
+      start <- dWord8 ptr offset 32
+      end <- copyText ptr start value
+      writeValues ptr end rest
+    copyText ptr offset text =
+      let bytes = ST.toShortByteString text
+          size = SBS.length bytes
+      in SBS.copyToPtr bytes 0 (ptr `plusPtr` offset) size *> pure (offset + size)
+    width = SBS.length . ST.toShortByteString
+
+
+-- Scan whole ASCII lanes when possible. The last load may overlap the
+-- preceding one and stays within the compact value.
+validCompactToken :: (Word64 -> Bool) -> (Word8 -> Bool) -> ST.ShortText -> Bool
+validCompactToken wordOK byteOK value =
+  case ST.toShortByteString value of
+    bytes@(SBS.SBS array) ->
+      let size = SBS.length bytes
+          load (I# offset) = W64# (indexWord8ArrayAsWord64# array offset)
+          scan !offset
+            | offset >= size - 8 = wordOK (load (size - 8))
+            | otherwise = wordOK (load offset) && scan (offset + 8)
+      in size > 0 && if size < 8 then scanCompactBytes byteOK bytes 0 else scan 0
+{-# INLINE validCompactToken #-}
+
+
+nameByte :: Word8 -> Bool
+nameByte byte = isLatinLetter c || isDigit c || byte == 45
+  where
+    c = BSI.w2c byte
+{-# INLINE nameByte #-}
+
+
+valueByte :: Word8 -> Bool
+valueByte byte = byte >= 33 && byte <= 126 && byte /= 44 && byte /= 59
+{-# INLINE valueByte #-}
+
+
+nameWord :: Word64 -> Bool
+nameWord bytes = coversAsciiLanes bytes (asciiAlnumMask low .|. complement ((low `xor` 0x2d2d2d2d2d2d2d2d) + ascii))
+  where
+    ascii = 0x7f7f7f7f7f7f7f7f
+    low = bytes .&. ascii
+{-# INLINE nameWord #-}
+
+
+valueWord :: Word64 -> Bool
+valueWord bytes =
+  coversAsciiLanes bytes
+    (((low .|. asciiHighBits) - 0x2121212121212121) .&. (0xfefefefefefefefe - low)
+      .&. ((low `xor` 0x2c2c2c2c2c2c2c2c) + ascii) .&. ((low `xor` 0x3b3b3b3b3b3b3b3b) + ascii))
+  where
+    ascii = 0x7f7f7f7f7f7f7f7f
+    low = bytes .&. ascii
+{-# INLINE valueWord #-}
 
 
 renderContentSecurityPolicy :: ContentSecurityPolicy -> M.Builder

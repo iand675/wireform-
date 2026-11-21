@@ -24,6 +24,7 @@ module Network.HTTP.Headers.XForwardedPort (
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Word (Word16)
 import Network.HTTP.Grammar.Authority (portNumber)
+import Network.HTTP.Grammar.Rendering (encodeWordDecimal)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXForwardedPort)
 import qualified Network.HTTP.Headers.Mason as M
@@ -52,6 +53,12 @@ instance KnownHeader XForwardedPort where
 
 
   renderToHeaders _ = M.toStrictByteString . renderXForwardedPort
+
+
+  renderToHeadersChecked _ (XForwardedPort port)
+    | port <= fromIntegral (maxBound :: Word16) = Just (encodeWordDecimal port)
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
 
 
   headerName _ = hXForwardedPort

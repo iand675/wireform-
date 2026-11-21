@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Test.Hermes.Csp (tests) where
@@ -11,7 +12,8 @@ import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (Cardinality, HeaderRenderingResultToNonEmpty, KnownHeader, defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader, setRawHeader)
+import Network.HTTP.Headers.HeaderFieldName (HeaderFieldName)
 import qualified Network.HTTP.Headers.ContentSecurityPolicy as CSP
 import qualified Network.HTTP.Headers.ContentSecurityPolicyReportOnly as CSPRO
 import qualified Network.HTTP.Headers.Mason as M
@@ -224,11 +226,32 @@ prop_roundtrip_cspro = property $ do
     Left err -> error (err <> " on " <> show bs)
 
 
+checkedPolicyWrites :: Spec
+checkedPolicyWrites = do
+  it "checks all authored directives before writing CSP" $
+    mapM_ (reject "Content-Security-Policy" . CSP.ContentSecurityPolicyList . policies) invalid
+  it "checks all authored directives before writing report-only CSP" $
+    mapM_ (reject "Content-Security-Policy-Report-Only" . CSPRO.ContentSecurityPolicyReportOnlyList . policies) invalid
+  where
+    good = CSP.CSPPolicy [CSP.Directive "Default-SRC" ["'none'"]]
+    policies directive = good :| [CSP.CSPPolicy [], CSP.CSPPolicy [directive]]
+    invalid =
+      [CSP.Directive "" [], CSP.Directive "x;script-src" [], CSP.Directive "x_name" [], CSP.Directive "custom-directive_" []]
+        <> map (\value -> CSP.Directive "script-src" [value])
+          ["", "abc def", "abc,def", "abc;def", "abc\tdef", "é", "a\DEL", "https://edge.test;"]
+    reject :: (KnownHeader a, HeaderRenderingResultToNonEmpty (Cardinality a)) => HeaderFieldName -> a -> Expectation
+    reject name value = do
+      let fields = setRawHeader name ("default-src 'none'" :| ["script-src 'self'"]) (headerMapFromList [])
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value fields `shouldBe` fields
+
+
 tests :: Spec
 tests =
   describe "Csp" $
     sequence_
       [ unit_parse_csp
+      , checkedPolicyWrites
       , unit_parse_csp_trailing
       , unit_render_csp
       , unit_parse_cspro

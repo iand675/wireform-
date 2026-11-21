@@ -307,10 +307,25 @@ outboundTrailerMakers = describe "Engine outbound trailers" $ do
         result <- try @ClientStreamError (send outgoing drainInput)
         result `shouldBe` Left (ClientStreamReset InternalError)
         send request $ \response -> drainInput response `shouldReturn` ""
+  it "rejects a generated field whose definition requires initial headers" $
+    withinDeadline $ do
+      let handler incoming _ respond = do
+            _ <- drainInput incoming
+            respond emptyResponse []
+          outgoing = OutObj [(":method", "POST"), (":path", "/invalid-trailer")]
+            (OutBodyBuilder "body") invalidTrailers
+      withEnginePair handler $ \send -> do
+        result <- try @IOError (send outgoing drainInput)
+        case result of
+          Left err -> ioeGetErrorString err `shouldBe` "forbidden trailer field"
+          Right _ -> expectationFailure "expected local trailer validation to fail"
+        send request $ \response -> drainInput response `shouldReturn` ""
   where
     emptyResponse = OutObj [(":status", "200")] OutBodyNone defaultTrailersMaker
     failingTrailers Nothing = throwIO (userError "trailer producer failed")
     failingTrailers (Just _) = pure (NextTrailersMaker failingTrailers)
+    invalidTrailers Nothing = pure (Trailers [("Content-Type", "text/plain")])
+    invalidTrailers (Just _) = pure (NextTrailersMaker invalidTrailers)
 
 roundTripTrailers :: Bool -> [BS.ByteString] -> (IO () -> OutBody) -> IO ()
 roundTripTrailers initiallyReady chunks makeBody = withinDeadline $ do

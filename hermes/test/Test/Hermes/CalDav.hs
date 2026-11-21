@@ -5,13 +5,14 @@ module Test.Hermes.CalDav (tests) where
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Short as SBS
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Either (isLeft)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Short as ST
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.CalDAVTimezones as CTZ
 import qualified Network.HTTP.Headers.CalManagedID as CMI
 import qualified Network.HTTP.Headers.IfScheduleTagMatch as ISTM
@@ -221,6 +222,24 @@ typedSchedulingFields = describe "typed scheduling fields" $ do
     lookupHeader @STg.ScheduleTag (incoming "Schedule-Tag") `shouldBe` Right (Just tag)
     lookupHeader @ISTM.IfScheduleTagMatch (incoming "If-Schedule-Tag-Match") `shouldBe` Right (Just condition)
     headerMapToList (setHeader condition (headerMapFromList [])) `shouldBe` [("if-schedule-tag-match", wire)]
+  it "rejects invalid authored Schedule-Tag bodies" $ do
+    let previous = headerMapFromList [("Schedule-Tag", "\"one\""), ("Schedule-Tag", "\"two\"")]
+    mapM_
+      ( \body -> do
+          let value = STg.ScheduleTagBytes body
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      ["bad\"quote", "dangling\\", "bad\\\DEL", "bare\DEL"]
+  it "rejects invalid authored If-Schedule-Tag-Match bodies" $ do
+    let previous = headerMapFromList [("If-Schedule-Tag-Match", "\"one\""), ("If-Schedule-Tag-Match", "\"two\"")]
+    mapM_
+      ( \body -> do
+          let value = ISTM.IfScheduleTagMatch (STg.ScheduleTagBytes body)
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
+      )
+      ["bad\"quote", "dangling\\", "bad\\\DEL", "bare\DEL"]
 
   it "rejects weak validators, dangling quoted pairs, and repeated scheduling tags" $ do
     let scheduled wire = ("Schedule-Tag", wire)
@@ -276,6 +295,15 @@ tests =
       , it "If-Schedule-Tag-Match round-trip" prop_ifScheduleTagMatch
       , unit_calManagedID_parse
       , unit_calManagedID_render
+      , it "rejects authored attachment identifiers with delimiters or outer whitespace" $ do
+          let fields = headerMapFromList [("Cal-Managed-ID", "previous")]
+              reject :: ST.ShortText -> Expectation
+              reject text = do
+                let value = CMI.CalManagedID text
+                renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+                setHeader value fields `shouldBe` fields
+          mapM_ reject [" a", "a\t", "a:b", "a,b", "a;b", "a\"b", "a\nb", "a\DEL"]
+          renderHeaderLines defaultHeaderSettings (CMI.CalManagedID "a\tb") `shouldBe` Just ("a\tb" :| [])
       , it "Cal-Managed-ID round-trip" prop_calManagedID
       , unit_calDAVTimezones_parse
       , unit_calDAVTimezones_render

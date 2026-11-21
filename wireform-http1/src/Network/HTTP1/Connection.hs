@@ -60,6 +60,7 @@ module Network.HTTP1.Connection (
 
   -- * Framing-aware body
   writeChunkedBody,
+  writeChunkedTerminator,
   readBody,
   readBodyAndTrailers,
   drainBody,
@@ -74,16 +75,17 @@ import Control.Concurrent.MVar (
   tryPutMVar,
  )
 import Control.Exception (Exception, SomeException, finally, throwIO, try)
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Word (Word64)
 import GHC.Generics (Generic)
-import Network.HTTP1.Chunked (encodeChunk, encodeLastChunk, encodeLastChunkWithTrailers)
+import Network.HTTP.Headers.Trailer (isForbiddenTrailerName)
+import Network.HTTP1.Chunked (encodeChunk, encodeLastChunkWithTrailers)
 import Network.HTTP1.Headers (ConnectionOption (..), Header, connectionOptions, hHas)
 import Network.HTTP1.Method qualified as Method
-import Network.HTTP1.Parser (Framing (..), ParseError (..), parseHeaderLine)
+import Network.HTTP1.Parser (Framing (..), ParseError (..), findNonFieldValue, findNonToken, parseHeaderLine)
 import Network.HTTP1.StreamingReader qualified as SR
 import Network.HTTP1.Types (
   Body (..),
@@ -420,14 +422,29 @@ writeChunkedBody conn producer produceTrailers = loop
     loop = do
       chunk <- producer
       case chunk of
-        Nothing -> do
-          trailers <- produceTrailers
-          connectionSendBuilder conn $ case trailers of
-            [] -> encodeLastChunk
-            _ -> encodeLastChunkWithTrailers trailers
+        Nothing -> writeChunkedTerminator conn mempty produceTrailers
         Just bytes
           | BS.null bytes -> loop
           | otherwise -> connectionSendBuilder conn (encodeChunk bytes) >> loop
+
+
+-- | Finish a chunked message. The optional prefix finishes a data
+-- chunk whose payload was sent separately. Validate the complete
+-- field list before writing any part of the terminator.
+writeChunkedTerminator :: Connection -> B.Builder -> IO [Header] -> IO ()
+writeChunkedTerminator conn prefix produceTrailers = do
+  trailers <- produceTrailers
+  forM_ trailers validateField
+  connectionSendBuilder conn (prefix <> encodeLastChunkWithTrailers trailers)
+  where
+    validateField (name, value)
+      | BS.null name || findNonToken name 0 /= BS.length name =
+          ioError (userError "invalid trailer field name")
+      | findNonFieldValue value 0 /= BS.length value =
+          ioError (userError "invalid trailer field value")
+      | isForbiddenTrailerName name =
+          ioError (userError "forbidden trailer field")
+      | otherwise = pure ()
 
 
 readBody :: Connection -> Framing -> IO Body

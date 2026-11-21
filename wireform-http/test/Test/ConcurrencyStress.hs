@@ -11,9 +11,9 @@ These tests exercise shared mutable state under concurrent load:
 -}
 module Test.ConcurrencyStress (tests) where
 
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (forkIO, forkIOWithUnmask, killThread)
 import Control.Concurrent.MVar
-import Control.Exception (SomeException, bracket, finally, try)
+import Control.Exception (SomeException, bracket, try)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.CaseInsensitive qualified as CI
@@ -97,26 +97,32 @@ h2ParallelStreamsWithCustomHeaders =
         responses <-
           mapM
             ( \i -> do
-                let hdrs =
-                      [ (CI.mk (BS8.pack ("x-stream-" <> show i)), BS8.pack ("value-" <> show i))
-                      , (CI.mk "x-request-id", BS8.pack (show i))
+                let requestId = BS8.pack (show i)
+                    hdrs =
+                      [ (streamHeader requestId, "value-" <> requestId)
+                      , ("x-request-id", requestId)
                       ]
                 sendOn c (mkH2Request "GET" "/" port BodyEmpty hdrs)
             )
             [1 :: Int .. 15]
-        bodies <- mapM (drainBody . responseBody) responses
-        length bodies `shouldBe` 15
         mapM_
-          ( \body ->
-              (not (BS.null body)) `shouldBe` True
+          ( \(i, response) -> do
+              let requestId = BS8.pack (show i)
+              responseStatus response `shouldBe` S.status200
+              lookup "x-response-id" (responseHeaders response) `shouldBe` Just requestId
+              lookup (streamHeader requestId) (responseHeaders response) `shouldBe` Just ("value-" <> requestId)
+              drainBody (responseBody response) `shouldReturn` requestId
           )
-          bodies
+          (zip [1 :: Int .. 15] responses)
   where
+    streamHeader requestId = CI.mk ("x-stream-" <> requestId)
+
     headerEcho req = do
       let reqId = case lookup (CI.mk "x-request-id") (requestHeaders req) of
             Just v -> v
             Nothing -> "unknown"
-      pure (resp200 V.HTTP2 reqId)
+          echoed = filter ((== streamHeader reqId) . fst) (requestHeaders req)
+      pure ((resp200 V.HTTP2 reqId) {responseHeaders = ("x-response-id", reqId) : echoed})
 
 
 h2ManySequentialRequestsSameConn :: Spec
@@ -236,27 +242,15 @@ withTestServer
   -> Handler
   -> (String -> IO a)
   -> IO a
-withTestServer range handler action = do
-  readyVar <- newEmptyMVar
-  let hints =
-        NS.defaultHints
-          { NS.addrFlags = [NS.AI_PASSIVE]
-          , NS.addrSocketType = NS.Stream
-          }
-  addrs <- NS.getAddrInfo (Just hints) (Just "127.0.0.1") (Just "0")
-  case addrs of
-    [] -> expectationFailure "no addr available for test bind"
-    (addr : _) -> bracket
-      (NS.openSocket addr)
-      NS.close
-      $ \listenSock -> do
-        NS.setSocketOption listenSock NS.ReuseAddr 1
-        NS.bind listenSock (NS.addrAddress addr)
-        NS.listen listenSock 128
-        bound <- NS.getSocketName listenSock
-        let portStr = case bound of
-              NS.SockAddrInet p _ -> show (fromIntegral p :: Int)
-              _ -> "0"
+withTestServer range handler action =
+  bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \listenSock -> do
+    NS.setSocketOption listenSock NS.ReuseAddr 1
+    NS.bind listenSock (NS.SockAddrInet 0 (NS.tupleToHostAddress (127, 0, 0, 1)))
+    NS.listen listenSock 128
+    bound <- NS.getSocketName listenSock
+    case bound of
+      NS.SockAddrInet port _ -> do
+        let portStr = show (fromIntegral port :: Int)
             cfg =
               defaultServerConfig
                 { serverHost = "127.0.0.1"
@@ -264,11 +258,11 @@ withTestServer range handler action = do
                 , serverVersionRange = range
                 , serverHandler = handler
                 }
-        tid <- forkIO $ do
-          putMVar readyVar ()
-          runServerOnListener cfg listenSock
-        takeMVar readyVar
-        action portStr `finally` killThread tid
+        bracket
+          (forkIOWithUnmask (\unmask -> unmask (runServerOnListener cfg listenSock)))
+          killThread
+          (const (action portStr))
+      _ -> expectationFailure "expected an IPv4 loopback socket"
 
 
 runClient :: VersionRange -> String -> (Connection -> IO a) -> IO a

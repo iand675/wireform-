@@ -104,6 +104,13 @@ instance KnownHeader ProxyInstruction where
   renderToHeaders _ = wireBytes
 
 
+  renderToHeadersChecked _ (ParsedProxyInstruction wire _) = Just wire
+  renderToHeadersChecked _ (RawProxyInstruction text) =
+    let wire = ST.toByteString text
+    in either (const Nothing) (const (Just wire)) $
+         parseSingleFieldLine "Proxy-Instruction" instructionParser (wire :| [])
+
+
   headerName _ = hProxyInstruction
 
 

@@ -59,6 +59,13 @@ instance KnownHeader Isolation where
   renderToHeaders _ value = M.toStrictByteString (renderIsolation value)
 
 
+  renderToHeadersChecked _ Snapshot = Just "snapshot"
+  renderToHeadersChecked _ (IsolationOther token)
+    | isHttpTokenText token = Just (ST.toByteString token)
+    | otherwise = Nothing
+  {-# INLINE renderToHeadersChecked #-}
+
+
   headerName _ = hIsolation
 
 

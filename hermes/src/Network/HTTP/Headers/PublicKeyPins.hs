@@ -38,7 +38,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hPublicKeyPins)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Headers.TransportPolicy (pinPolicy, renderPinPolicy)
+import Network.HTTP.Headers.TransportPolicy (encodePinPolicyChecked, pinPolicy, renderPinPolicy)
 
 
 {- | A single pinned public key: a hash algorithm and a base64-encoded SPKI
@@ -78,6 +78,10 @@ instance KnownHeader PublicKeyPins where
 
 
   renderToHeaders _ = M.toStrictByteString . renderPublicKeyPins
+
+
+  renderToHeadersChecked _ (PublicKeyPins pins age subdomains uri) =
+    encodePinPolicyChecked pinAlgorithm pinFingerprint pins (Just age) subdomains uri
 
 
   headerName _ = hPublicKeyPins

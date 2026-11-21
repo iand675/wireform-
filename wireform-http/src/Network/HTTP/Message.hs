@@ -65,8 +65,7 @@ data Request = Request
 
   HTTP\/2 trailers arrive as a final HEADERS frame with
   @END_STREAM@; HTTP\/1.x trailers arrive in the field block
-  after the chunked terminator (currently dropped by the
-  connection-level body reader — see the @Trailer@ docs).
+  after the chunked terminator.
   Returns @[]@ when the request had no trailers.  Must be called
   after 'requestBody' has been fully drained.
   -}
@@ -105,9 +104,10 @@ data Response = Response
   materialised until the body has finished streaming.  Returns
   the empty list when the response had no trailers.
 
-  Outbound from the unified server: only HTTP\/2 surfaces
-  trailers on the wire today (the HTTP\/1.x encoder does not
-  yet emit a trailer block on the chunked body's terminator).
+  The server evaluates this action after sending the body on HTTP\/2
+  and on chunked HTTP\/1.1 responses. Declare the expected fields
+  with @Trailer@ to select chunked framing for buffered HTTP\/1.1
+  responses that carry trailers.
   -}
   , responseH2StreamId :: !Word32
   {- ^ HTTP\/2 stream id this response was carried on, or @0@

@@ -51,7 +51,7 @@ data AcceptFeatures
 
 
 {- | The original text API. Typed lookup validates the grammar. Constructing
-with this pattern retains the caller's text for rendering.
+with this pattern retains the caller's text. Checked writes validate it.
 -}
 pattern AcceptFeatures :: ST.ShortText -> AcceptFeatures
 pattern AcceptFeatures {rawAcceptFeatures} <- (featureText -> rawAcceptFeatures)
@@ -158,6 +158,15 @@ instance KnownHeader AcceptFeatures where
 
 
   renderToHeaders _ = featureWire
+
+
+  renderToHeadersChecked _ (ParsedAcceptFeatures wire _) = Just wire
+  renderToHeadersChecked _ (RawAcceptFeatures value) =
+    case parseFieldLine "Accept-Features" featureEntriesParser wire of
+      Left _ -> Nothing
+      Right _ -> Just wire
+    where
+      wire = ST.toByteString value
 
 
   headerName _ = hAcceptFeatures

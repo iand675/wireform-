@@ -11,7 +11,7 @@ import Data.Word (Word8)
 import Hedgehog (Gen, Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.CDNCacheControl as CCC
 import qualified Network.HTTP.Headers.CDNLoop as CL
 import qualified Network.HTTP.Headers.CacheControl as CC
@@ -161,6 +161,16 @@ cdnDictionaryTests = do
     let fields = headerMapFromList [("CDN-Cache-Control", "max-age=60")]
     setHeader invalid fields `shouldBe` fields
 
+  it "validates authored CDN-Cache-Control after dictionary replacement" $ do
+    let fields = headerMapFromList [("CDN-Cache-Control", "max-age=10"), ("CDN-Cache-Control", "no-store")]
+        repaired = CCC.CDNCacheControl (CC.MaxAge maxBound :| [CC.Public, CC.Unknown "dev" (Just "bad\nvalue"), CC.MaxAge 60, CC.Unknown "dev" Nothing])
+        invalid = CCC.CDNCacheControl (CC.MaxAge 60 :| [CC.MaxAge maxBound])
+        extension = CC.Unknown "min-fresh" (Just "future")
+    headerMapToList (setHeader repaired fields) `shouldBe` [("cdn-cache-control", "max-age=60, public, dev")]
+    setHeader invalid fields `shouldBe` fields
+    renderCC (CCC.CDNCacheControl (CC.MinFresh 5 :| [extension])) `shouldBe` "min-fresh=future"
+    setHeader (CCC.CDNCacheControl (extension :| [CC.MinFresh 5])) fields `shouldBe` fields
+
 
 -- CDN-Loop --------------------------------------------------------------------
 
@@ -234,6 +244,23 @@ genNonEmpty :: Gen a -> Gen (NonEmpty a)
 genNonEmpty g = (:|) <$> g <*> Gen.list (Range.linear 0 4) g
 
 
+checkedLoopWrites :: Spec
+checkedLoopWrites = it "validates authored identifiers and decoded parameters before writing CDN-Loop" $ do
+  let previous = headerMapFromList [("CDN-Loop", "old"), ("CDN-Loop", "fallback")]
+      create entry = CL.CDNLoop (CL.CDNInfo "edge" [] :| [entry])
+  mapM_
+    (\entry -> do
+      let value = create entry
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value previous `shouldBe` previous)
+    (map (\name -> CL.CDNInfo name []) ["", "bad;id", "host,path", "[bad]:80", "example.test:abcd"]
+      ++ [CL.CDNInfo "upstream" [("bad=name", "ok")], CL.CDNInfo "upstream" [("desc", "x\ny")]])
+  let valid = create (CL.CDNInfo "[2001:db8::1]:443" [("desc", "one é"), ("empty", "")])
+  renderHeaderLines defaultHeaderSettings valid `shouldBe` Just ("edge, [2001:db8::1]:443;desc=\"one \xe9\";empty=\"\"" :| [])
+  renderHeaderLines defaultHeaderSettings (create (CL.CDNInfo "edge.test:00099999" []))
+    `shouldBe` Just ("edge, edge.test:00099999" :| [])
+
+
 tests :: Spec
 tests =
   describe "Cdn" $
@@ -245,5 +272,6 @@ tests =
       , unit_cl_parse
       , unit_cl_render
       , unit_cl_field_lines
+      , checkedLoopWrites
       , it "CDN-Loop round-trip" prop_cl_roundtrip
       ]

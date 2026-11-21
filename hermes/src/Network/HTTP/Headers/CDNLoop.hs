@@ -34,8 +34,8 @@ module Network.HTTP.Headers.CDNLoop (
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.Authority (cdnIdentifier)
-import Network.HTTP.Grammar.Rendering (encodeHttpParameterizedList, renderHttpParameterizedList)
+import Network.HTTP.Grammar.Authority (cdnIdentifier, isCdnIdentifier)
+import Network.HTTP.Grammar.Rendering (encodeHttpParameterizedList, encodeHttpParameterizedListChecked, renderHttpParameterizedList)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hCDNLoop)
 import qualified Network.HTTP.Headers.Mason as M
@@ -79,6 +79,11 @@ instance KnownHeader CDNLoop where
   renderToHeaders _ CDNLoopEmpty = []
   renderToHeaders _ value =
     [encodeHttpParameterizedList cdnInfoId cdnInfoParameters fst snd (cdnLoopEntries value)]
+
+
+  renderToHeadersChecked _ CDNLoopEmpty = Just []
+  renderToHeadersChecked _ value =
+    pure <$> encodeHttpParameterizedListChecked isCdnIdentifier cdnInfoId cdnInfoParameters fst snd (cdnLoopEntries value)
 
 
   omitHeaderValue CDNLoopEmpty = True

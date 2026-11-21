@@ -22,16 +22,12 @@ module Network.HTTP.Headers.XHttpMethodOverride (
   renderXHttpMethodOverride,
 ) where
 
-import Data.ByteString (ByteString)
-import qualified Data.ByteString.Internal as BSI
-import qualified Data.ByteString.Unsafe as BSU
 import Data.List.NonEmpty (NonEmpty (..))
-import GHC.ForeignPtr (plusForeignPtr)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXHttpMethodOverride)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Methods (Method, MethodError (..), methodToBytes, methodTokenParser, mkMethod)
+import Network.HTTP.Methods (Method, methodBytesChecked, methodToBytes, methodTokenParser, mkMethodWithOWS)
 
 
 -- | The overridden HTTP request method.
@@ -46,14 +42,9 @@ instance KnownHeader XHttpMethodOverride where
 
 
   parseFromHeaders _ (wire :| []) =
-    case mkMethod wire of
+    case mkMethodWithOWS wire of
       Right method -> Right (XHttpMethodOverride method)
-      Left (MethodInvalidByte byte)
-        | byte == 32 || byte == 9 ->
-            case mkMethod (trimOverrideOWS wire) of
-              Right method -> Right (XHttpMethodOverride method)
-              Left _ -> badOverride
-      Left _ -> badOverride
+      Left _ -> Left "Failed to parse X-Http-Method-Override header"
   parseFromHeaders _ _ = Left "Multiple X-Http-Method-Override field lines"
   {-# INLINE parseFromHeaders #-}
 
@@ -61,26 +52,11 @@ instance KnownHeader XHttpMethodOverride where
   renderToHeaders _ = methodToBytes . xHttpMethodOverrideMethod
 
 
+  renderToHeadersChecked _ = methodBytesChecked . xHttpMethodOverrideMethod
+  {-# INLINE renderToHeadersChecked #-}
+
+
   headerName _ = hXHttpMethodOverride
-
-
-badOverride :: Either String a
-badOverride = Left "Failed to parse X-Http-Method-Override header"
-
-
-trimOverrideOWS :: ByteString -> ByteString
-trimOverrideOWS bytes@(BSI.BS ptr size) =
-  let start = skipLeading 0
-      end = skipTrailing start size
-  in BSI.BS (plusForeignPtr ptr start) (end - start)
-  where
-    skipLeading i
-      | i < size && atOWS i = skipLeading (i + 1)
-      | otherwise = i
-    skipTrailing start end
-      | end > start && atOWS (end - 1) = skipTrailing start (end - 1)
-      | otherwise = end
-    atOWS i = isOWS (BSI.w2c (BSU.unsafeIndex bytes i))
 
 
 xHttpMethodOverrideParser :: ParserT st String XHttpMethodOverride

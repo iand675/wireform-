@@ -18,6 +18,7 @@ module Network.HTTP.Headers.DPoP (
   renderDPoP,
 ) where
 
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
@@ -43,6 +44,12 @@ instance KnownHeader DPoP where
 
 
   renderToHeaders _ = ST.toByteString . dPoPProof
+
+
+  renderToHeadersChecked _ (DPoP proof) =
+    let wire = ST.toByteString proof
+    in either (const Nothing) (const (Just wire)) $
+         parseSingleFieldLine "DPoP" token68Parser (wire :| [])
 
 
   headerName _ = hDPoP

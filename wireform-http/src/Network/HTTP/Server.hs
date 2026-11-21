@@ -43,6 +43,11 @@ module Network.HTTP.Server (
   -- * Handler
   Handler,
 
+  -- * Request preconditions
+  RepresentationValidators (..),
+  PreconditionDecision (..),
+  evaluatePreconditions,
+
   -- * Response defaults and OPTIONS \/ Allow
   addServerDefaults,
   optionsAllowResponse,
@@ -57,10 +62,19 @@ import Data.ByteString.Unsafe qualified as BSU
 import Data.CaseInsensitive qualified as CI
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List qualified as List
-import Data.Time.Clock (getCurrentTime)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
+import Data.Maybe (isJust)
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Word (Word8)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr)
+import Network.HTTP.Headers qualified as Typed
+import Network.HTTP.Headers.ETag (EntityTag, strongMatch, weakMatch)
+import Network.HTTP.Headers.IfMatch (IfMatch (..))
+import Network.HTTP.Headers.IfModifiedSince (IfModifiedSince (..))
+import Network.HTTP.Headers.IfNoneMatch (IfNoneMatch (..))
+import Network.HTTP.Headers.IfUnmodifiedSince (IfUnmodifiedSince (..))
 import Network.HTTP.HttpDate (formatHttpDate)
 import Network.HTTP.Internal.Convert qualified as Conv
 import Network.HTTP.Message
@@ -92,6 +106,110 @@ import Wireform.Transport.Config qualified as WC
 between HTTP\/1.x and HTTP\/2.
 -}
 type Handler = Request -> IO Response
+
+
+-- | The current representation and its available validators.
+data RepresentationValidators
+  = RepresentationValidators
+  { representationETag :: !(Maybe EntityTag)
+  , representationLastModified :: !(Maybe UTCTime)
+  -- ^ The modification date at HTTP-date precision.
+  }
+  deriving stock (Eq, Show)
+
+
+data PreconditionDecision
+  = PreconditionsProceed
+  | PreconditionsNotModified
+  | PreconditionsFailed
+  deriving stock (Eq, Show)
+
+
+{- | Apply the origin-server preconditions in RFC 9110 §13.2 before reading
+the request body, performing the method, or evaluating a range. Pass the
+status from the handler's ordinary request checks and the origin clock
+for obsolete RFC 850 dates. Supply 'Nothing' for a missing representation.
+Malformed entity-tag fields return their parser error. Invalid or
+repeated date fields are ignored.
+-}
+evaluatePreconditions
+  :: UTCTime
+  -> U.Status
+  -> Maybe RepresentationValidators
+  -> Request
+  -> Either String PreconditionDecision
+evaluatePreconditions now normalStatus representation request
+  | not (U.statusIsSuccessful normalStatus || U.statusCode normalStatus == 412) = Right PreconditionsProceed
+  | method == U.CONNECT || method == U.OPTIONS || method == U.TRACE = Right PreconditionsProceed
+  | otherwise = collect [] NoPreconditionDate [] NoPreconditionDate (requestHeaders request)
+  where
+    method = requestMethod request
+    settings = Typed.withHeaderDateReference now Typed.defaultHeaderSettings
+    isGetOrHead = method == U.GET || method == U.HEAD
+
+    collect [] NoPreconditionDate [] NoPreconditionDate [] = Right PreconditionsProceed
+    collect match unmodified noneMatch modified [] = do
+      canModify <- case match of
+        first : rest -> matchIfMatch <$> Typed.parseFromHeaders settings (inWireOrder first rest)
+        [] -> pure (dateMatches True unmodified Typed.parseFromHeaders ifUnmodifiedSince)
+      if canModify then validateRead noneMatch modified else Right PreconditionsFailed
+    collect !match !unmodified !noneMatch !modified ((name, value) : rest) =
+      case BS.length folded of
+        8 | folded == "if-match" -> collect (value : match) unmodified noneMatch modified rest
+        13 | folded == "if-none-match" -> collect match unmodified (value : noneMatch) modified rest
+        17 | folded == "if-modified-since" -> collect match unmodified noneMatch (recordDate value modified) rest
+        19 | folded == "if-unmodified-since" -> collect match (recordDate value unmodified) noneMatch modified rest
+        _ -> collect match unmodified noneMatch modified rest
+      where
+        folded = CI.foldedCase name
+
+    validateRead noneMatch modified = case noneMatch of
+      first : rest -> do
+        condition <- Typed.parseFromHeaders settings (inWireOrder first rest)
+        pure $
+          if matchIfNoneMatch condition
+            then if isGetOrHead then PreconditionsNotModified else PreconditionsFailed
+            else PreconditionsProceed
+      []
+        | isGetOrHead && dateMatches False modified Typed.parseFromHeaders ifModifiedSince -> Right PreconditionsNotModified
+        | otherwise -> Right PreconditionsProceed
+
+    matchIfMatch IfMatchAnyCurrentRepresentation = exists
+    matchIfMatch (IfMatchEntityTags tags) = matchesTag strongMatch tags
+    matchIfMatch IfMatchNoTags = False
+
+    matchIfNoneMatch IfNoneMatchAny = exists
+    matchIfNoneMatch (IfNoneMatchTags tags) = matchesTag weakMatch tags
+    matchIfNoneMatch IfNoneMatchNoTags = False
+
+    exists = isJust representation
+
+    matchesTag compareTags tags =
+      maybe False (\tag -> any (compareTags tag) tags) (representation >>= representationETag)
+
+    dateMatches
+      :: Bool
+      -> PreconditionDate
+      -> (Typed.HeaderSettings -> NonEmpty ByteString -> Either String a)
+      -> (a -> UTCTime)
+      -> Bool
+    dateMatches whenUnavailable dateField parse dateValue
+      | OnePreconditionDate wire <- dateField
+      , Just modified <- representation >>= representationLastModified
+      , Right condition <- parse settings (wire :| []) = modified <= dateValue condition
+      | otherwise = whenUnavailable
+
+    inWireOrder first [] = first :| []
+    inWireOrder first rest = NE.reverse (first :| rest)
+
+    recordDate value NoPreconditionDate = OnePreconditionDate value
+    recordDate _ _ = RepeatedPreconditionDate
+
+
+data PreconditionDate
+  = NoPreconditionDate
+  | OnePreconditionDate !ByteString
+  | RepeatedPreconditionDate
 
 
 data ServerConfig = ServerConfig
@@ -529,8 +647,7 @@ wrapHttp2Handler cfg handler h2req respond = do
     Just bad -> pure bad
     Nothing -> handler req
   resp <- addServerDefaults cfg resp0
-  h2resp <- Conv.toHttp2Response resp
-  respond h2resp
+  respond (Conv.toHttp2Response resp)
 
 
 {- | Pre-handler check for 'limitMaxHeaderBytes' and

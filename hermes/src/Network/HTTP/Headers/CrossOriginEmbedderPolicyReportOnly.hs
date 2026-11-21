@@ -48,6 +48,9 @@ instance KnownHeader CrossOriginEmbedderPolicyReportOnly where
   renderToHeaders settings = renderToHeaders settings . getCrossOriginEmbedderPolicyReportOnly
 
 
+  renderToHeadersChecked settings = renderToHeadersChecked settings . getCrossOriginEmbedderPolicyReportOnly
+
+
   headerName _ = hCrossOriginEmbedderPolicyReportOnly
 
 

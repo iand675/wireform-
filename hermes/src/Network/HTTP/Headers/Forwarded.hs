@@ -42,13 +42,19 @@ module Network.HTTP.Headers.Forwarded (
 import Control.Monad (guard, void)
 import Data.Bits (setBit, testBit)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
+import qualified Data.ByteString.Short.Internal as SBSI
+import Data.Either (isRight)
 import qualified Data.CaseInsensitive as CI
 import Data.Char (isAsciiLower, isAsciiUpper)
 import qualified Data.Set as Set
 import Data.Text.Short (ShortText)
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
-import Network.HTTP.Grammar.Authority (uriSchemeBytes)
+import Foreign.Ptr (plusPtr)
+import Network.HTTP.ContentNegotiation (sameNegotiationToken)
+import Network.HTTP.Grammar.Authority (isUriSchemeText, uriSchemeBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hForwarded)
 import Network.HTTP.Headers.Host (hostParser)
@@ -56,6 +62,7 @@ import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
 import Network.IPAddress (ipv4Parser, skipIPv6Parser)
+import Wireform.Encode.Direct (dWord8)
 import Wireform.Parser.Driver (parseByteString)
 
 
@@ -102,6 +109,11 @@ instance KnownHeader Forwarded where
 
 
   renderToHeaders _ fwd = [M.toStrictByteString (renderForwarded fwd)]
+
+
+  renderToHeadersChecked _ (Forwarded hops)
+    | all validHop hops = Just [encodeForwarded hops]
+    | otherwise = Nothing
 
 
   headerName _ = hForwarded
@@ -178,16 +190,29 @@ parameterText name raw = case name of
 
 parameterValue :: ParameterName -> ParserT st String ForwardedValue
 parameterValue = \case
-  For -> validatedValue nodeName (nodeName *> optionalPort)
-  By -> validatedValue nodeName (nodeName *> optionalPort)
-  Host -> validatedValue bareHost (void hostParser)
-  Proto -> validatedValue uriSchemeBytes uriSchemeBytes
+  For -> knownValue For
+  By -> knownValue By
+  Host -> validatedValue bareHost (knownValueSyntax Host True)
+  Proto -> knownValue Proto
   Extension -> (ForwardedToken <$> rfc9110Token) <|> (ForwardedQuoted . ST.fromText <$> httpQuotedString)
   where
     -- A host reg-name may itself contain delimiter characters. Limit the
     -- bare form to its HTTP token before validating the authority.
     bareHost = rfc9110TokenBS >>= validate (void hostParser)
+    knownValue name = validatedValue (knownValueSyntax name False) (knownValueSyntax name True)
 {-# INLINE parameterValue #-}
+
+
+knownValueSyntax :: ParameterName -> Bool -> ParserT st String ()
+knownValueSyntax name quoted = case name of
+  For -> node
+  By -> node
+  Host -> void hostParser
+  Proto -> uriSchemeBytes
+  Extension -> pure ()
+  where
+    node = nodeName *> (if quoted then optionalPort else pure ())
+{-# INLINE knownValueSyntax #-}
 
 
 validatedValue :: ParserT st String () -> ParserT st String () -> ParserT st String ForwardedValue
@@ -232,6 +257,81 @@ obfuscated =
 -- ---------------------------------------------------------------------------
 -- Renderer
 -- ---------------------------------------------------------------------------
+
+validHop :: ForwardedElement -> Bool
+validHop (ForwardedElement pairs) = check 0 Set.empty pairs
+  where
+    check :: Word -> Set.Set (CI.CI BS.ByteString) -> [(ShortText, ForwardedValue)] -> Bool
+    check !_ !_ [] = True
+    check !known !extensions ((name, value) : rest) =
+      isHttpTokenText name && validForwardedValue kind value && case kind of
+        Extension -> not (Set.member key extensions) && check known (Set.insert key extensions) rest
+        _ -> not (testBit known bit) && check (setBit known bit) extensions rest
+      where
+        kind
+          | sameNegotiationToken name "for" = For
+          | sameNegotiationToken name "by" = By
+          | sameNegotiationToken name "host" = Host
+          | sameNegotiationToken name "proto" = Proto
+          | otherwise = Extension
+        bit = fromEnum kind
+        key = CI.mk (ST.toByteString name)
+
+
+validForwardedValue :: ParameterName -> ForwardedValue -> Bool
+validForwardedValue kind = \case
+  ForwardedToken text -> isHttpTokenText text && validSyntax False text
+  ForwardedQuoted text -> SBS.all (isOpaqueByte . fromIntegral) (ST.toShortByteString text) && validSyntax True text
+  where
+    validSyntax quoted text = case kind of
+      Extension -> True
+      Proto -> isUriSchemeText text
+      _ -> isRight (parseByteString (knownValueSyntax kind quoted <* eof) (ST.toByteString text))
+
+
+encodeForwarded :: [ForwardedElement] -> BS.ByteString
+encodeForwarded [] = BS.empty
+encodeForwarded hops@(first : rest) = BSI.unsafeCreateUptoN (foldl' hopBound 0 hops) $ \ptr -> do
+  afterFirst <- writeHop ptr 0 first
+  writeHops ptr afterFirst rest
+  where
+    add = BSI.checkedAdd "Forwarded"
+    width = SBS.length . ST.toShortByteString
+    hopBound size (ForwardedElement pairs) = foldl' pairBound (add size 3) pairs
+    pairBound size (name, value) = add (add size (add 2 (width name))) (valueBound value)
+    valueBound (ForwardedToken token) = width token
+    valueBound (ForwardedQuoted quoted) = let size = width quoted in add 2 (add size size)
+
+    writeHops _ !offset [] = pure offset
+    writeHops ptr !offset (hop : more) = do
+      afterComma <- dWord8 ptr offset 44
+      afterSpace <- dWord8 ptr afterComma 32
+      afterHop <- writeHop ptr afterSpace hop
+      writeHops ptr afterHop more
+
+    writeHop ptr offset (ForwardedElement []) = dWord8 ptr offset 59
+    writeHop ptr offset (ForwardedElement (entry : entries)) =
+      writePair ptr offset entry >>= \end -> writePairs ptr end entries
+
+    writePairs _ !offset [] = pure offset
+    writePairs ptr !offset (entry : entries) = do
+      afterSeparator <- dWord8 ptr offset 59
+      afterEntry <- writePair ptr afterSeparator entry
+      writePairs ptr afterEntry entries
+
+    writePair ptr offset (name, value) = do
+      afterName <- copyText ptr offset name
+      start <- dWord8 ptr afterName 61
+      case value of
+        ForwardedToken token -> copyText ptr start token
+        ForwardedQuoted text -> R.foldHttpQuotedShortBytes (dWord8 ptr) start (ST.toShortByteString text)
+
+    copyText ptr offset text = do
+      let bytes = ST.toShortByteString text
+          size = SBS.length bytes
+      SBSI.copyToPtr bytes 0 (ptr `plusPtr` offset) size
+      pure $! offset + size
+
 
 renderForwarded :: Forwarded -> M.Builder
 renderForwarded (Forwarded els) =

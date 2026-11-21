@@ -17,6 +17,7 @@ module Network.HTTP.Headers.SaveData (
   saveDataPreference,
   saveDataParser,
   renderSaveData,
+  renderSaveDataChecked,
 ) where
 
 import Data.List.NonEmpty (NonEmpty (..))
@@ -66,9 +67,16 @@ instance KnownHeader SaveData where
   parseFromHeaders _ fields = parseStructuredFieldLines "Save-Data" saveDataParser fields
 
 
-  renderToHeaders _ (SaveData "on") = "on"
-  renderToHeaders _ (SaveData token) = ST.toByteString token
-  renderToHeaders _ field = M.toStrictByteString (renderSaveData field)
+  renderToHeaders settings value = maybe "" id (renderToHeadersChecked settings value)
+  {-# INLINE renderToHeaders #-}
+
+
+  renderToHeadersChecked _ (SaveData "on") = Just "on"
+  renderToHeadersChecked _ (SaveData token)
+    | isStructuredFieldToken (RFC8941Token token) = Just (ST.toByteString token)
+    | otherwise = Nothing
+  renderToHeadersChecked _ value = either (const Nothing) (Just . M.toStrictByteString) (renderSaveDataChecked value)
+  {-# INLINE renderToHeadersChecked #-}
 
 
   omitHeaderValue = null . saveDataItems
@@ -84,8 +92,13 @@ saveDataParser = SaveDataList <$> (ows *> rfc8941List item <* ows)
     item = SaveDataItem <$> rfc8941Token <*> structuredFieldParameters
 
 
+-- | Render the field value. An invalid list produces no bytes.
 renderSaveData :: SaveData -> M.Builder
-renderSaveData = M.intersperse ", " . map renderItem . saveDataItems
+renderSaveData = either (const mempty) id . renderSaveDataChecked
+
+
+-- | Validate tokens and the surviving parameters of every item.
+renderSaveDataChecked :: SaveData -> Either String M.Builder
+renderSaveDataChecked = R.renderStructuredFieldListChecked . map toMember . saveDataItems
   where
-    renderItem (SaveDataItem token parameters) = R.rfc8941Token token <> foldMap renderParameter parameters
-    renderParameter (StructuredFieldParameter key value) = R.renderStructuredFieldParameter key value
+    toMember (SaveDataItem token parameters) = StructuredItem (StructuredFieldItem (Token token) parameters)

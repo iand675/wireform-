@@ -97,12 +97,11 @@ alterRawHeader :: HeaderFieldName -> (Maybe (NonEmpty BS.ByteString) -> Maybe (N
 alterRawHeader name f (HeaderMap m) = HeaderMap $ Map.alter (fmap reverseValues . f . fmap reverseValues) name m
 
 
-{- | Render the field lines to send. 'Nothing' means the field is omitted.
--}
+-- | Render the field lines to send, omitting absent or rejected values.
 renderHeaderLines :: forall a. (KnownHeader a, HeaderRenderingResultToNonEmpty (Cardinality a)) => HeaderSettings -> a -> Maybe (NonEmpty BS.ByteString)
 renderHeaderLines settings a
   | omitHeaderValue a = Nothing
-  | otherwise = headerRenderingResultToNonEmptyMaybe @(Cardinality a) (renderToHeaders settings a)
+  | otherwise = renderToHeadersChecked settings a >>= headerRenderingResultToNonEmptyMaybe @(Cardinality a)
 {-# INLINE renderHeaderLines #-}
 
 
@@ -114,7 +113,7 @@ setHeader :: forall a. (KnownHeader a, HeaderRenderingResultToNonEmpty (Cardinal
 setHeader a m
   | omitHeaderValue a = deleteHeader name m
   | otherwise =
-      case headerRenderingResultToNonEmptyMaybe @(Cardinality a) (renderToHeaders defaultHeaderSettings a) of
+      case renderToHeadersChecked defaultHeaderSettings a >>= headerRenderingResultToNonEmptyMaybe @(Cardinality a) of
         Nothing -> m
         Just values -> setRawHeader name values m
   where
@@ -242,9 +241,18 @@ class Typeable a => KnownHeader a where
   {- | Render the value in the representation selected by its 'Cardinality'.
 
   Use 'renderHeaderLines' when emitting a field section so that
-  field-specific omission rules also apply.
+  field-specific omission and rejection rules also apply.
   -}
   renderToHeaders :: HeaderSettings -> a -> HeaderRenderingResult (Cardinality a)
+
+
+  {- | Render a value for emission. 'Nothing' rejects the value and keeps
+  existing field lines when called by 'setHeader'. Explicit omission is
+  controlled by 'omitHeaderValue'.
+  -}
+  renderToHeadersChecked :: HeaderSettings -> a -> Maybe (HeaderRenderingResult (Cardinality a))
+  renderToHeadersChecked settings value = Just (renderToHeaders settings value)
+  {-# INLINE renderToHeadersChecked #-}
 
 
   {- | Whether the value means that the field is intentionally absent.

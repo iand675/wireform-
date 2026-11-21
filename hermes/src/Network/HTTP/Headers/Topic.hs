@@ -16,6 +16,8 @@ module Network.HTTP.Headers.Topic (
 ) where
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Short as SBS
 import qualified Data.Text.Short as ST
 import qualified Data.Text.Short.Unsafe as STU
 import Network.HTTP.Headers
@@ -40,6 +42,18 @@ instance KnownHeader Topic where
 
 
   renderToHeaders _ = ST.toByteString . topicValue
+
+
+  renderToHeadersChecked _ (Topic value) =
+    case base64UrlChars of
+      AsciiSet low high
+        | len > 0 && len <= topicLengthLimit
+        , scanCompactBytes (asciiMember low high . BSI.w2c) bytes 0 ->
+            Just (SBS.fromShort bytes)
+      _ -> Nothing
+    where
+      bytes = ST.toShortByteString value
+      len = SBS.length bytes
 
 
   headerName _ = hTopic

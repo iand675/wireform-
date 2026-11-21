@@ -7,10 +7,11 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.Text.Short as ST
 import Hedgehog (Property, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import Network.HTTP.Headers (headerMapFromList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import qualified Network.HTTP.Headers.Cookie2 as C2
 import Network.HTTP.Headers.HeaderFieldName (hCookie2, hSetCookie2)
 import qualified Network.HTTP.Headers.Mason as M
@@ -60,6 +61,24 @@ propSetCookie2 = property $ do
 tests :: Spec
 tests = describe "ObsoleteCookie" $ do
   describe "Cookie2" $ do
+    it "validates checked writes from legacy cookie text" $ do
+      let previous = headerMapFromList [("Cookie2", "$Version=1")]
+      forM_ ["", "$Version=+1", "$Version=\" 1\"", "$Version=1, $Version=2"] $ \wire -> do
+        let value = C2.Cookie2 wire
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value previous `shouldBe` previous
+      renderHeaderLines defaultHeaderSettings (C2.Cookie2 " \t$vErSiOn=\"0001\" ")
+        `shouldBe` Just (" \t$vErSiOn=\"0001\" " :| [])
+    it "retains both version-one spellings in copied and sliced inputs" $ do
+      forM_ ["$Version=1", "$Version=\"1\""] $ \wire ->
+        forM_ [0 .. 15] $ \offset -> do
+          let sliced = BS.take (BS.length wire) (BS.drop offset (BS.replicate offset 0 <> wire <> "x"))
+          case lookupHeader @C2.Cookie2 (headerMapFromList [("Cookie2", sliced)]) of
+            Right (Just value) -> do
+              C2.cookie2Version value `shouldBe` Right 1
+              renderHeaderLines defaultHeaderSettings value `shouldBe` Just (wire :| [])
+            result -> expectationFailure (show result)
+      renderHeaderLines defaultHeaderSettings (C2.cookie2FromVersion 1) `shouldBe` Just ("$Version=1" :| [])
     it "reads decimal versions in token and quoted form and retains the wire spelling" $ do
       let wire = " \t$vErSiOn = \"0001\" \t"
       readVersion wire `shouldBe` Right (Just 1)
@@ -79,6 +98,24 @@ tests = describe "ObsoleteCookie" $ do
         `shouldSatisfy` isLeft
     it "round-trips arbitrary-precision cookie versions" propCookie2
   describe "Set-Cookie2" $ do
+    it "validates checked writes from legacy cookie text atomically" $ do
+      let previous = headerMapFromList [("Set-Cookie2", "a=x; Version=1"), ("Set-Cookie2", "b=y; Version=2")]
+          first = "n=\"a,b\"; Version=\"1\"; Version=ignored"
+          second = "m=z; Version=2; Port"
+      renderHeaderLines defaultHeaderSettings (SC2.SetCookie2s []) `shouldBe` Nothing
+      setHeader (SC2.SetCookie2s []) previous `shouldBe` previous
+      case lookupHeader @SC2.SetCookie2s (headerMapFromList [("Set-Cookie2", first)]) of
+        Right (Just (SC2.SetCookie2s [parsed])) -> do
+          forM_ ["", "n=x", "n=x; Version=1; Port=1234", "n=x; Version=1, m=y"] $ \wire -> do
+            let invalid = SC2.SetCookie2 wire
+                authored = SC2.SetCookie2 second
+            forM_ [[invalid, parsed, authored], [parsed, invalid, authored], [parsed, authored, invalid]] $ \lines' -> do
+              let value = SC2.SetCookie2s lines'
+              renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+              setHeader value previous `shouldBe` previous
+          let accepted = SC2.SetCookie2s [parsed, SC2.SetCookie2 second]
+          renderHeaderLines defaultHeaderSettings accepted `shouldBe` Just (first :| [ST.toByteString second])
+        result -> expectationFailure (show result)
     it "recognizes every RFC attribute and preserves folded and repeated field lines" $ do
       let first =
             "Customer=\"A, B\"; Version=\"1\"; path=\"/acme\"; Port=\"80, 8000\"; Secure; Discard;"

@@ -15,8 +15,8 @@ import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Network.HTTP.ContentCoding (ContentCoding (..))
 import Network.HTTP.ContentNegotiation (MediaType (..))
-import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), decodeExtendedValue, parseExtendedValue, renderExtendedValue)
-import Network.HTTP.Headers (headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, setHeader)
+import Network.HTTP.Grammar.ExtendedValue (ExtendedValue (..), decodeExtendedValue, decodeExtendedValueText, parseExtendedValue, renderExtendedValue)
+import Network.HTTP.Headers (defaultHeaderSettings, headerMapFromList, headerMapToList, lookupHeader, lookupRawHeader, renderHeaderLines, setHeader)
 import Network.HTTP.Headers.ContentDisposition (ContentDisposition (..), ContentDispositionFilenameError (..), contentDispositionFilename, mkContentDispositionFilename)
 import Network.HTTP.Headers.ContentEncoding (ContentEncoding (..), contentCodings)
 import qualified Network.HTTP.Headers.ContentLanguage as CL
@@ -126,6 +126,18 @@ unit_cl_fields = it "checks BCP 47 tags across sparse and repeated fields" $ do
   map (isLeft . parseCL) invalid `shouldBe` replicate (length invalid) True
 
 
+unit_cl_invalid_write :: Spec
+unit_cl_invalid_write = it "rejects malformed authored Content-Language tags" $ do
+  let original = headerMapFromList [("Content-Language", "en-US"), ("Content-Language", "es-419")]
+  forM_ ["", "*", "en--US", "en_US", "fr, de", "en-u", "de-1901-1901", "en-a-foo-A-bar"] $ \tag -> do
+    let value = CL.ContentLanguage (CL.LanguageTag "en-US" :| [CL.LanguageTag tag])
+    renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+    setHeader value original `shouldBe` original
+  renderHeaderLines defaultHeaderSettings CL.ContentLanguageEmpty `shouldBe` Just ("" :| [])
+  let valid = CL.ContentLanguage (CL.LanguageTag "i-klingon" :| [CL.LanguageTag "x-pvt", CL.LanguageTag "en-u-ca-gregory"])
+  renderHeaderLines defaultHeaderSettings valid `shouldBe` Just ("i-klingon, x-pvt, en-u-ca-gregory" :| [])
+
+
 -- Content-Location ----------------------------------------------------------
 
 unit_cloc_parse :: Spec
@@ -174,6 +186,11 @@ typedMIMEVersion = describe "typed MIME-Version" $ do
       lookupHeader @MV.MIMEVersion (headerMapFromList [("MIME-Version", wire)]) `shouldSatisfy` isLeft
     lookupHeader @MV.MIMEVersion (headerMapFromList [("MIME-Version", "1.0"), ("MIME-Version", "2.0")])
       `shouldSatisfy` isLeft
+  it "rejects malformed authored MIME-Version components" $ do
+    let original = headerMapFromList [("MIME-Version", "1.0"), ("MIME-Version", "2.0")]
+    forM_ [MV.MIMEVersion (-1) 1, MV.MIMEVersion 1 minBound] $ \value -> do
+      renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+      setHeader value original `shouldBe` original
 
 
 prop_mv_roundtrip :: Property
@@ -194,6 +211,7 @@ tests =
       [ unit_cl_parse
       , unit_cl_render
       , unit_cl_fields
+      , unit_cl_invalid_write
       , it "Content-Language round-trip" prop_cl_roundtrip
       , unit_cloc_parse
       , unit_cloc_render
@@ -225,6 +243,19 @@ representationHeaders = do
     it "accepts a bare media type and preserves the original constructor" $
       lookupHeader @ContentType (headerMapFromList [("content-type", "application/json")])
         `shouldBe` Right (Just (ContentType (MediaType "application" "json")))
+    it "rejects invalid authored Content-Type names and parameter values" $ do
+      let previous = headerMapFromList [("Content-Type", "text/plain"), ("Content-Type", "text/html")]
+          valid = MediaType "text" "plain"
+      forM_
+        [ ContentType (MediaType "text" "")
+        , ContentType (MediaType "" "")
+        , ContentType (MediaType "text" "plain,html")
+        , ParameterizedContentType valid (("bad name", "value") :| [])
+        , ParameterizedContentType valid (("title", "bad\DEL") :| [])
+        ]
+        $ \value -> do
+          renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+          setHeader value previous `shouldBe` previous
     it "rejects wildcards, malformed parameters and repeated singleton fields" $ do
       let parse = lookupHeader @ContentType . headerMapFromList
       map (isLeft . parse) [[("content-type", "text/*")], [("content-type", "*/json")], [("content-type", "application/*+json")], [("content-type", "text/html;broken=")], [("content-type", "text/html"), ("content-type", "application/json")]]
@@ -241,6 +272,11 @@ representationHeaders = do
         let value = ParameterizedContentType (MediaType "application" "custom") (("param", parameter) :| [])
         lookupHeader @ContentType (setHeader value (headerMapFromList [])) === Right (Just value)
   describe "Content-Encoding" $ do
+    it "rejects invalid authored Content-Encoding names across the chain" $ do
+      let previous = headerMapFromList [("Content-Encoding", "gzip"), ("Content-Encoding", "br")]
+      forM_ [ContentEncoding (Custom ""), ContentEncodingChain GZip (Brotli :| [Custom "br,zstd"])] $ \value -> do
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value previous `shouldBe` previous
     it "round-trips a chain with repeated fields, aliases and custom names" $ do
       let fields = headerMapFromList [("Content-Encoding", " X-GZIP, , Br"), ("content-encoding", "gzip-extra, Deflate ")]
           value = ContentEncodingChain GZip (Brotli :| [Custom "gzip-extra", Deflate])
@@ -264,6 +300,20 @@ representationHeaders = do
       lookupHeader @ContentEncoding (headerMapFromList [("content-encoding", "GZIP-Extension")]) `shouldBe` Right (Just (ContentEncoding (Custom "GZIP-Extension")))
       lookupHeader @ContentEncoding (headerMapFromList [("content-encoding", "ZsTd")]) `shouldBe` Right (Just (ContentEncoding ZStd))
   describe "Content-Disposition" $ do
+    it "validates authored parameter syntax and duplicate names atomically" $ do
+      let existing = headerMapFromList [("Content-Disposition", "inline")]
+          invalid =
+            [ ContentDisposition "bad type" []
+            , ContentDisposition "attachment" [("bad=name", "a")]
+            , ContentDisposition "attachment" [("filename", "a\nb")]
+            , ContentDisposition "attachment" [("*", "UTF-8''a")]
+            , ContentDisposition "attachment" [("filename*", "UTF-8''a%XX")]
+            , ContentDisposition "attachment" [("note*", "UTF-8'en--GB'file")]
+            , ContentDisposition "attachment" [("filename", "a"), ("meta", "b"), ("FILENAME", "c")]
+            ]
+      forM_ invalid $ \value -> do
+        renderHeaderLines defaultHeaderSettings value `shouldBe` Nothing
+        setHeader value existing `shouldBe` existing
     it "authors plain and UTF-8 filenames through typed setHeader" $ do
       let authored dtype name fallback = do
             value <- mkContentDispositionFilename dtype name fallback
@@ -320,6 +370,8 @@ representationHeaders = do
           invalid =
             [ "attachment;filename=one; FILENAME=two"
             , "attachment;name*=UTF-8''one; NAME*=UTF-8''two"
+            , "attachment;filename=one; size=2; FILENAME=two"
+            , "attachment;name*=UTF-8''one; size=2; NAME*=UTF-8''two"
             , "attachment;filename*=UTF-8''a%ZZ"
             , "attachment;filename*=UTF-8''a%A"
             , "attachment;filename*=\"UTF-8''report.txt\""
@@ -328,6 +380,16 @@ representationHeaders = do
             , "attachment;filename*=''name.txt"
             ]
       map (isLeft . parse) invalid `shouldBe` replicate (length invalid) True
+      parse "attachment;x^=one;X~=two"
+        `shouldBe` Right (Just (ContentDisposition "attachment" [("x^", "one"), ("X~", "two")]))
+      parse "attachment;x^=one;size=2;X~=two"
+        `shouldBe` Right (Just (ContentDisposition "attachment" [("x^", "one"), ("size", "2"), ("X~", "two")]))
+    it "validates extended filenames supplied through the record constructor" $ do
+      let filename spelling = contentDispositionFilename (ContentDisposition "attachment" [("filename", "plain.txt"), ("filename*", spelling)])
+      filename "iSo-8859-1'fr-FR'caf%E9+.txt" `shouldBe` Just "caf\xe9+.txt"
+      filename "UTF-8''" `shouldBe` Just ""
+      forM_ ["UTF-8''a%XZ", "UTF-8'en--GB'file", "UTF-8''file txt", "UTF-8x''file"] $ \spelling ->
+        filename spelling `shouldBe` Just "plain.txt"
     it "preserves opaque regular filename bytes" $ do
       let wire = "attachment;filename=\"caf" <> BS.pack [0xe9] <> ".txt\""
           fields = headerMapFromList [("content-disposition", wire)]
@@ -342,6 +404,7 @@ representationHeaders = do
           value = ExtendedValue "UTF-8" (Just "en-GB") octets
       parseExtendedValue wire `shouldBe` Right value
       decodeExtendedValue value `shouldBe` Just "\x20ac a+b'*"
+      decodeExtendedValueText wire `shouldBe` decodeExtendedValue value
       M.toStrictByteString (renderExtendedValue value) `shouldBe` "UTF-8'en-GB'%E2%82%AC%20a+b%27%2A"
     it "renders all extended parameter octets with canonical percent escapes" $ do
       let octets = BS.concat (replicate 18 (BS.pack [0 .. 255]))
@@ -354,3 +417,5 @@ representationHeaders = do
             | otherwise = let (hi, lo) = quotRem byte 16 in BS.pack [37, hex hi, hex lo]
       wire `shouldBe` ("UTF-8''" <> BS.concatMap encode octets)
       parseExtendedValue wire `shouldBe` Right value
+      let latin1 = value {extendedCharset = "Iso-8859-1"}
+      decodeExtendedValueText (M.toStrictByteString (renderExtendedValue latin1)) `shouldBe` decodeExtendedValue latin1

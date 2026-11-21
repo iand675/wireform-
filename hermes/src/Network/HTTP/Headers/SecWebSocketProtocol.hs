@@ -32,6 +32,7 @@ import Foreign.ForeignPtr (withForeignPtr)
 import GHC.Exts (Char (C#), Int (I#), eqAddr#, indexCharOffAddr#, isTrue#, minusAddr#, plusAddr#, (<=#))
 import GHC.ForeignPtr (ForeignPtr (..))
 import GHC.Ptr (Ptr (..))
+import Network.HTTP.Grammar.Rendering (encodeCommaSeparatedText)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hSecWebSocketProtocol)
 import qualified Network.HTTP.Headers.Mason as M
@@ -63,6 +64,17 @@ instance KnownHeader SecWebSocketProtocol where
 
 
   renderToHeaders _ = M.toStrictByteString . renderSecWebSocketProtocol
+
+
+  renderToHeadersChecked _ (SecWebSocketProtocol (token NE.:| []))
+    | isHttpTokenText token = Just (ST.toByteString token)
+    | otherwise = Nothing
+  renderToHeadersChecked settings (SecWebSocketProtocol protocols)
+    | headerMessage settings /= Just HeaderResponse
+    , all isHttpTokenText protocols
+    , protocolsAreDistinct protocols =
+        Just (encodeCommaSeparatedText protocols)
+    | otherwise = Nothing
 
 
   headerName _ = hSecWebSocketProtocol
@@ -122,13 +134,16 @@ parseShortOffers (BSI.BS input@(ForeignPtr start _) (I# size)) fallback
 
 distinctProtocols :: NE.NonEmpty ST.ShortText -> Either String SecWebSocketProtocol
 distinctProtocols protocols
-  | distinct protocols = Right (SecWebSocketProtocol protocols)
+  | protocolsAreDistinct protocols = Right (SecWebSocketProtocol protocols)
   | otherwise = Left "Duplicate Sec-WebSocket-Protocol token"
-  where
-    distinct (_ NE.:| []) = True
-    distinct (first NE.:| [second]) = first /= second
-    distinct (first NE.:| rest) = Set.size (Set.fromList (first : rest)) == 1 + length rest
 {-# INLINE distinctProtocols #-}
+
+
+protocolsAreDistinct :: NE.NonEmpty ST.ShortText -> Bool
+protocolsAreDistinct (_ NE.:| []) = True
+protocolsAreDistinct (first NE.:| [second]) = first /= second
+protocolsAreDistinct (first NE.:| rest) = Set.size (Set.fromList (first : rest)) == 1 + length rest
+{-# INLINE protocolsAreDistinct #-}
 
 
 renderSecWebSocketProtocol :: SecWebSocketProtocol -> M.Builder

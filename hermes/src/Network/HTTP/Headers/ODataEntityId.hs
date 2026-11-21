@@ -38,7 +38,7 @@ import Data.Word (Word8)
 import Foreign.Storable (pokeByteOff)
 import GHC.Exts (Int (..), indexWord8ArrayAsWord64#)
 import GHC.Word (Word64 (W64#))
-import Network.HTTP.Grammar.URIReference (iriReference)
+import Network.HTTP.Grammar.URIReference (checkedURIField, iriReference, iriReferenceBytes, outboundURIReferenceBytes)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hODataEntityId)
 import qualified Network.HTTP.Headers.Mason as M
@@ -60,6 +60,20 @@ instance KnownHeader ODataEntityId where
 
 
   renderToHeaders _ = renderEntityIdWith SBS.fromShort id . oDataEntityId
+
+
+  renderToHeadersChecked _ (ODataEntityId iri)
+    | nonAscii == 0 = checkedURIField outboundReference wire
+    | otherwise = do
+        _ <- checkedURIField (nonEmptyReference iriReferenceBytes) wire
+        checkedURIField outboundReference (escapeUnicode bytes nonAscii)
+    where
+      bytes = ST.toShortByteString iri
+      wire = SBS.fromShort bytes
+      nonAscii = countNonAscii bytes
+      outboundReference = nonEmptyReference outboundURIReferenceBytes
+      nonEmptyReference syntax = withSpan syntax $ \() (Span start end) ->
+        if start == end then failed else pure ()
 
 
   headerName _ = hODataEntityId

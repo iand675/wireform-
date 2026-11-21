@@ -34,7 +34,7 @@ module Network.HTTP.Headers.ServerTiming (
 
 import Data.List (find)
 import qualified Data.Text.Short as ST
-import Network.HTTP.Grammar.Rendering (encodeHttpParameterizedList, renderHttpParameterizedList)
+import Network.HTTP.Grammar.Rendering (encodeHttpParameterizedList, encodeHttpParameterizedListChecked, renderHttpParameterizedList)
 import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hServerTiming)
 import qualified Network.HTTP.Headers.Mason as M
@@ -88,6 +88,18 @@ instance KnownHeader ServerTiming where
         serverTimingParamValue
         metrics
     ]
+
+
+  renderToHeadersChecked _ (ServerTiming []) = Just []
+  renderToHeadersChecked _ (ServerTiming metrics) =
+    pure
+      <$> encodeHttpParameterizedListChecked
+        isHttpTokenText
+        serverTimingMetricName
+        serverTimingMetricParams
+        serverTimingParamName
+        serverTimingParamValue
+        metrics
 
 
   omitHeaderValue (ServerTiming metrics) = null metrics

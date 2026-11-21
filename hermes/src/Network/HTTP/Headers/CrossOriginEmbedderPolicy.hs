@@ -65,6 +65,11 @@ instance KnownHeader CrossOriginEmbedderPolicy where
   renderToHeaders _ value = M.toStrictByteString (renderCrossOriginEmbedderPolicy value)
 
 
+  renderToHeadersChecked _ (CrossOriginEmbedderPolicy directive Nothing) = Just (coepDirectiveBytes directive)
+  renderToHeadersChecked _ (CrossOriginEmbedderPolicy directive (Just endpoint)) =
+    R.encodeReportingPolicyChecked (coepDirectiveBytes directive) endpoint
+
+
   headerName _ = hCrossOriginEmbedderPolicy
 
 
