@@ -935,12 +935,20 @@ def regen_goldens() -> int:
         [dense, sparse, union_dict, pa.array([11, 22, 33], pa.int32())],
         names=["dense", "sparse", "dict", "tail"],
     )
+    run_end = pa.RunEndEncodedArray.from_arrays(
+        pa.array([2, 3], pa.int16()), pa.array([11, None], pa.int32())
+    )
+    run_end_batch = pa.record_batch(
+        [run_end, pa.StructArray.from_arrays([run_end], names=["r"]), pa.array([7, 8, 9], pa.int32())],
+        names=["r", "nested", "tail"],
+    )
     for version in (ipc.MetadataVersion.V4, ipc.MetadataVersion.V5):
         options = ipc.IpcWriteOptions(metadata_version=version)
         for writer, suffix in ((ipc.new_stream, "arrows"), (ipc.new_file, "arrow")):
-            path = GOLDEN_DIR / f"pa_union_{version.name.lower()}.{suffix}"
-            with writer(str(path), union_batch.schema, options=options) as w:
-                w.write_batch(union_batch)
+            for name, batch in (("union", union_batch), ("run_end", run_end_batch)):
+                path = GOLDEN_DIR / f"pa_{name}_{version.name.lower()}.{suffix}"
+                with writer(str(path), batch.schema, options=options) as w:
+                    w.write_batch(batch)
 
     print(f"Regenerated goldens under {GOLDEN_DIR.relative_to(ROOT)}/")
     return 0

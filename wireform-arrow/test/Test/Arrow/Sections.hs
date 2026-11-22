@@ -14,7 +14,7 @@ module Test.Arrow.Sections (tests) where
 
 import Arrow.Column (ColumnArray, PrimType (..), primColumn)
 import Arrow.Column qualified as C
-import Arrow.File (readIPCMessage)
+import Arrow.File (asBatches, readArrowStream, readIPCMessage)
 import Arrow.FlatBufferIPC (ArrowBlock (..), FileIndex (..), readFileIndex)
 import Arrow.FlatBufferIPC qualified as IPC
 import Arrow.Stream (
@@ -42,6 +42,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as BB
 import Data.ByteString.Lazy qualified as BL
+import Data.Either (isLeft)
 import Data.Int (Int64)
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Vector qualified as V
@@ -61,12 +62,14 @@ tests =
       , ("pyarrow file sections decode to the eager batches", prop_pyarrowFileSections)
       , ("handle iteration decodes one file section at a time", prop_fileBatchesHandle)
       , ("handle iteration decodes one stream frame at a time (dictionaries included)", prop_streamBatchesHandle)
+      , ("clean stream EOF and complete EOS pass, partial prefixes fail", prop_streamEnd)
       , ("a corrupt section fails only when its turn comes", prop_corruptSectionFailsLate)
       , ("Rust 64-byte aligned files use their footer index", prop_rustAlignedFile)
       , ("Rust empty 64-byte aligned files keep their schema", prop_rustEmptyFile)
       , ("footer blocks cannot address footer bytes", prop_blockCannotPointIntoFooter)
       , ("negative message body lengths fail every file reader", prop_negativeMessageBody)
       , ("PyArrow V4 and V5 unions decode through every container reader", prop_pyarrowUnionVersions)
+      , ("PyArrow V4/V5 and Arrow Rust V4 run ends decode through every container reader", prop_runEndVersions)
       , ("unknown metadata versions fail in schemas, footers and batches", prop_unknownMetadataVersion)
       , ("V4 unions with top-level nulls fail explicitly", prop_legacyUnionNulls)
       ]
@@ -179,6 +182,33 @@ prop_pyarrowUnionVersions = withTests 1 $ property $ do
     (rawSchema, dicts, batches) <- evalEither (IPC.readArrowStreamFBWithDicts stream)
     let reframed = IPC.writeArrowStreamFBWithDicts rawSchema dicts batches
     evalEither (decodeArrowStream opts reframed) >>= (=== (streamSchema, expected))
+
+
+prop_runEndVersions :: Property
+prop_runEndVersions = withTests 1 $ property $ do
+  runEnd <-
+    evalEither $
+      C.mkRunEndEncoded
+        (primColumn PInt16 (VS.fromList [2, 3]))
+        (C.fromMaybes PInt32 (V.fromList [Just 11, Nothing]))
+  nested <- evalEither (C.mkStruct 3 Nothing (V.singleton ("r", runEnd)))
+  let expected = [V.fromList [runEnd, nested, primColumn PInt32 (VS.fromList [7, 8, 9])]]
+      opts = defaultReadOptions
+  -- PyArrow 26.0.1 adds a parent slot in V4. Arrow Rust 60.2.0 omits it.
+  forM_ ["pa_run_end_v4", "pa_run_end_v5", "rs_run_end_v4"] $ \fixture -> do
+    annotate fixture
+    let base = "test/golden/" ++ fixture
+    stream <- evalIO (BS.readFile (base ++ ".arrows"))
+    file <- evalIO (BS.readFile (base ++ ".arrow"))
+    (streamSchema, streamBatches) <- evalEither (decodeArrowStream opts stream)
+    (fileSchema, fileBatches) <- evalEither (decodeArrowFile opts file)
+    fileSchema === streamSchema
+    streamBatches === expected
+    fileBatches === expected
+    evalEither (openStreamReader opts stream >>= streamReaderToList) >>= (=== expected)
+    evalEither (openFileReader opts file >>= fileReaderToList) >>= (=== expected)
+    evalIO (withTempFile stream (drainStream opts)) >>= (=== Right expected)
+    evalIO (withTempFile file (drainFile opts)) >>= (=== Right expected)
 
 
 prop_unknownMetadataVersion :: Property
@@ -316,6 +346,27 @@ prop_streamBatchesHandle = withTests 1 . property $ do
   (_, eagerDicts) <- evalEither (decodeArrowStream defaultReadOptions dictBytes)
   gotDicts <- evalIO (withTempFile dictBytes (drainStream defaultReadOptions))
   gotDicts === Right eagerDicts
+
+
+prop_streamEnd :: Property
+prop_streamEnd = withTests 1 $ property $ do
+  let (schema, batches) = smallBatches
+      opts = defaultReadOptions
+  forM_ [[], batches] $ \expected -> do
+    stream <- evalEither (encodeArrowStream defaultWriteOptions schema expected)
+    let end = BS.length stream
+    forM_ [stream, BS.take (end - 8) stream] $ \complete -> do
+      raw <- evalEither (readArrowStream complete)
+      V.length (asBatches raw) === length expected
+      evalEither (decodeArrowStream opts complete) >>= (=== (schema, expected))
+      evalEither (openStreamReader opts complete >>= streamReaderToList) >>= (=== expected)
+      evalIO (withTempFile complete (drainStream opts)) >>= (=== Right expected)
+    forM_ [1 .. 7] $ \missing -> do
+      let incomplete = BS.take (end - missing) stream
+      assert (isLeft (readArrowStream incomplete))
+      assert (isLeft (decodeArrowStream opts incomplete))
+      assert (isLeft (openStreamReader opts incomplete))
+      evalIO (withTempFile incomplete (drainStream opts)) >>= assert . isLeft
 
 
 {- | Zeroing the last section's message header costs nothing before

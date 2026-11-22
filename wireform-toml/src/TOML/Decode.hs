@@ -1257,15 +1257,11 @@ classifyDateTime raw
             then Nothing
             else parseDateTime raw
   | hasTimeShape raw =
-      if validTimePart 0 raw && noTrailingDot raw
+      if validTimePart 0 (T.length raw) raw
         then Just (TV.TTime raw)
         else Nothing
   | otherwise = Nothing
   where
-    noTrailingDot t = case T.unsnoc t of
-      Just (_, '.') -> False
-      _ -> True
-
     hasDateShape t =
       T.length t >= 10
         && T.index t 4 == '-'
@@ -1285,18 +1281,11 @@ parseDateTime :: Text -> Maybe TV.Value
 parseDateTime raw
   | T.length raw <= 10 = Nothing
   | not (sep == 'T' || sep == 't' || sep == ' ') = Nothing
-  | T.length raw < 16 = Nothing
-  | T.index raw 13 /= ':' = Nothing
-  | not (digitsAt 11 13 raw && digitsAt 14 16 raw) = Nothing
   | otherwise =
-      let timeStartCol = 11
-          timeOK = validTimePart timeStartCol raw
-          tail0 = case findOffsetStart raw of
+      let timeEnd = case findOffsetStart raw of
             Just i -> i
             Nothing -> T.length raw
-          offText = T.drop tail0 raw
-          offsetOK = T.null offText || validOffset offText
-      in if timeOK && offsetOK
+      in if validTimePart 11 timeEnd raw && (timeEnd == T.length raw || validOffset (T.drop timeEnd raw))
            then Just (TV.TDateTime raw)
            else Nothing
   where
@@ -1307,66 +1296,32 @@ parseDateTime raw
 @Z@, @z@, or @+@ / @-@ /after/ the time portion.)
 -}
 findOffsetStart :: Text -> Maybe Int
-findOffsetStart t = goT 11
-  where
-    !len = T.length t
-    goT !i
-      | i >= len = Nothing
-      | otherwise = case T.index t i of
-          'Z' -> Just i
-          'z' -> Just i
-          '+' -> Just i
-          '-' -> Just i
-          _ -> goT (i + 1)
+findOffsetStart t = (+ 11) <$> T.findIndex (\c -> c == 'Z' || c == 'z' || c == '+' || c == '-') (T.drop 11 t)
 
 
--- | Validate a time portion starting at column @c@: @HH:MM[:SS[.fff]]@.
-validTimePart :: Int -> Text -> Bool
-validTimePart !c t
-  | T.length t < c + 5 = False
+-- | Validate @HH:MM[:SS[.fff]]@ from column @c@ up to @end@.
+validTimePart :: Int -> Int -> Text -> Bool
+validTimePart !c !end t
+  | end < c + 5 = False
   | not (digitsAt c (c + 2) t) = False
   | T.index t (c + 2) /= ':' = False
   | not (digitsAt (c + 3) (c + 5) t) = False
   | hh > 23 || mm > 59 = False
-  | T.length t == c + 5 = True
-  | T.index t (c + 5) == ':'
-      && T.length t >= c + 8
-      && digitsAt (c + 6) (c + 8) t
-      && parseDigits (c + 6) 2 t <= 60 -- 60 for leap second tolerance
-      && validFrac (c + 8) t =
-      True
-  | T.index t (c + 5) == 'Z'
-      || T.index t (c + 5) == 'z'
-      || T.index t (c + 5) == '+'
-      || T.index t (c + 5) == '-' =
-      True
-  | otherwise = False
+  | end == c + 5 = True
+  | otherwise =
+      end >= secondsEnd
+        && T.index t (c + 5) == ':'
+        && digitsAt (c + 6) secondsEnd t
+        && parseDigits (c + 6) 2 t <= 60 -- 60 for leap second tolerance
+        && ( end == secondsEnd
+               || (end > fractionStart && T.index t secondsEnd == '.' && T.all isDigit fraction)
+           )
   where
     hh = parseDigits c 2 t
     mm = parseDigits (c + 3) 2 t
-
-
-{- | After the seconds field, optionally consume @.fff@ (any number
-of digits) and stop at end-of-time-portion (Z/+/- or EOL).
--}
-validFrac :: Int -> Text -> Bool
-validFrac !i t
-  | i >= T.length t = True
-  | T.index t i == '.' =
-      let body = T.drop (i + 1) t
-          fracDigits = T.length (T.takeWhile isDigit body)
-          rest = T.drop (i + 1 + fracDigits) t
-      in fracDigits >= 1 && validAfterTime rest
-  | otherwise = validAfterTime (T.drop i t)
-
-
-validAfterTime :: Text -> Bool
-validAfterTime t = case T.uncons t of
-  Nothing -> True
-  Just (c, _)
-    | c == 'Z' || c == 'z' -> T.length t == 1
-    | c == '+' || c == '-' -> validOffset t
-    | otherwise -> False
+    secondsEnd = c + 8
+    fractionStart = secondsEnd + 1
+    fraction = T.take (end - fractionStart) (T.drop fractionStart t)
 
 
 -- | Valid offset suffix: @Z@ / @z@ alone, or @±HH:MM@.

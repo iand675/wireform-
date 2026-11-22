@@ -39,6 +39,7 @@ import Data.Aeson.Key qualified as AK
 import Data.Aeson.KeyMap qualified as AKM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
+import Data.Either (isLeft)
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -123,6 +124,24 @@ builtinSuite =
                 ]
             )
             (\_ -> pure ())
+        , it "rejects time zone suffixes on local times" $
+            mapM_
+              (\src -> TD.decode src `shouldSatisfy` isLeft)
+              [ "time = 17:45:00Z"
+              , "time = 17:45:00+02:00"
+              , "time = 17:45z"
+              , "time = 17:45-02:00"
+              , "time = 17:45:00.125Z"
+              ]
+        , ok
+            "accepts local times and dated offsets"
+            (T.unlines ["local = 17:45", "fraction = 17:45:00.125", "offset = 1979-05-27T17:45:00.125+02:00", "utc = 1979-05-27T17:45Z"])
+            (\v -> do
+                lookupKey "local" v `shouldBe` Just (TV.TTime "17:45")
+                lookupKey "fraction" v `shouldBe` Just (TV.TTime "17:45:00.125")
+                lookupKey "offset" v `shouldBe` Just (TV.TDateTime "1979-05-27T17:45:00.125+02:00")
+                lookupKey "utc" v `shouldBe` Just (TV.TDateTime "1979-05-27T17:45Z")
+            )
         ]
   where
     ok name src k = it name $ case TD.decode src of

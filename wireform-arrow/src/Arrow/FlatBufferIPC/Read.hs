@@ -803,7 +803,7 @@ readArrowStreamFBInterleaved bs0 = do
       Right (sch, rest)
 
     goFrames bs acc
-      | BS.length bs < 4 = Right (reverse acc)
+      | BS.null bs = Right (reverse acc)
       | otherwise = do
           (mlen, meta, rest1) <- readFrameHeader bs
           if mlen == 0

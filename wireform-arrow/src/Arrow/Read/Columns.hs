@@ -208,19 +208,31 @@ decodeRecordBatch :: ReadOptions -> Schema -> RecordBatchDef -> ByteString -> Ei
 decodeRecordBatch opts schema rb body = do
   checkBatchBudgets opts rb
   src <- bodySource opts rb body
-  let !legacyUnionValidity = case rb of
-        RecordBatchDefV4 {} -> True
-        RecordBatchDef {} -> False
+  let !layout = case rb of
+        RecordBatchDefV4 {} -> LayoutV4
+        RecordBatchDef {} -> LayoutV5
       !ctx =
         Ctx
           (arrowEndianness schema == Big)
-          legacyUnionValidity
+          layout
           (rbNodes rb)
           (rbBuffers rb)
           (rbVariadicBufferCounts rb)
           src
           opts
-  Outs cols _ <- fieldsN ctx (arrowFields schema) (Cur 0 0 0 0)
+  let !fields = arrowFields schema
+      start = Cur 0 0 0 0
+      standard = fieldsN ctx fields start
+      !bufferCount = VS.length (rbBuffers rb)
+  Outs cols _ <- case layout of
+    LayoutV4 -> case standard of
+      Right (Outs _ end) | curBuf end == bufferCount -> standard
+      _ | V.any hasInlineRunEnd fields ->
+        case fieldsN ctx {ctxLayout = LayoutV4WithRunEndSlot} fields start of
+          Right result@(Outs _ end) | curBuf end == bufferCount -> Right result
+          _ -> standard >> Left "Arrow.Read.Columns: unexpected buffer count for V4 run-end encoded batch"
+      _ -> standard
+    _ -> standard
   case V.findIndex (\c -> fromIntegral (columnLength c) /= rbLength rb) cols of
     Nothing -> Right cols
     Just k ->
@@ -232,6 +244,14 @@ decodeRecordBatch opts schema rb body = do
             ++ " rows, the record batch declares "
             ++ show (rbLength rb)
         )
+
+
+-- | Dictionary arrays contain only their keys in this batch. Their values
+-- are decoded using a separate schema when the dictionary batch arrives.
+hasInlineRunEnd :: Field -> Bool
+hasInlineRunEnd f = case fieldDictionary f of
+  Just _ -> False
+  Nothing -> fieldType f == ARunEndEncoded || V.any hasInlineRunEnd (fieldChildren f)
 
 
 {- | Decode the values of a dictionary batch. The values field is the
@@ -308,10 +328,13 @@ bodySource opts rb body = case rbBodyCompression rb of
 -- Walk state
 -- ============================================================
 
+data BufferLayout = LayoutV5 | LayoutV4 | LayoutV4WithRunEndSlot
+
+
 data Ctx = Ctx
   { ctxSwap :: !Bool
   -- ^ Big-endian body: multi-byte values are byte-swapped into fresh buffers.
-  , ctxLegacyUnionValidity :: !Bool
+  , ctxLayout :: !BufferLayout
   , ctxNodes :: !(VS.Vector FieldNode)
   , ctxBuffers :: !(VS.Vector Buffer)
   , ctxVariadicBufferCounts :: !(V.Vector Int64)
@@ -448,7 +471,7 @@ fieldAt ctx f fn len cur = case fieldDictionary f of
     AFixedSizeList size -> fixedSizeList ctx size f fn len cur
     AMap _ -> mapCol ctx f fn len cur
     AUnion mode ids -> union ctx mode ids f fn len cur
-    ARunEndEncoded -> runEndEncoded ctx f len cur
+    ARunEndEncoded -> runEndEncoded ctx f fn len cur
     ty -> case primTypeFor ty of
       Just (SomePrimType t) -> do
         c <- prim ctx t fn len bi
@@ -766,9 +789,9 @@ positional, the common case; otherwise one table-lookup pass).
 -}
 union :: Ctx -> UnionMode -> V.Vector Int32 -> Field -> FieldNode -> Int -> Cur -> Either String Out
 union ctx mode declared f fn len cur = do
-  validitySlots <- case ctxLegacyUnionValidity ctx of
-    False -> Right 0
-    True
+  validitySlots <- case ctxLayout ctx of
+    LayoutV5 -> Right 0
+    _
       | fnNullCount fn /= 0 -> Left "Arrow.Read.Columns: V4 union has top-level nulls"
       | otherwise -> 1 <$ bufferAt ctx (curBuf cur)
   let !bi = curBuf cur + validitySlots
@@ -820,14 +843,23 @@ unionChildTable nChildren declared
 
 {- | Run-end encoded: no buffers of its own, children run ends (non-null
 int16/32/64, positive, strictly increasing, last >= length) and values
-(at least one per run).
+(at least one per run). Some V4 writers add an empty validity slot
+for the parent. The batch reader tries that layout only if the regular
+V4 layout does not account for the batch's buffers.
 -}
-runEndEncoded :: Ctx -> Field -> Int -> Cur -> Either String Out
-runEndEncoded ctx f len cur
+runEndEncoded :: Ctx -> Field -> FieldNode -> Int -> Cur -> Either String Out
+runEndEncoded ctx f fn len cur
   | V.length (fieldChildren f) /= 2 =
       Left "Arrow.Read.Columns: RunEndEncoded must have exactly two children (run_ends, values)"
   | otherwise = do
-      Out re cur1 <- field ctx (V.unsafeIndex (fieldChildren f) 0) (adv 1 0 cur)
+      parentSlots <- case ctxLayout ctx of
+        LayoutV4WithRunEndSlot -> do
+          slot <- bufferAt ctx (curBuf cur)
+          if BS.null slot && fnNullCount fn == 0
+            then Right 1
+            else Left "Arrow.Read.Columns: expected an empty V4 run-end validity slot"
+        _ -> Right 0
+      Out re cur1 <- field ctx (V.unsafeIndex (fieldChildren f) 0) (adv 1 parentSlots cur)
       Out vals cur2 <- field ctx (V.unsafeIndex (fieldChildren f) 1) cur1
       I.validateRunEnds "run-end encoded" re len
       let !runs = columnLength re
