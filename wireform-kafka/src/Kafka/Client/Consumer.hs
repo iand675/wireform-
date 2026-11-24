@@ -2344,6 +2344,7 @@ fetchFromBroker connMgr versionCache broker requests timeoutMs corrIdVar rackIdM
                               , FR.fetchPartitionFetchOffset = offset
                               , FR.fetchPartitionLastFetchedEpoch = -1
                               , FR.fetchPartitionLogStartOffset = -1
+                              , FR.fetchPartitionHighWatermark = maxBound
                               , FR.fetchPartitionPartitionMaxBytes = 1048576 -- 1MB per partition
                               -- KIP-915 ReplicaDirectoryId (tagged v17+).
                               -- The wire encoding writes this only on

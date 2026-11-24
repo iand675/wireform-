@@ -102,6 +102,7 @@ genRequestHeader = do
       , RH.requestHeaderRequestApiVersion = apiVersion
       , RH.requestHeaderCorrelationId = correlationId
       , RH.requestHeaderClientId = P.mkKafkaString clientId
+      , RH.requestHeaderClientInstanceId = P.nullUuid
       }
 
 
@@ -113,6 +114,8 @@ genApiVersionsRequest = do
     AVR.ApiVersionsRequest
       { AVR.apiVersionsRequestClientSoftwareName = P.mkKafkaString name
       , AVR.apiVersionsRequestClientSoftwareVersion = P.mkKafkaString version
+      , AVR.apiVersionsRequestClusterId = P.KafkaString P.Null
+      , AVR.apiVersionsRequestNodeId = -1
       }
 
 

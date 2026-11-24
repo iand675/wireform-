@@ -66,7 +66,7 @@ tests =
 ------------------------------------------------------------------
 
 genRequestHeaderVersion :: Gen Int16
-genRequestHeaderVersion = Gen.element [1, 2]
+genRequestHeaderVersion = Gen.element [1, 2, 3]
 
 
 genRequestHeader :: Gen RH.RequestHeader
@@ -81,6 +81,7 @@ genRequestHeader = do
       , RH.requestHeaderRequestApiVersion = av
       , RH.requestHeaderCorrelationId = cid
       , RH.requestHeaderClientId = P.mkKafkaString client
+      , RH.requestHeaderClientInstanceId = P.nullUuid
       }
 
 
@@ -102,6 +103,7 @@ unit_requestHeader_v2Sample = do
           , RH.requestHeaderRequestApiVersion = 3
           , RH.requestHeaderCorrelationId = 42
           , RH.requestHeaderClientId = P.mkKafkaString "abc"
+          , RH.requestHeaderClientInstanceId = P.nullUuid
           }
       !bs = WC.runEncodeVer @RH.RequestHeader 2 msg
   -- v2 RequestHeader layout: 2 (apiKey) + 2 (apiVersion) + 4 (corr)
@@ -148,7 +150,7 @@ unit_responseHeader_samples = do
 ------------------------------------------------------------------
 
 genApiVersionsRequestVersion :: Gen Int16
-genApiVersionsRequestVersion = Gen.element [3, 4]
+genApiVersionsRequestVersion = Gen.element [3, 4, 5, 6]
 
 
 genApiVersionsRequest :: Gen AVR.ApiVersionsRequest
@@ -159,6 +161,8 @@ genApiVersionsRequest = do
     AVR.ApiVersionsRequest
       { AVR.apiVersionsRequestClientSoftwareName = P.mkKafkaString name
       , AVR.apiVersionsRequestClientSoftwareVersion = P.mkKafkaString ver
+      , AVR.apiVersionsRequestClusterId = P.KafkaString P.Null
+      , AVR.apiVersionsRequestNodeId = -1
       }
 
 

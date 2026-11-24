@@ -268,7 +268,7 @@ wireMaxSizeVoteResponse _version msg =
   0
   + 2
   + (5 + (case P.unKafkaArray (voteResponseTopics msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeTopicData _version x ) v); P.Null -> 0 }))
-  + (5 + (case P.unKafkaArray (voteResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint _version x ) v); P.Null -> 0 }))
+  + (if _version >= 1 then (5 + (case P.unKafkaArray (voteResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint _version x ) v); P.Null -> 0 })) + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for VoteResponse.

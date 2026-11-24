@@ -284,7 +284,7 @@ wireMaxSizePartitionSnapshot _version msg =
   + 4
   + 2
   + wireMaxSizeSnapshotId _version (partitionSnapshotSnapshotId msg)
-  + wireMaxSizeLeaderIdAndEpoch _version (partitionSnapshotCurrentLeader msg)
+  + (if _version >= 0 then wireMaxSizeLeaderIdAndEpoch _version (partitionSnapshotCurrentLeader msg) + 10 else 0)
   + 8
   + 8
   + WP.dualBytesMaxSize (partitionSnapshotUnalignedRecords msg)
@@ -391,7 +391,7 @@ wireMaxSizeFetchSnapshotResponse _version msg =
   + 4
   + 2
   + (5 + (case P.unKafkaArray (fetchSnapshotResponseTopics msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeTopicSnapshot _version x ) v); P.Null -> 0 }))
-  + (5 + (case P.unKafkaArray (fetchSnapshotResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint _version x ) v); P.Null -> 0 }))
+  + (if _version >= 1 then (5 + (case P.unKafkaArray (fetchSnapshotResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint _version x ) v); P.Null -> 0 })) + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for FetchSnapshotResponse.

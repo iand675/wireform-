@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -41,6 +42,7 @@ import Wireform.Transport.Receive (
   receiveWaitData,
  )
 import Wireform.Transport.Send (sendBuilderDirect, sendByteString)
+import "wireform-kafka-protocol" Kafka.Protocol.Primitives qualified as P
 
 
 -- | A live Kafka broker connection.
@@ -56,6 +58,9 @@ data Connection = Connection
   ('Kafka.Client.Internal.Request.sendRequestReceiveResponse'), so
   callers sharing the connection never read each other's responses.
   -}
+  , connClientInstanceId :: !P.KafkaUuid
+  , connHasSentRequest :: !(MVar Bool)
+  -- ^ True after the first request frame has been written successfully.
   }
 
 

@@ -69,7 +69,7 @@ import Data.ByteString qualified as BS
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Hashable (hash)
-import Data.Maybe (isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, isNothing, mapMaybe)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int
 import Data.List (groupBy, partition, sortBy)
@@ -256,7 +256,7 @@ data OutboundProduce = OutboundProduce
   , opTransactionalId :: !(Maybe Text)
   , opAcks :: !Int16
   , opTimeoutMs :: !Int32
-  , opMetadata :: !Meta.MetadataCache
+  , opTopicIds :: !(Map Text P.KafkaUuid)
   , opBatches :: ![BA.ProducerBatch]
   , opPending :: !PendingProduce
   }
@@ -270,6 +270,7 @@ data PendingProduce = PendingProduce
   { ppCorrId :: !Int32
   , ppApiVersion :: !Int16
   , ppBatches :: ![BA.ProducerBatch]
+  , ppTopicNames :: !(Map P.KafkaUuid Text)
   }
 
 
@@ -680,9 +681,21 @@ enqueueRound state@SenderState {..} pipe (_broker :: Meta.BrokerMetadata) batche
         senderVersionCache
         (bpAddr pipe)
         3
-    let !apiVersion = case verR of
-          Right v -> v
-          Left _ -> 3
+    let !negotiated = either (const 3) id verR
+        topics = Map.fromList (map (\batch -> (BA.tpTopic (BA.batchTopicPartition batch), ())) valid)
+        readTopicId topic () = do
+          cached <- Meta.getTopicId senderMetadata topic
+          pure (cached >>= \topicId -> if topicId == P.nullUuid then Nothing else Just topicId)
+    topicIds <-
+      if negotiated >= 13
+        then atomically $ sequenceA <$> Map.traverseWithKey readTopicId topics
+        else pure (Just Map.empty)
+    apiVersion <- case topicIds of
+      Just _ -> pure negotiated
+      Nothing ->
+        either (const 3) id <$> VN.pickApiVersionForRange @PR.ProduceRequest
+          3 12 senderVersionCache (bpAddr pipe) 3
+    let !ids = fromMaybe Map.empty topicIds
         !apiKey = 0
         !clientId = P.mkKafkaString senderClientId
     cid <- atomicModifyIORef' senderCorrelationId $ \k -> (k + 1, k)
@@ -691,6 +704,7 @@ enqueueRound state@SenderState {..} pipe (_broker :: Meta.BrokerMetadata) batche
             { ppCorrId = cid
             , ppApiVersion = apiVersion
             , ppBatches = valid
+            , ppTopicNames = Map.fromList (map (\(name, topicId) -> (topicId, name)) (Map.toList ids))
             }
         !out =
           OutboundProduce
@@ -701,7 +715,7 @@ enqueueRound state@SenderState {..} pipe (_broker :: Meta.BrokerMetadata) batche
             , opTransactionalId = txnIdM
             , opAcks = senderAcks
             , opTimeoutMs = senderTimeoutMs
-            , opMetadata = senderMetadata
+            , opTopicIds = ids
             , opBatches = valid
             , opPending = pending
             }
@@ -833,21 +847,22 @@ brokerWriterLoop PipeBootstrap {..} = forever $ do
   -- out to this thread in parallel with us hitting the wire.
   request <-
     buildProduceRequest
-      (opMetadata out)
+      (opTopicIds out)
       (opTransactionalId out)
       (opAcks out)
       (opTimeoutMs out)
       (opBatches out)
   let !requestBody = WC.runEncodeVer @PR.ProduceRequest (opApiVersion out) request
-      !framed =
-        Req.frameRequest
+  result <-
+    try
+      ( Req.sendRequestOn
+          pbsConn
           (opApiKey out)
           (opApiVersion out)
           (opCorrId out)
           (opClientId out)
           requestBody
-  result <-
-    try (Req.sendRawRequest pbsConn framed)
+      )
       :: IO (Either SomeException ())
   case result of
     Left e -> do
@@ -902,7 +917,7 @@ brokerReaderLoop pbs@PipeBootstrap {..} = do
                 Left err ->
                   forM_ (ppBatches pp) $ failBatch pbsState ("Failed to parse response: " <> T.pack err)
                 Right resp ->
-                  processProduceResponse pbsState (ppBatches pp) resp
+                  processProduceResponse pbsState pp resp
       atomically $ modifyTVar' pbsCount (subtract 1)
       brokerReaderLoop pbs
 
@@ -1044,11 +1059,9 @@ isBatchTimedOut currentTime deliveryTimeoutMs batch =
 
 {- | Build a ProduceRequest from a list of batches.
 Compression happens here, so this is an IO operation.
-The metadata cache is consulted per-topic to populate the
-KIP-516 TopicId field; on pre-v10 brokers (or topics not yet
-in the cache) the field stays 'P.nullUuid' which is fine for
-v0-v12 (where the encoder ignores it). v13+ requires a real
-topic id.
+The sender snapshots the KIP-516 topic IDs when it selects v13 or
+later, so responses can be matched to the original topic names even
+if metadata is refreshed while the request is in flight.
 
 The @transactionalId@ is plumbed in from the caller (read off
 the 'SenderState' TVar populated by @bindTransaction@). When
@@ -1058,20 +1071,20 @@ the txn id any transactional records in the request claim or
 it rejects with @TRANSACTIONAL_ID_AUTHORIZATION_FAILED@ (53).
 -}
 buildProduceRequest
-  :: Meta.MetadataCache
+  :: Map Text P.KafkaUuid
   -> Maybe Text
   -> Int16
   -> Int32
   -> [BA.ProducerBatch]
   -> IO PR.ProduceRequest
-buildProduceRequest metaCache transactionalIdM acks timeoutMs batches = do
+buildProduceRequest topicIds transactionalIdM acks timeoutMs batches = do
   -- Group batches by topic
   let batchesByTopic =
         groupBy (\b1 b2 -> BA.tpTopic (BA.batchTopicPartition b1) == BA.tpTopic (BA.batchTopicPartition b2)) $
           sortBy (comparing (BA.tpTopic . BA.batchTopicPartition)) batches
 
   -- Build TopicProduceData for each topic (with compression, so IO)
-  topicData <- mapM (buildTopicProduceData metaCache) batchesByTopic
+  topicData <- mapM (buildTopicProduceData topicIds) batchesByTopic
 
   return $
     PR.ProduceRequest
@@ -1084,29 +1097,20 @@ buildProduceRequest metaCache transactionalIdM acks timeoutMs batches = do
       }
 
 
-{- | Build TopicProduceData for a group of batches from the same topic.
-Compression happens here, so this is an IO operation. Kafka 4.0.0
-still keys produce requests by topic name; KIP-516 topic-id
-support arrived in later schema revisions.
--}
+-- | Build TopicProduceData for a group of batches from the same topic.
 buildTopicProduceData
-  :: Meta.MetadataCache -> [BA.ProducerBatch] -> IO PR.TopicProduceData
-buildTopicProduceData _metaCache batches = do
+  :: Map Text P.KafkaUuid -> [BA.ProducerBatch] -> IO PR.TopicProduceData
+buildTopicProduceData topicIds batches = do
   let topic = BA.tpTopic $ BA.batchTopicPartition $ head batches
   -- 'sendBatches' upstream guarantees that each (topic,
   -- partition) appears at most once in this batch list, so a
   -- straight per-batch mapM produces one PartitionProduceData
   -- per partition.
-  --
-  -- Kafka 4.0.0 still keys produce requests by topic name (the
-  -- KIP-516 topic-id field went away in this schema revision),
-  -- so the previous 'Meta.getTopicId' lookup here is no longer
-  -- needed and 'metaCache' is unused — see commit cc058b76 on
-  -- main for the schema bump that removed the field.
   partitionData <- mapM buildPartitionProduceData batches
   return $
     PR.TopicProduceData
       { PR.topicProduceDataName = P.mkKafkaString topic
+      , PR.topicProduceDataTopicId = Map.findWithDefault P.nullUuid topic topicIds
       , PR.topicProduceDataPartitionData = P.mkKafkaArray (V.fromList partitionData)
       }
 
@@ -1268,10 +1272,10 @@ behaviour the JVM client / librdkafka implement.
 -}
 processProduceResponse
   :: SenderState
-  -> [BA.ProducerBatch]
+  -> PendingProduce
   -> PResp.ProduceResponse
   -> IO ()
-processProduceResponse state batches response = do
+processProduceResponse state PendingProduce {..} response = do
   -- KIP-219 throttle. Negative / zero values are no-ops.
   let throttleMs = PResp.produceResponseThrottleTimeMs response
   when (throttleMs > 0) $
@@ -1288,11 +1292,13 @@ processProduceResponse state batches response = do
       !batchIndex =
         HashMap.fromListWith
           (++)
-          [(BA.batchTopicPartition b, [b]) | b <- batches]
+          (map (\batch -> (BA.batchTopicPartition batch, [batch])) ppBatches)
 
   -- Process each topic response
   V.forM_ topics $ \topicResp -> do
-    let topicName = extractText $ PResp.topicProduceResponseName topicResp
+    let topicName
+          | ppApiVersion >= 13 = Map.findWithDefault "" (PResp.topicProduceResponseTopicId topicResp) ppTopicNames
+          | otherwise = extractText (PResp.topicProduceResponseName topicResp)
         partitions = case P.unKafkaArray (PResp.topicProduceResponsePartitionResponses topicResp) of
           P.Null -> V.empty
           P.NotNull vec -> vec

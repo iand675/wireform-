@@ -265,9 +265,17 @@ generateNestedWireMaxSize structName fields flexibleVer =
 
 buildSizeExpr :: Text -> [FieldSpec] -> Maybe Int16 -> Doc ann
 buildSizeExpr typeName fields flexibleVer =
-  let perField f    = "+" <+> fieldMaxSize typeName flexibleVer f
+  let perField f
+        | isPotentiallyTaggedField f, Just _ <- flexibleVer =
+            "+" <+> parens ("if" <+> taggedFieldPresent "_version" typeName f
+              <+> "then" <+> size <+> "+ 10 else 0")
+        | otherwise = "+" <+> size
+        where size = fieldMaxSize typeName flexibleVer f
+      tagCount = length (filter isPotentiallyTaggedField fields)
       taggedTrailer = case flexibleVer of
-        Just _  -> "+ 1"  -- empty tagged-fields trailer is one byte
+        Just _
+          | tagCount >= 128 -> "+ 5"
+          | otherwise -> "+ 1"
         Nothing -> ""
   in vsep
        [ "0"
@@ -476,19 +484,31 @@ taggedEntryGuard typeName f =
       tagNum = case fieldTag f of
         Just t  -> pretty t
         Nothing -> "0"
-      cond = case fieldTaggedVersions f of
-        Just spec -> case parseVersionSpec spec of
-          Right (VersionFrom v)    -> "version >=" <+> pretty v
-          Right (VersionRange a b) -> "version >=" <+> pretty a
-                                        <+> "&& version <=" <+> pretty b
-          Right (ExactVersion v)   -> "version ==" <+> pretty v
-          _                        -> "True"
-        Nothing -> "True"
       payload = taggedFieldPayloadExpr f acc
   in parens
-       ("if" <+> cond
+       ("if" <+> taggedFieldPresent "version" typeName f
           <+> "then [(" <> tagNum <> "," <+> payload <> ")]"
           <+> "else []")
+
+
+taggedFieldPresent :: Doc ann -> Text -> FieldSpec -> Doc ann
+taggedFieldPresent version typeName f =
+  let gate = taggedVersionGate version f
+      acc = parens (pretty (toHaskellFieldName typeName (fieldName f)) <+> "msg")
+  in case fieldType f of
+       PrimitiveType "uuid" -> gate <+> "&&" <+> acc <+> "/=" <+> generateFieldDefaultDoc f
+       _ -> gate
+
+
+taggedVersionGate :: Doc ann -> FieldSpec -> Doc ann
+taggedVersionGate version f = case fieldTaggedVersions f of
+  Just spec -> case parseVersionSpec spec of
+    Right (VersionFrom v) -> version <+> ">=" <+> pretty v
+    Right (VersionRange a b) ->
+      version <+> ">=" <+> pretty a <+> "&&" <+> version <+> "<=" <+> pretty b
+    Right (ExactVersion v) -> version <+> "==" <+> pretty v
+    _ -> "True"
+  Nothing -> "True"
 
 -- | Encode the field's value as a 'ByteString' for inclusion in the
 -- tagged-field trailer. Tagged fields always use the flexible
@@ -869,14 +889,7 @@ taggedFieldBinding typeName f =
       tagNum    = case fieldTag f of
         Just t  -> pretty t
         Nothing -> "0"
-      gate = case fieldTaggedVersions f of
-        Just spec -> case parseVersionSpec spec of
-          Right (VersionFrom v)    -> "version >=" <+> pretty v
-          Right (VersionRange a b) -> "version >=" <+> pretty a
-                                        <+> "&& version <=" <+> pretty b
-          Right (ExactVersion v)   -> "version ==" <+> pretty v
-          _                        -> "True"
-        Nothing -> "True"
+      gate = taggedVersionGate "version" f
       decoder = taggedFieldDecodeExpr typeName f
       defaultVal = generateFieldDefaultDoc f
   in "let !" <> var <+> "= if" <+> gate

@@ -12,7 +12,7 @@ Kafka response for API key 1.
 
 
 
-Valid versions: 4-17
+Valid versions: 4-19
 Flexible versions: 12+
 
 This code is auto-generated from Kafka protocol definitions.
@@ -290,13 +290,13 @@ data FetchResponse = FetchResponse
 
 -- | Maximum supported version for FetchResponse.
 maxFetchResponseVersion :: Int16
-maxFetchResponseVersion = 17
+maxFetchResponseVersion = 19
 
 -- | KafkaMessage instance for FetchResponse.
 instance KafkaMessage FetchResponse where
   messageApiKey = 1
   messageMinVersion = 4
-  messageMaxVersion = 17
+  messageMaxVersion = 19
   messageFlexibleVersion = Just 12
 
 -- | Worst-case wire size of a EpochEndOffset.
@@ -424,9 +424,9 @@ wireMaxSizePartitionData _version msg =
   + 8
   + 8
   + 8
-  + wireMaxSizeEpochEndOffset _version (partitionDataDivergingEpoch msg)
-  + wireMaxSizeLeaderIdAndEpoch _version (partitionDataCurrentLeader msg)
-  + wireMaxSizeSnapshotId _version (partitionDataSnapshotId msg)
+  + (if _version >= 12 then wireMaxSizeEpochEndOffset _version (partitionDataDivergingEpoch msg) + 10 else 0)
+  + (if _version >= 12 then wireMaxSizeLeaderIdAndEpoch _version (partitionDataCurrentLeader msg) + 10 else 0)
+  + (if _version >= 12 then wireMaxSizeSnapshotId _version (partitionDataSnapshotId msg) + 10 else 0)
   + (5 + (case P.unKafkaArray (partitionDataAbortedTransactions msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeAbortedTransaction _version x ) v); P.Null -> 0 }))
   + 4
   + WP.dualBytesMaxSize (partitionDataRecords msg)
@@ -546,13 +546,18 @@ wireMaxSizeFetchResponse _version msg =
   + 2
   + 4
   + (5 + (case P.unKafkaArray (fetchResponseResponses msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeFetchableTopicResponse _version x ) v); P.Null -> 0 }))
-  + (5 + (case P.unKafkaArray (fetchResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint _version x ) v); P.Null -> 0 }))
+  + (if _version >= 16 then (5 + (case P.unKafkaArray (fetchResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint _version x ) v); P.Null -> 0 })) + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for FetchResponse.
 wirePokeFetchResponse :: Int -> Ptr Word8 -> FetchResponse -> IO (Ptr Word8)
 wirePokeFetchResponse version basePtr msg
-  | version >= 16 && version <= 17 = do
+  | version >= 4 && version <= 6 = do
+    p0 <- pure basePtr
+    p1 <- (if version >= 1 then W.pokeInt32BE p0 (fetchResponseThrottleTimeMs msg) else pure p0)
+    p2 <- WP.pokeVersionedArray version 12 (\p x -> wirePokeFetchableTopicResponse version p x) p1 (fetchResponseResponses msg)
+    pure p2
+  | version >= 12 && version <= 15 = do
     p0 <- pure basePtr
     p1 <- (if version >= 1 then W.pokeInt32BE p0 (fetchResponseThrottleTimeMs msg) else pure p0)
     p2 <- (if version >= 7 then W.pokeInt16BE p1 (fetchResponseErrorCode msg) else pure p1)
@@ -560,12 +565,7 @@ wirePokeFetchResponse version basePtr msg
     p4 <- WP.pokeVersionedArray version 12 (\p x -> wirePokeFetchableTopicResponse version p x) p3 (fetchResponseResponses msg)
     let !_taggedEntries = (if version >= 16 then [(0, W.runWirePokeWith (5 + (case P.unKafkaArray (fetchResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint version x) v); P.Null -> 0 })) (\p -> WP.pokeCompactArray (\p_ x -> wirePokeNodeEndpoint version p_ x) p (fetchResponseNodeEndpoints msg)))] else [])
     WP.pokeTaggedFieldEntries p4 _taggedEntries
-  | version >= 4 && version <= 6 = do
-    p0 <- pure basePtr
-    p1 <- (if version >= 1 then W.pokeInt32BE p0 (fetchResponseThrottleTimeMs msg) else pure p0)
-    p2 <- WP.pokeVersionedArray version 12 (\p x -> wirePokeFetchableTopicResponse version p x) p1 (fetchResponseResponses msg)
-    pure p2
-  | version >= 12 && version <= 15 = do
+  | version >= 16 && version <= 19 = do
     p0 <- pure basePtr
     p1 <- (if version >= 1 then W.pokeInt32BE p0 (fetchResponseThrottleTimeMs msg) else pure p0)
     p2 <- (if version >= 7 then W.pokeInt16BE p1 (fetchResponseErrorCode msg) else pure p1)
@@ -585,7 +585,11 @@ wirePokeFetchResponse version basePtr msg
 -- | Direct-poke decoder for FetchResponse.
 wirePeekFetchResponse :: Int -> ForeignPtr Word8 -> Ptr Word8 -> Ptr Word8 -> Ptr Word8 -> IO (FetchResponse, Ptr Word8)
 wirePeekFetchResponse version _fp _basePtr p0 endPtr
-  | version >= 16 && version <= 17 = do
+  | version >= 4 && version <= 6 = do
+    (f0_throttletimems, p1) <- (if version >= 1 then W.peekInt32BE p0 endPtr else pure (0, p0))
+    (f1_responses, p2) <- WP.peekVersionedArray version 12 (\p e -> wirePeekFetchableTopicResponse version _fp _basePtr p e) p1 endPtr
+    pure (FetchResponse { fetchResponseThrottleTimeMs = f0_throttletimems, fetchResponseErrorCode = 0, fetchResponseSessionId = 0, fetchResponseResponses = f1_responses, fetchResponseNodeEndpoints = P.mkKafkaArray V.empty }, p2)
+  | version >= 12 && version <= 15 = do
     (f0_throttletimems, p1) <- (if version >= 1 then W.peekInt32BE p0 endPtr else pure (0, p0))
     (f1_errorcode, p2) <- (if version >= 7 then W.peekInt16BE p1 endPtr else pure (0, p1))
     (f2_sessionid, p3) <- (if version >= 7 then W.peekInt32BE p2 endPtr else pure (0, p2))
@@ -593,11 +597,7 @@ wirePeekFetchResponse version _fp _basePtr p0 endPtr
     (_taggedMap, pTagsEnd) <- WP.peekTaggedFieldsMap p4 endPtr
     let !_tag_nodeendpoints = if version >= 16 then case Data.Map.Strict.lookup 0 _taggedMap of { Just _bs -> case (W.runWireGetWith (\_fp _bp p e -> WP.peekCompactArray (\p e -> wirePeekNodeEndpoint version _fp _bp p e) p e)) _bs of { Right _v -> _v ; Left _ -> P.mkKafkaArray V.empty}; Nothing -> P.mkKafkaArray V.empty} else P.mkKafkaArray V.empty
     pure (FetchResponse { fetchResponseThrottleTimeMs = f0_throttletimems, fetchResponseErrorCode = f1_errorcode, fetchResponseSessionId = f2_sessionid, fetchResponseResponses = f3_responses, fetchResponseNodeEndpoints = _tag_nodeendpoints }, pTagsEnd)
-  | version >= 4 && version <= 6 = do
-    (f0_throttletimems, p1) <- (if version >= 1 then W.peekInt32BE p0 endPtr else pure (0, p0))
-    (f1_responses, p2) <- WP.peekVersionedArray version 12 (\p e -> wirePeekFetchableTopicResponse version _fp _basePtr p e) p1 endPtr
-    pure (FetchResponse { fetchResponseThrottleTimeMs = f0_throttletimems, fetchResponseErrorCode = 0, fetchResponseSessionId = 0, fetchResponseResponses = f1_responses, fetchResponseNodeEndpoints = P.mkKafkaArray V.empty }, p2)
-  | version >= 12 && version <= 15 = do
+  | version >= 16 && version <= 19 = do
     (f0_throttletimems, p1) <- (if version >= 1 then W.peekInt32BE p0 endPtr else pure (0, p0))
     (f1_errorcode, p2) <- (if version >= 7 then W.peekInt16BE p1 endPtr else pure (0, p1))
     (f2_sessionid, p3) <- (if version >= 7 then W.peekInt32BE p2 endPtr else pure (0, p2))

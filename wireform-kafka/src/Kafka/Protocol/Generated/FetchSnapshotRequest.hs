@@ -200,7 +200,7 @@ wireMaxSizePartitionSnapshot _version msg =
   + 4
   + wireMaxSizeSnapshotId _version (partitionSnapshotSnapshotId msg)
   + 8
-  + 16
+  + (if _version >= 1 && (partitionSnapshotReplicaDirectoryId msg) /= P.nullUuid then 16 + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for PartitionSnapshot.
@@ -212,7 +212,7 @@ wirePokePartitionSnapshot version basePtr msg = do
   p3 <- wirePokeSnapshotId version p2 (partitionSnapshotSnapshotId msg)
   p4 <- W.pokeInt64BE p3 (partitionSnapshotPosition msg)
   if version >= 0 then do
-    let !_taggedEntries = (if version >= 1 then [(0, W.runWirePut (partitionSnapshotReplicaDirectoryId msg))] else [])
+    let !_taggedEntries = (if version >= 1 && (partitionSnapshotReplicaDirectoryId msg) /= P.nullUuid then [(0, W.runWirePut (partitionSnapshotReplicaDirectoryId msg))] else [])
     WP.pokeTaggedFieldEntries p4 _taggedEntries
   else pure p4
 
@@ -265,7 +265,7 @@ defaultTopicSnapshot = TopicSnapshot { topicSnapshotName = P.KafkaString Null, t
 wireMaxSizeFetchSnapshotRequest :: Int -> FetchSnapshotRequest -> Int
 wireMaxSizeFetchSnapshotRequest _version msg =
   0
-  + WP.dualStringMaxSize (fetchSnapshotRequestClusterId msg)
+  + (if _version >= 0 then WP.dualStringMaxSize (fetchSnapshotRequestClusterId msg) + 10 else 0)
   + 4
   + 4
   + (5 + (case P.unKafkaArray (fetchSnapshotRequestTopics msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeTopicSnapshot _version x ) v); P.Null -> 0 }))

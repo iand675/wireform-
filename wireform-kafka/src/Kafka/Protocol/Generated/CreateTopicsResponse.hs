@@ -214,7 +214,7 @@ wireMaxSizeCreatableTopicResult _version msg =
   + 16
   + 2
   + WP.dualStringMaxSize (creatableTopicResultErrorMessage msg)
-  + 2
+  + (if _version >= 5 then 2 + 10 else 0)
   + 4
   + 2
   + (5 + (case P.unKafkaArray (creatableTopicResultConfigs msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeCreatableTopicConfigs _version x ) v); P.Null -> 0 }))

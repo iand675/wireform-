@@ -111,7 +111,7 @@ wireMaxSizeBrokerHeartbeatRequest _version msg =
   + 8
   + 1
   + 1
-  + (5 + (case P.unKafkaArray (brokerHeartbeatRequestOfflineLogDirs msg) of { P.NotNull v -> sum (fmap (\x -> 16 ) v); P.Null -> 0 }))
+  + (if _version >= 1 then (5 + (case P.unKafkaArray (brokerHeartbeatRequestOfflineLogDirs msg) of { P.NotNull v -> sum (fmap (\x -> 16 ) v); P.Null -> 0 })) + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for BrokerHeartbeatRequest.

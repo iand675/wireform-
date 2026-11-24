@@ -12,7 +12,7 @@ Kafka response for API key 58.
 
 
 
-Valid versions: 0
+Valid versions: 0-1
 Flexible versions: 0+
 
 This code is auto-generated from Kafka protocol definitions.
@@ -68,13 +68,13 @@ data EnvelopeResponse = EnvelopeResponse
 
 -- | Maximum supported version for EnvelopeResponse.
 maxEnvelopeResponseVersion :: Int16
-maxEnvelopeResponseVersion = 0
+maxEnvelopeResponseVersion = 1
 
 -- | KafkaMessage instance for EnvelopeResponse.
 instance KafkaMessage EnvelopeResponse where
   messageApiKey = 58
   messageMinVersion = 0
-  messageMaxVersion = 0
+  messageMaxVersion = 1
   messageFlexibleVersion = Just 0
 
 
@@ -89,7 +89,7 @@ wireMaxSizeEnvelopeResponse _version msg =
 -- | Direct-poke encoder for EnvelopeResponse.
 wirePokeEnvelopeResponse :: Int -> Ptr Word8 -> EnvelopeResponse -> IO (Ptr Word8)
 wirePokeEnvelopeResponse version basePtr msg
-  | version == 0 = do
+  | version >= 0 && version <= 1 = do
     p0 <- pure basePtr
     p1 <- (if version >= 0 then WP.pokeCompactBytes p0 (P.toCompactBytes (envelopeResponseResponseData msg)) else WP.pokeKafkaBytes p0 (envelopeResponseResponseData msg))
     p2 <- W.pokeInt16BE p1 (envelopeResponseErrorCode msg)
@@ -99,7 +99,7 @@ wirePokeEnvelopeResponse version basePtr msg
 -- | Direct-poke decoder for EnvelopeResponse.
 wirePeekEnvelopeResponse :: Int -> ForeignPtr Word8 -> Ptr Word8 -> Ptr Word8 -> Ptr Word8 -> IO (EnvelopeResponse, Ptr Word8)
 wirePeekEnvelopeResponse version _fp _basePtr p0 endPtr
-  | version == 0 = do
+  | version >= 0 && version <= 1 = do
     (f0_responsedata, p1) <- (if version >= 0 then (\(cb, p') -> (P.fromCompactBytes cb, p')) <$> WP.peekCompactBytes p0 endPtr else WP.peekKafkaBytes p0 endPtr)
     (f1_errorcode, p2) <- W.peekInt16BE p1 endPtr
     pTagsEnd <- WP.peekAndSkipTaggedFields p2 endPtr

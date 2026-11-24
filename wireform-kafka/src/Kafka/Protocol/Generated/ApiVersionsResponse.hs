@@ -12,7 +12,7 @@ Kafka response for API key 18.
 
 
 
-Valid versions: 0-4
+Valid versions: 0-6
 Flexible versions: 3+
 
 This code is auto-generated from Kafka protocol definitions.
@@ -172,13 +172,13 @@ data ApiVersionsResponse = ApiVersionsResponse
 
 -- | Maximum supported version for ApiVersionsResponse.
 maxApiVersionsResponseVersion :: Int16
-maxApiVersionsResponseVersion = 4
+maxApiVersionsResponseVersion = 6
 
 -- | KafkaMessage instance for ApiVersionsResponse.
 instance KafkaMessage ApiVersionsResponse where
   messageApiKey = 18
   messageMinVersion = 0
-  messageMaxVersion = 4
+  messageMaxVersion = 6
   messageFlexibleVersion = Just 3
 
 -- | Worst-case wire size of a ApiVersion.
@@ -284,10 +284,10 @@ wireMaxSizeApiVersionsResponse _version msg =
   + 2
   + (5 + (case P.unKafkaArray (apiVersionsResponseApiKeys msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeApiVersion _version x ) v); P.Null -> 0 }))
   + 4
-  + (5 + (case P.unKafkaArray (apiVersionsResponseSupportedFeatures msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeSupportedFeatureKey _version x ) v); P.Null -> 0 }))
-  + 8
-  + (5 + (case P.unKafkaArray (apiVersionsResponseFinalizedFeatures msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeFinalizedFeatureKey _version x ) v); P.Null -> 0 }))
-  + 1
+  + (if _version >= 3 then (5 + (case P.unKafkaArray (apiVersionsResponseSupportedFeatures msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeSupportedFeatureKey _version x ) v); P.Null -> 0 })) + 10 else 0)
+  + (if _version >= 3 then 8 + 10 else 0)
+  + (if _version >= 3 then (5 + (case P.unKafkaArray (apiVersionsResponseFinalizedFeatures msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeFinalizedFeatureKey _version x ) v); P.Null -> 0 })) + 10 else 0)
+  + (if _version >= 3 then 1 + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for ApiVersionsResponse.
@@ -304,7 +304,7 @@ wirePokeApiVersionsResponse version basePtr msg
     p2 <- WP.pokeVersionedArray version 3 (\p x -> wirePokeApiVersion version p x) p1 (apiVersionsResponseApiKeys msg)
     p3 <- (if version >= 1 then W.pokeInt32BE p2 (apiVersionsResponseThrottleTimeMs msg) else pure p2)
     pure p3
-  | version >= 3 && version <= 4 = do
+  | version >= 3 && version <= 6 = do
     p0 <- pure basePtr
     p1 <- W.pokeInt16BE p0 (apiVersionsResponseErrorCode msg)
     p2 <- WP.pokeVersionedArray version 3 (\p x -> wirePokeApiVersion version p x) p1 (apiVersionsResponseApiKeys msg)
@@ -325,7 +325,7 @@ wirePeekApiVersionsResponse version _fp _basePtr p0 endPtr
     (f1_apikeys, p2) <- WP.peekVersionedArray version 3 (\p e -> wirePeekApiVersion version _fp _basePtr p e) p1 endPtr
     (f2_throttletimems, p3) <- (if version >= 1 then W.peekInt32BE p2 endPtr else pure (0, p2))
     pure (ApiVersionsResponse { apiVersionsResponseErrorCode = f0_errorcode, apiVersionsResponseApiKeys = f1_apikeys, apiVersionsResponseThrottleTimeMs = f2_throttletimems, apiVersionsResponseSupportedFeatures = P.mkKafkaArray V.empty, apiVersionsResponseFinalizedFeaturesEpoch = -1, apiVersionsResponseFinalizedFeatures = P.mkKafkaArray V.empty, apiVersionsResponseZkMigrationReady = False }, p3)
-  | version >= 3 && version <= 4 = do
+  | version >= 3 && version <= 6 = do
     (f0_errorcode, p1) <- W.peekInt16BE p0 endPtr
     (f1_apikeys, p2) <- WP.peekVersionedArray version 3 (\p e -> wirePeekApiVersion version _fp _basePtr p e) p1 endPtr
     (f2_throttletimems, p3) <- (if version >= 1 then W.peekInt32BE p2 endPtr else pure (0, p2))

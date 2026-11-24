@@ -17,10 +17,12 @@ module Kafka.Client.Internal.Request (
   sendRequestReceiveResponse,
   sendRequestReceiveResponseLocked,
   sendRawRequest,
+  sendRequestOn,
   receiveRawResponse,
 
   -- * Frame Construction
   frameRequest,
+  frameRequestWithClientInstanceId,
   frameRequestBuilder,
   parseResponseFrame,
 
@@ -32,6 +34,8 @@ module Kafka.Client.Internal.Request (
 ) where
 
 import Control.Monad (when)
+import Control.Concurrent.MVar (modifyMVarMasked_, readMVar, withMVar)
+import Control.Exception (onException)
 import Data.Bits (shiftL, (.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -40,7 +44,6 @@ import Data.Int (Int16, Int32)
 import Foreign.ForeignPtr (mallocForeignPtrBytes, withForeignPtr)
 import Foreign.Ptr (plusPtr)
 import GHC.IO (unsafePerformIO)
-import Control.Concurrent.MVar (withMVar)
 import Kafka.Network.Connection.Internal (Connection, connectionGet, connectionPut)
 import Kafka.Network.Connection.Internal qualified as I
 import Wireform.Builder qualified as WB
@@ -69,26 +72,16 @@ frameRequest
   -> ByteString
   -- ^ Serialized request body
   -> ByteString
-frameRequest apiKey apiVersion correlationId clientId requestBody =
+frameRequest = frameRequestWithClientInstanceId P.nullUuid
+
+
+-- | Frame a request for a caller managing the connection's client identity.
+-- Pass 'P.nullUuid' to omit the instance ID tag.
+frameRequestWithClientInstanceId
+  :: P.KafkaUuid -> Int16 -> Int16 -> Int32 -> P.KafkaString -> ByteString -> ByteString
+frameRequestWithClientInstanceId instanceId apiKey apiVersion correlationId clientId requestBody =
   let
-    !header =
-      RH.RequestHeader
-        { RH.requestHeaderRequestApiKey = apiKey
-        , RH.requestHeaderRequestApiVersion = apiVersion
-        , RH.requestHeaderCorrelationId = correlationId
-        , RH.requestHeaderClientId = clientId
-        }
-    -- The Kafka request header has its own version: v0 (for the
-    -- ApiVersions request, which deliberately stays at v0 so the
-    -- broker can negotiate from any client); v1 (no tagged fields,
-    -- matches every non-flexible API); v2 (flexible — adds an
-    -- empty TaggedFields trailer). The choice is determined by
-    -- whether the API key + version pair has flexible-version
-    -- support; sending a v1 header for a flexible body makes the
-    -- broker read garbage off the wire and close the connection
-    -- with @InvalidRequestException@ + BufferUnderflow.
-    !headerVersion = requestHeaderVersionFor apiKey apiVersion
-    !headerBytes = WC.runEncodeVer @RH.RequestHeader headerVersion header
+    !headerBytes = encodeRequestHeader instanceId apiKey apiVersion correlationId clientId
     !headerLen = BS.length headerBytes
     !bodyLen = BS.length requestBody
     !messageSize = headerLen + bodyLen
@@ -137,15 +130,7 @@ frameRequestBuilder
   -> WB.Builder
 frameRequestBuilder apiKey apiVersion correlationId clientId requestBody =
   let
-    !header =
-      RH.RequestHeader
-        { RH.requestHeaderRequestApiKey = apiKey
-        , RH.requestHeaderRequestApiVersion = apiVersion
-        , RH.requestHeaderCorrelationId = correlationId
-        , RH.requestHeaderClientId = clientId
-        }
-    !headerVersion = requestHeaderVersionFor apiKey apiVersion
-    !headerBytes = WC.runEncodeVer @RH.RequestHeader headerVersion header
+    !headerBytes = encodeRequestHeader P.nullUuid apiKey apiVersion correlationId clientId
     !messageSize = BS.length headerBytes + BS.length requestBody
   in
     WB.int32BE (fromIntegral messageSize)
@@ -153,13 +138,25 @@ frameRequestBuilder apiKey apiVersion correlationId clientId requestBody =
       <> WB.byteString requestBody
 
 
+encodeRequestHeader :: P.KafkaUuid -> Int16 -> Int16 -> Int32 -> P.KafkaString -> ByteString
+encodeRequestHeader instanceId apiKey apiVersion correlationId clientId =
+  WC.runEncodeVer @RH.RequestHeader (requestHeaderVersionFor apiKey apiVersion) $
+    RH.RequestHeader
+      { RH.requestHeaderRequestApiKey = apiKey
+      , RH.requestHeaderRequestApiVersion = apiVersion
+      , RH.requestHeaderCorrelationId = correlationId
+      , RH.requestHeaderClientId = clientId
+      , RH.requestHeaderClientInstanceId = instanceId
+      }
+{-# INLINE encodeRequestHeader #-}
+
+
 {- | Pick the right Kafka request-header version for a given API
 key + body version. Encodes the per-API flexible-version
 thresholds upstream sets in the JSON message defs.
 
-Anything in the table at body version >= the flexible-from
-threshold uses header v2 (which adds an empty 'TaggedFields'
-trailer); everything else uses header v1.
+The KIP-1313 versions use header v3. Earlier flexible versions use
+header v2, and non-flexible versions use header v1.
 
 == ApiVersions special case
 
@@ -179,10 +176,22 @@ pre-Kafka-0.10 ControlledShutdown only — so v0 was never
 a viable choice for any client request.)
 -}
 requestHeaderVersionFor :: Int16 -> Int16 -> Int16
-requestHeaderVersionFor apiKey apiVersion =
-  case lookup apiKey flexibleVersionTable of
-    Nothing -> 1 -- non-flexible API
-    Just t -> if apiVersion >= t then 2 else 1
+requestHeaderVersionFor apiKey apiVersion
+  | usesRequestHeaderV3 apiKey apiVersion = 3
+  | otherwise = case lookup apiKey flexibleVersionTable of
+      Nothing -> 1
+      Just t -> if apiVersion >= t then 2 else 1
+
+
+-- KIP-1313 thresholds from the corresponding request schemas.
+usesRequestHeaderV3 :: Int16 -> Int16 -> Bool
+usesRequestHeaderV3 apiKey version = case apiKey of
+  0 -> version >= 14 -- Produce
+  1 -> version >= 19 -- Fetch
+  18 -> version >= 6 -- ApiVersions
+  58 -> version >= 1 -- Envelope
+  _ -> False
+{-# INLINE usesRequestHeaderV3 #-}
 
 
 {- | Pick the right Kafka /response/-header version for a given
@@ -440,8 +449,30 @@ parseResponseFrame apiKey apiVersion bs = do
 
 -- | Send a raw framed request to the connection.
 sendRawRequest :: Connection -> ByteString -> IO ()
-sendRawRequest conn framedRequest = do
-  connectionPut conn framedRequest
+sendRawRequest conn framedRequest = sendFrame conn (const framedRequest)
+
+
+-- | Send a request using the first-write state of this physical connection.
+sendRequestOn :: Connection -> Int16 -> Int16 -> Int32 -> P.KafkaString -> ByteString -> IO ()
+sendRequestOn conn apiKey apiVersion correlationId clientId body =
+  sendFrame conn $ \first ->
+    if usesRequestHeaderV3 apiKey apiVersion
+      then
+        let instanceId = if first then I.connClientInstanceId conn else P.nullUuid
+            headerClientId = if first then clientId else P.KafkaString P.Null
+        in frameRequestWithClientInstanceId instanceId apiKey apiVersion correlationId headerClientId body
+      else frameRequest apiKey apiVersion correlationId clientId body
+
+
+sendFrame :: Connection -> (Bool -> ByteString) -> IO ()
+sendFrame conn frame = do
+  let sent = I.connHasSentRequest conn
+  alreadySent <- readMVar sent
+  if alreadySent
+    then connectionPut conn (frame False)
+    else modifyMVarMasked_ sent $ \previous -> do
+      connectionPut conn (frame (not previous)) `onException` I.connectionClose conn
+      pure True
 
 
 {- | Read exactly @n@ bytes from the connection into a single
@@ -543,12 +574,11 @@ sendRequestReceiveResponse
   -- ^ Serialized request body
   -> IO (Either String (Int32, ByteString))
 sendRequestReceiveResponse conn apiKey apiVersion correlationId clientId requestBody = do
-  let framedRequest = frameRequest apiKey apiVersion correlationId clientId requestBody
   -- One request in flight per shared connection: whoever sends
   -- reads the next response, so the pair must not interleave with
   -- another caller's.
   response <- withMVar (I.connRequestLock conn) $ \_ -> do
-    sendRawRequest conn framedRequest
+    sendRequestOn conn apiKey apiVersion correlationId clientId requestBody
     receiveRawResponse conn
   return $ parseResponseFrame apiKey apiVersion response
 

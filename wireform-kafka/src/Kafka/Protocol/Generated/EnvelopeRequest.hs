@@ -12,7 +12,7 @@ Kafka request for API key 58.
 
 
 
-Valid versions: 0
+Valid versions: 0-1
 Flexible versions: 0+
 
 This code is auto-generated from Kafka protocol definitions.
@@ -74,13 +74,13 @@ data EnvelopeRequest = EnvelopeRequest
 
 -- | Maximum supported version for EnvelopeRequest.
 maxEnvelopeRequestVersion :: Int16
-maxEnvelopeRequestVersion = 0
+maxEnvelopeRequestVersion = 1
 
 -- | KafkaMessage instance for EnvelopeRequest.
 instance KafkaMessage EnvelopeRequest where
   messageApiKey = 58
   messageMinVersion = 0
-  messageMaxVersion = 0
+  messageMaxVersion = 1
   messageFlexibleVersion = Just 0
 
 
@@ -96,7 +96,7 @@ wireMaxSizeEnvelopeRequest _version msg =
 -- | Direct-poke encoder for EnvelopeRequest.
 wirePokeEnvelopeRequest :: Int -> Ptr Word8 -> EnvelopeRequest -> IO (Ptr Word8)
 wirePokeEnvelopeRequest version basePtr msg
-  | version == 0 = do
+  | version >= 0 && version <= 1 = do
     p0 <- pure basePtr
     p1 <- (if version >= 0 then WP.pokeCompactBytes p0 (P.toCompactBytes (envelopeRequestRequestData msg)) else WP.pokeKafkaBytes p0 (envelopeRequestRequestData msg))
     p2 <- (if version >= 0 then WP.pokeCompactBytes p1 (P.toCompactBytes (envelopeRequestRequestPrincipal msg)) else WP.pokeKafkaBytes p1 (envelopeRequestRequestPrincipal msg))
@@ -107,7 +107,7 @@ wirePokeEnvelopeRequest version basePtr msg
 -- | Direct-poke decoder for EnvelopeRequest.
 wirePeekEnvelopeRequest :: Int -> ForeignPtr Word8 -> Ptr Word8 -> Ptr Word8 -> Ptr Word8 -> IO (EnvelopeRequest, Ptr Word8)
 wirePeekEnvelopeRequest version _fp _basePtr p0 endPtr
-  | version == 0 = do
+  | version >= 0 && version <= 1 = do
     (f0_requestdata, p1) <- (if version >= 0 then (\(cb, p') -> (P.fromCompactBytes cb, p')) <$> WP.peekCompactBytes p0 endPtr else WP.peekKafkaBytes p0 endPtr)
     (f1_requestprincipal, p2) <- (if version >= 0 then (\(cb, p') -> (P.fromCompactBytes cb, p')) <$> WP.peekCompactBytes p1 endPtr else WP.peekKafkaBytes p1 endPtr)
     (f2_clienthostaddress, p3) <- (if version >= 0 then (\(cb, p') -> (P.fromCompactBytes cb, p')) <$> WP.peekCompactBytes p2 endPtr else WP.peekKafkaBytes p2 endPtr)

@@ -154,7 +154,7 @@ wireMaxSizeUpdateRaftVoterResponse _version msg =
   0
   + 4
   + 2
-  + wireMaxSizeCurrentLeader _version (updateRaftVoterResponseCurrentLeader msg)
+  + (if _version >= 0 then wireMaxSizeCurrentLeader _version (updateRaftVoterResponseCurrentLeader msg) + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for UpdateRaftVoterResponse.

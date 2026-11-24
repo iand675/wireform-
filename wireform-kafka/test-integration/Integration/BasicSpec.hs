@@ -126,6 +126,7 @@ testMetadataRequest = do
             , RH.requestHeaderRequestApiVersion = fromIntegral apiVersion
             , RH.requestHeaderCorrelationId = correlationId
             , RH.requestHeaderClientId = clientId
+            , RH.requestHeaderClientInstanceId = P.nullUuid
             }
     pure ()
 

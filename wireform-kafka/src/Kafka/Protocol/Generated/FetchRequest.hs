@@ -12,7 +12,7 @@ Kafka request for API key 1.
 
 
 
-Valid versions: 4-17
+Valid versions: 4-19
 Flexible versions: 12+
 
 This code is auto-generated from Kafka protocol definitions.
@@ -113,6 +113,12 @@ data FetchPartition = FetchPartition
 
   -- Versions: 17+
   fetchPartitionReplicaDirectoryId :: !(KafkaUuid)
+,
+
+  -- | The high-watermark known by the replica. -1 if the high-watermark is not known and 92233720368547758
+
+  -- Versions: 18+
+  fetchPartitionHighWatermark :: !(Int64)
 
   }
   deriving (Eq, Show, Generic)
@@ -245,13 +251,13 @@ data FetchRequest = FetchRequest
 
 -- | Maximum supported version for FetchRequest.
 maxFetchRequestVersion :: Int16
-maxFetchRequestVersion = 17
+maxFetchRequestVersion = 19
 
 -- | KafkaMessage instance for FetchRequest.
 instance KafkaMessage FetchRequest where
   messageApiKey = 1
   messageMinVersion = 4
-  messageMaxVersion = 17
+  messageMaxVersion = 19
   messageFlexibleVersion = Just 12
 
 -- | Worst-case wire size of a ReplicaState.
@@ -293,7 +299,8 @@ wireMaxSizeFetchPartition _version msg =
   + 4
   + 8
   + 4
-  + 16
+  + (if _version >= 17 && (fetchPartitionReplicaDirectoryId msg) /= P.nullUuid then 16 + 10 else 0)
+  + (if _version >= 18 then 8 + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for FetchPartition.
@@ -307,7 +314,7 @@ wirePokeFetchPartition version basePtr msg = do
   p5 <- (if version >= 5 then W.pokeInt64BE p4 (fetchPartitionLogStartOffset msg) else pure p4)
   p6 <- W.pokeInt32BE p5 (fetchPartitionPartitionMaxBytes msg)
   if version >= 12 then do
-    let !_taggedEntries = (if version >= 17 then [(0, W.runWirePut (fetchPartitionReplicaDirectoryId msg))] else [])
+    let !_taggedEntries = (if version >= 17 && (fetchPartitionReplicaDirectoryId msg) /= P.nullUuid then [(0, W.runWirePut (fetchPartitionReplicaDirectoryId msg))] else []) ++ (if version >= 18 then [(1, W.runWirePut (fetchPartitionHighWatermark msg))] else [])
     WP.pokeTaggedFieldEntries p6 _taggedEntries
   else pure p6
 
@@ -322,12 +329,13 @@ wirePeekFetchPartition version _fp _basePtr p0 endPtr = do
   (f5_partitionmaxbytes, p6) <- W.peekInt32BE p5 endPtr
   (_taggedMap, pTagsEnd) <- if version >= 12 then WP.peekTaggedFieldsMap p6 endPtr else pure (Data.Map.Strict.empty, p6)
   let !_tag_replicadirectoryid = if version >= 17 then case Data.Map.Strict.lookup 0 _taggedMap of { Just _bs -> case (W.runWireGet :: Data.ByteString.ByteString -> Either String P.KafkaUuid) _bs of { Right _v -> _v ; Left _ -> P.nullUuid}; Nothing -> P.nullUuid} else P.nullUuid
-  pure (FetchPartition { fetchPartitionPartition = f0_partition, fetchPartitionCurrentLeaderEpoch = f1_currentleaderepoch, fetchPartitionFetchOffset = f2_fetchoffset, fetchPartitionLastFetchedEpoch = f3_lastfetchedepoch, fetchPartitionLogStartOffset = f4_logstartoffset, fetchPartitionPartitionMaxBytes = f5_partitionmaxbytes, fetchPartitionReplicaDirectoryId = _tag_replicadirectoryid }, pTagsEnd)
+  let !_tag_highwatermark = if version >= 18 then case Data.Map.Strict.lookup 1 _taggedMap of { Just _bs -> case (W.runWireGet :: Data.ByteString.ByteString -> Either String Data.Int.Int64) _bs of { Right _v -> _v ; Left _ -> 9223372036854775807}; Nothing -> 9223372036854775807} else 9223372036854775807
+  pure (FetchPartition { fetchPartitionPartition = f0_partition, fetchPartitionCurrentLeaderEpoch = f1_currentleaderepoch, fetchPartitionFetchOffset = f2_fetchoffset, fetchPartitionLastFetchedEpoch = f3_lastfetchedepoch, fetchPartitionLogStartOffset = f4_logstartoffset, fetchPartitionPartitionMaxBytes = f5_partitionmaxbytes, fetchPartitionReplicaDirectoryId = _tag_replicadirectoryid, fetchPartitionHighWatermark = _tag_highwatermark }, pTagsEnd)
 
 -- | Per-struct default value referenced by 'generateFieldDefaultDoc'
 -- when an absent-version field elsewhere needs a placeholder.
 defaultFetchPartition :: FetchPartition
-defaultFetchPartition = FetchPartition { fetchPartitionPartition = 0, fetchPartitionCurrentLeaderEpoch = -1, fetchPartitionFetchOffset = 0, fetchPartitionLastFetchedEpoch = -1, fetchPartitionLogStartOffset = -1, fetchPartitionPartitionMaxBytes = 0, fetchPartitionReplicaDirectoryId = P.nullUuid }
+defaultFetchPartition = FetchPartition { fetchPartitionPartition = 0, fetchPartitionCurrentLeaderEpoch = -1, fetchPartitionFetchOffset = 0, fetchPartitionLastFetchedEpoch = -1, fetchPartitionLogStartOffset = -1, fetchPartitionPartitionMaxBytes = 0, fetchPartitionReplicaDirectoryId = P.nullUuid, fetchPartitionHighWatermark = 9223372036854775807 }
 
 -- | Worst-case wire size of a FetchTopic.
 wireMaxSizeFetchTopic :: Int -> FetchTopic -> Int
@@ -397,9 +405,9 @@ defaultForgottenTopic = ForgottenTopic { forgottenTopicTopic = P.KafkaString Nul
 wireMaxSizeFetchRequest :: Int -> FetchRequest -> Int
 wireMaxSizeFetchRequest _version msg =
   0
-  + WP.dualStringMaxSize (fetchRequestClusterId msg)
+  + (if _version >= 12 then WP.dualStringMaxSize (fetchRequestClusterId msg) + 10 else 0)
   + 4
-  + wireMaxSizeReplicaState _version (fetchRequestReplicaState msg)
+  + (if _version >= 15 then wireMaxSizeReplicaState _version (fetchRequestReplicaState msg) + 10 else 0)
   + 4
   + 4
   + 4
@@ -450,19 +458,6 @@ wirePokeFetchRequest version basePtr msg
     p10 <- (if version >= 11 then (if version >= 12 then WP.pokeCompactString p9 (P.toCompactString (fetchRequestRackId msg)) else WP.pokeKafkaString p9 (fetchRequestRackId msg)) else pure p9)
     let !_taggedEntries = (if version >= 12 then [(0, W.runWirePut (P.toCompactString (fetchRequestClusterId msg)))] else []) ++ (if version >= 15 then [(1, W.runWirePokeWith (wireMaxSizeReplicaState version (fetchRequestReplicaState msg)) (\p -> wirePokeReplicaState version p (fetchRequestReplicaState msg)))] else [])
     WP.pokeTaggedFieldEntries p10 _taggedEntries
-  | version >= 15 && version <= 17 = do
-    p0 <- pure basePtr
-    p1 <- W.pokeInt32BE p0 (fetchRequestMaxWaitMs msg)
-    p2 <- W.pokeInt32BE p1 (fetchRequestMinBytes msg)
-    p3 <- (if version >= 3 then W.pokeInt32BE p2 (fetchRequestMaxBytes msg) else pure p2)
-    p4 <- (if version >= 4 then W.pokeWord8 p3 (fromIntegral (fetchRequestIsolationLevel msg)) else pure p3)
-    p5 <- (if version >= 7 then W.pokeInt32BE p4 (fetchRequestSessionId msg) else pure p4)
-    p6 <- (if version >= 7 then W.pokeInt32BE p5 (fetchRequestSessionEpoch msg) else pure p5)
-    p7 <- WP.pokeVersionedArray version 12 (\p x -> wirePokeFetchTopic version p x) p6 (fetchRequestTopics msg)
-    p8 <- (if version >= 7 then WP.pokeVersionedArray version 12 (\p x -> wirePokeForgottenTopic version p x) p7 (fetchRequestForgottenTopicsData msg) else pure p7)
-    p9 <- (if version >= 11 then (if version >= 12 then WP.pokeCompactString p8 (P.toCompactString (fetchRequestRackId msg)) else WP.pokeKafkaString p8 (fetchRequestRackId msg)) else pure p8)
-    let !_taggedEntries = (if version >= 12 then [(0, W.runWirePut (P.toCompactString (fetchRequestClusterId msg)))] else []) ++ (if version >= 15 then [(1, W.runWirePokeWith (wireMaxSizeReplicaState version (fetchRequestReplicaState msg)) (\p -> wirePokeReplicaState version p (fetchRequestReplicaState msg)))] else [])
-    WP.pokeTaggedFieldEntries p9 _taggedEntries
   | version >= 7 && version <= 10 = do
     p0 <- pure basePtr
     p1 <- (if version <= 14 then W.pokeInt32BE p0 (fetchRequestReplicaId msg) else pure p0)
@@ -475,6 +470,19 @@ wirePokeFetchRequest version basePtr msg
     p8 <- WP.pokeVersionedArray version 12 (\p x -> wirePokeFetchTopic version p x) p7 (fetchRequestTopics msg)
     p9 <- (if version >= 7 then WP.pokeVersionedArray version 12 (\p x -> wirePokeForgottenTopic version p x) p8 (fetchRequestForgottenTopicsData msg) else pure p8)
     pure p9
+  | version >= 15 && version <= 19 = do
+    p0 <- pure basePtr
+    p1 <- W.pokeInt32BE p0 (fetchRequestMaxWaitMs msg)
+    p2 <- W.pokeInt32BE p1 (fetchRequestMinBytes msg)
+    p3 <- (if version >= 3 then W.pokeInt32BE p2 (fetchRequestMaxBytes msg) else pure p2)
+    p4 <- (if version >= 4 then W.pokeWord8 p3 (fromIntegral (fetchRequestIsolationLevel msg)) else pure p3)
+    p5 <- (if version >= 7 then W.pokeInt32BE p4 (fetchRequestSessionId msg) else pure p4)
+    p6 <- (if version >= 7 then W.pokeInt32BE p5 (fetchRequestSessionEpoch msg) else pure p5)
+    p7 <- WP.pokeVersionedArray version 12 (\p x -> wirePokeFetchTopic version p x) p6 (fetchRequestTopics msg)
+    p8 <- (if version >= 7 then WP.pokeVersionedArray version 12 (\p x -> wirePokeForgottenTopic version p x) p7 (fetchRequestForgottenTopicsData msg) else pure p7)
+    p9 <- (if version >= 11 then (if version >= 12 then WP.pokeCompactString p8 (P.toCompactString (fetchRequestRackId msg)) else WP.pokeKafkaString p8 (fetchRequestRackId msg)) else pure p8)
+    let !_taggedEntries = (if version >= 12 then [(0, W.runWirePut (P.toCompactString (fetchRequestClusterId msg)))] else []) ++ (if version >= 15 then [(1, W.runWirePokeWith (wireMaxSizeReplicaState version (fetchRequestReplicaState msg)) (\p -> wirePokeReplicaState version p (fetchRequestReplicaState msg)))] else [])
+    WP.pokeTaggedFieldEntries p9 _taggedEntries
   | otherwise = error $ "wirePoke FetchRequest : unsupported version: " ++ show version
 
 -- | Direct-poke decoder for FetchRequest.
@@ -515,7 +523,18 @@ wirePeekFetchRequest version _fp _basePtr p0 endPtr
     let !_tag_clusterid = if version >= 12 then case Data.Map.Strict.lookup 0 _taggedMap of { Just _bs -> case (\b -> fmap P.fromCompactString ((W.runWireGet :: Data.ByteString.ByteString -> Either String P.CompactString) b)) _bs of { Right _v -> _v ; Left _ -> P.KafkaString Null}; Nothing -> P.KafkaString Null} else P.KafkaString Null
     let !_tag_replicastate = if version >= 15 then case Data.Map.Strict.lookup 1 _taggedMap of { Just _bs -> case (W.runWireGetWith (\_fp _bp p e -> wirePeekReplicaState version _fp _bp p e)) _bs of { Right _v -> _v ; Left _ -> defaultReplicaState}; Nothing -> defaultReplicaState} else defaultReplicaState
     pure (FetchRequest { fetchRequestClusterId = _tag_clusterid, fetchRequestReplicaId = f0_replicaid, fetchRequestReplicaState = _tag_replicastate, fetchRequestMaxWaitMs = f1_maxwaitms, fetchRequestMinBytes = f2_minbytes, fetchRequestMaxBytes = f3_maxbytes, fetchRequestIsolationLevel = f4_isolationlevel, fetchRequestSessionId = f5_sessionid, fetchRequestSessionEpoch = f6_sessionepoch, fetchRequestTopics = f7_topics, fetchRequestForgottenTopicsData = f8_forgottentopicsdata, fetchRequestRackId = f9_rackid }, pTagsEnd)
-  | version >= 15 && version <= 17 = do
+  | version >= 7 && version <= 10 = do
+    (f0_replicaid, p1) <- (if version <= 14 then W.peekInt32BE p0 endPtr else pure (-1, p0))
+    (f1_maxwaitms, p2) <- W.peekInt32BE p1 endPtr
+    (f2_minbytes, p3) <- W.peekInt32BE p2 endPtr
+    (f3_maxbytes, p4) <- (if version >= 3 then W.peekInt32BE p3 endPtr else pure (2147483647, p3))
+    (f4_isolationlevel, p5) <- (if version >= 4 then (\(w, p') -> (fromIntegral w :: Int8, p')) <$> W.peekWord8 p4 endPtr else pure (0, p4))
+    (f5_sessionid, p6) <- (if version >= 7 then W.peekInt32BE p5 endPtr else pure (0, p5))
+    (f6_sessionepoch, p7) <- (if version >= 7 then W.peekInt32BE p6 endPtr else pure (-1, p6))
+    (f7_topics, p8) <- WP.peekVersionedArray version 12 (\p e -> wirePeekFetchTopic version _fp _basePtr p e) p7 endPtr
+    (f8_forgottentopicsdata, p9) <- (if version >= 7 then WP.peekVersionedArray version 12 (\p e -> wirePeekForgottenTopic version _fp _basePtr p e) p8 endPtr else pure (P.mkKafkaArray V.empty, p8))
+    pure (FetchRequest { fetchRequestClusterId = P.KafkaString Null, fetchRequestReplicaId = f0_replicaid, fetchRequestReplicaState = defaultReplicaState, fetchRequestMaxWaitMs = f1_maxwaitms, fetchRequestMinBytes = f2_minbytes, fetchRequestMaxBytes = f3_maxbytes, fetchRequestIsolationLevel = f4_isolationlevel, fetchRequestSessionId = f5_sessionid, fetchRequestSessionEpoch = f6_sessionepoch, fetchRequestTopics = f7_topics, fetchRequestForgottenTopicsData = f8_forgottentopicsdata, fetchRequestRackId = P.KafkaString Null }, p9)
+  | version >= 15 && version <= 19 = do
     (f0_maxwaitms, p1) <- W.peekInt32BE p0 endPtr
     (f1_minbytes, p2) <- W.peekInt32BE p1 endPtr
     (f2_maxbytes, p3) <- (if version >= 3 then W.peekInt32BE p2 endPtr else pure (2147483647, p2))
@@ -529,17 +548,6 @@ wirePeekFetchRequest version _fp _basePtr p0 endPtr
     let !_tag_clusterid = if version >= 12 then case Data.Map.Strict.lookup 0 _taggedMap of { Just _bs -> case (\b -> fmap P.fromCompactString ((W.runWireGet :: Data.ByteString.ByteString -> Either String P.CompactString) b)) _bs of { Right _v -> _v ; Left _ -> P.KafkaString Null}; Nothing -> P.KafkaString Null} else P.KafkaString Null
     let !_tag_replicastate = if version >= 15 then case Data.Map.Strict.lookup 1 _taggedMap of { Just _bs -> case (W.runWireGetWith (\_fp _bp p e -> wirePeekReplicaState version _fp _bp p e)) _bs of { Right _v -> _v ; Left _ -> defaultReplicaState}; Nothing -> defaultReplicaState} else defaultReplicaState
     pure (FetchRequest { fetchRequestClusterId = _tag_clusterid, fetchRequestReplicaId = -1, fetchRequestReplicaState = _tag_replicastate, fetchRequestMaxWaitMs = f0_maxwaitms, fetchRequestMinBytes = f1_minbytes, fetchRequestMaxBytes = f2_maxbytes, fetchRequestIsolationLevel = f3_isolationlevel, fetchRequestSessionId = f4_sessionid, fetchRequestSessionEpoch = f5_sessionepoch, fetchRequestTopics = f6_topics, fetchRequestForgottenTopicsData = f7_forgottentopicsdata, fetchRequestRackId = f8_rackid }, pTagsEnd)
-  | version >= 7 && version <= 10 = do
-    (f0_replicaid, p1) <- (if version <= 14 then W.peekInt32BE p0 endPtr else pure (-1, p0))
-    (f1_maxwaitms, p2) <- W.peekInt32BE p1 endPtr
-    (f2_minbytes, p3) <- W.peekInt32BE p2 endPtr
-    (f3_maxbytes, p4) <- (if version >= 3 then W.peekInt32BE p3 endPtr else pure (2147483647, p3))
-    (f4_isolationlevel, p5) <- (if version >= 4 then (\(w, p') -> (fromIntegral w :: Int8, p')) <$> W.peekWord8 p4 endPtr else pure (0, p4))
-    (f5_sessionid, p6) <- (if version >= 7 then W.peekInt32BE p5 endPtr else pure (0, p5))
-    (f6_sessionepoch, p7) <- (if version >= 7 then W.peekInt32BE p6 endPtr else pure (-1, p6))
-    (f7_topics, p8) <- WP.peekVersionedArray version 12 (\p e -> wirePeekFetchTopic version _fp _basePtr p e) p7 endPtr
-    (f8_forgottentopicsdata, p9) <- (if version >= 7 then WP.peekVersionedArray version 12 (\p e -> wirePeekForgottenTopic version _fp _basePtr p e) p8 endPtr else pure (P.mkKafkaArray V.empty, p8))
-    pure (FetchRequest { fetchRequestClusterId = P.KafkaString Null, fetchRequestReplicaId = f0_replicaid, fetchRequestReplicaState = defaultReplicaState, fetchRequestMaxWaitMs = f1_maxwaitms, fetchRequestMinBytes = f2_minbytes, fetchRequestMaxBytes = f3_maxbytes, fetchRequestIsolationLevel = f4_isolationlevel, fetchRequestSessionId = f5_sessionid, fetchRequestSessionEpoch = f6_sessionepoch, fetchRequestTopics = f7_topics, fetchRequestForgottenTopicsData = f8_forgottentopicsdata, fetchRequestRackId = P.KafkaString Null }, p9)
   | otherwise = error $ "wirePeek FetchRequest : unsupported version: " ++ show version
 
 

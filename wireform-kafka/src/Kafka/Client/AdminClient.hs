@@ -4450,6 +4450,8 @@ describeFeatures client = liftIO $ do
                     P.mkKafkaString "wireform-kafka"
                 , AVReq.apiVersionsRequestClientSoftwareVersion =
                     P.mkKafkaString "0.1.0.0"
+                , AVReq.apiVersionsRequestClusterId = P.KafkaString P.Null
+                , AVReq.apiVersionsRequestNodeId = -1
                 }
             body = WC.runEncodeVer @AVReq.ApiVersionsRequest apiVer req
             cid = clientIdOf client

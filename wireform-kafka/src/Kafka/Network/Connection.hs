@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -107,12 +108,14 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.UUID.V4 qualified as UUID
 import GHC.Generics (Generic)
 import Kafka.Network.Auth.SASL qualified as SASL
 import Kafka.Network.Connection.Internal (
   Connection (..),
  )
 import Kafka.Network.Connection.Internal qualified as I
+import "wireform-kafka-protocol" Kafka.Protocol.Primitives qualified as P
 import Kafka.Telemetry.Log qualified as KLog
 import Kafka.Network.TlsOffload (
   OffloadBrokerKey (..),
@@ -263,15 +266,20 @@ defaultTlsSettings hostname =
 data ConnectionManager = ConnectionManager
   { connectionMap :: !(StmMap.Map BrokerAddress Connection)
   , connectionLocks :: !(StmMap.Map BrokerAddress (MVar ()))
+  , clientInstanceId :: !P.KafkaUuid
   }
 
 
 createConnectionManager :: IO ConnectionManager
-createConnectionManager = ConnectionManager <$> StmMap.newIO <*> StmMap.newIO
+createConnectionManager = ConnectionManager <$> StmMap.newIO <*> StmMap.newIO <*> newClientInstanceId
+
+
+newClientInstanceId :: IO P.KafkaUuid
+newClientInstanceId = P.mkKafkaUuid <$> UUID.nextRandom
 
 
 withBrokerLock :: ConnectionManager -> BrokerAddress -> IO a -> IO a
-withBrokerLock (ConnectionManager _ lockMap) addr action = do
+withBrokerLock (ConnectionManager _ lockMap _) addr action = do
   lock <-
     atomically (StmMap.lookup addr lockMap) >>= \case
       Just l -> pure l
@@ -292,7 +300,7 @@ getOrCreateConnection
   -> BrokerAddress
   -> ConnectionConfig
   -> IO (Either String Connection)
-getOrCreateConnection cm@(ConnectionManager connMap _) addr config = do
+getOrCreateConnection cm@(ConnectionManager connMap _ instanceId) addr config = do
   existing <- atomically $ StmMap.lookup addr connMap
   case existing of
     Just c -> do
@@ -310,7 +318,8 @@ getOrCreateConnection cm@(ConnectionManager connMap _) addr config = do
           | otherwise -> connect addr config
       case connResult of
         Left err -> pure (Left err)
-        Right newConn -> do
+        Right connected -> do
+          let newConn = connected {I.connClientInstanceId = instanceId}
           authResult <- case connSasl config of
             Nothing -> pure (Right ())
             Just sc -> do
@@ -329,7 +338,7 @@ getOrCreateConnection cm@(ConnectionManager connMap _) addr config = do
 
 
 closeAllConnections :: ConnectionManager -> IO ()
-closeAllConnections (ConnectionManager connMap lockMap) = do
+closeAllConnections (ConnectionManager connMap lockMap _) = do
   connections <- atomically $ do
     pairs <- ListT.toList $ StmMap.listT connMap
     pure $ fmap snd pairs
@@ -444,6 +453,8 @@ buildPlainConnection sock = do
   cursor <- newIORef 0
   closed <- newIORef False
   reqLock <- newMVar ()
+  instanceId <- newClientInstanceId
+  sentRequest <- newMVar False
   pure
     I.Connection
       { I.connDuplex = duplex
@@ -453,6 +464,8 @@ buildPlainConnection sock = do
       , I.connCursor = cursor
       , I.connClosed = closed
       , I.connRequestLock = reqLock
+      , I.connClientInstanceId = instanceId
+      , I.connHasSentRequest = sentRequest
       }
 
 
@@ -467,6 +480,8 @@ buildTlsConnection sock ctx sslConn = do
   cursor <- newIORef 0
   closed <- newIORef False
   reqLock <- newMVar ()
+  instanceId <- newClientInstanceId
+  sentRequest <- newMVar False
   pure
     I.Connection
       { I.connDuplex = duplex
@@ -476,6 +491,8 @@ buildTlsConnection sock ctx sslConn = do
       , I.connCursor = cursor
       , I.connClosed = closed
       , I.connRequestLock = reqLock
+      , I.connClientInstanceId = instanceId
+      , I.connHasSentRequest = sentRequest
       }
 
 

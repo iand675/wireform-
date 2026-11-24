@@ -259,7 +259,7 @@ wireMaxSizeBeginQuorumEpochResponse _version msg =
   0
   + 2
   + (5 + (case P.unKafkaArray (beginQuorumEpochResponseTopics msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeTopicData _version x ) v); P.Null -> 0 }))
-  + (5 + (case P.unKafkaArray (beginQuorumEpochResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint _version x ) v); P.Null -> 0 }))
+  + (if _version >= 1 then (5 + (case P.unKafkaArray (beginQuorumEpochResponseNodeEndpoints msg) of { P.NotNull v -> sum (fmap (\x -> wireMaxSizeNodeEndpoint _version x ) v); P.Null -> 0 })) + 10 else 0)
   + 1
 
 -- | Direct-poke encoder for BeginQuorumEpochResponse.

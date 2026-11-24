@@ -133,6 +133,7 @@ kafkaWorkload l =
     cursor <- newIORef 0
     closed <- newIORef False
     reqLock <- newMVar ()
+    sentRequest <- newMVar False
     let conn =
           Connection
             { connDuplex = leDuplex (slClient l)
@@ -142,6 +143,8 @@ kafkaWorkload l =
             , connCursor = cursor
             , connClosed = closed
             , connRequestLock = reqLock
+            , connClientInstanceId = P.nullUuid
+            , connHasSentRequest = sentRequest
             }
     cache <- createVersionCache
     result <- negotiateVersions conn (BrokerAddress "sim" 9092) cache 1
