@@ -159,16 +159,29 @@ wireTests :: Spec
 wireTests =
   describe "encode . decode" $
     sequence_
-      [ it "Position decodes to Right" $
+      [ it "matches the reference C++ encoding of a one-field UInt64 struct" $ do
+          -- capnp encode Counter.capnp Counter, with (count = 42).
+          let reference = BS.pack
+                [ 0, 0, 0, 0, 2, 0, 0, 0
+                , 0, 0, 0, 0, 1, 0, 0, 0
+                , 42, 0, 0, 0, 0, 0, 0, 0
+                ]
+              counter = CP.Struct (V.singleton (CP.UInt64 42)) V.empty
+          CPD.decode reference `shouldBe` Right counter
+          CPE.encode counter `shouldBe` reference
+      , it "keeps both pointer slots ahead of their payloads" $ do
+          let blob = toCapnProto (Blob "x" (BS.pack [1, 2, 3]))
+          CPD.decode (CPE.encode blob) `shouldBe` Right blob
+      , it "distinguishes a zero-sized struct from a null pointer" $ do
+          let empty = CP.Struct V.empty V.empty
+          CPD.decode (CPE.encode empty) `shouldBe` Right empty
+          CPD.decode (CPE.encode CP.Void) `shouldBe` Right CP.Void
+      , it "Position decodes to Right" $
           case CPD.decode (CPE.encode (toCapnProto (Position "p" 1 2 (Just "n") "ignored"))) of
             Right _ -> pure ()
             Left e -> expectationFailure e
       , it "Profile decodes to Right" $
           case CPD.decode (CPE.encode (toCapnProto (Profile 9 True 0.5))) of
-            Right _ -> pure ()
-            Left e -> expectationFailure e
-      , it "Blob decodes to Right" $
-          case CPD.decode (CPE.encode (toCapnProto (Blob "x" (BS.pack [1, 2, 3])))) of
             Right _ -> pure ()
             Left e -> expectationFailure e
       ]

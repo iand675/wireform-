@@ -88,12 +88,12 @@ CapnProto.Encode.encode :: Value      -> ByteString
 CapnProto.Decode.decode :: ByteString -> Either String Value
 ```
 
-Cap'n Proto structs are split into a data section (where scalars
-live, packed in size order) and a pointer section (where lists,
-sub-structs, and text live). The `Struct` constructor in
-`CapnProto.Value` reflects that split directly, so you don't lose
-the structural information by routing through the dynamic
-representation.
+The codec reads and writes unpacked, single-segment messages. A
+`Struct` has a vector of raw data words and a vector of pointer values.
+Decoded data words are `UInt64` because field types and bit offsets
+come from a schema. Encoding a standalone scalar or list wraps it in a
+one-field root struct. A byte list with a UTF-8 payload and a trailing
+zero is surfaced as `Text` by the schema-free decoder.
 
 ## Annotation-driven deriving
 

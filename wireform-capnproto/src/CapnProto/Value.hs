@@ -12,7 +12,7 @@ import qualified CapnProto.Encode as CPE
 import qualified CapnProto.Decode as CPD
 import qualified Data.Vector as V
 
-let val = CP.Struct (V.fromList [CP.Text \"hello\", CP.UInt32 42])
+let val = CP.Struct (V.singleton (CP.UInt64 42)) (V.singleton (CP.Text \"hello\"))
 let bytes = CPE.encode val
 let Right decoded = CPD.decode bytes
 @

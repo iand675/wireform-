@@ -1,248 +1,230 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | Cap'n Proto binary encoding.
-
-Single-segment message format:
-  Segment table: 4 bytes (segment count - 1 = 0 as LE32) + 4 bytes (segment size in words as LE32)
-  Root struct pointer at word 0 of the segment.
--}
-module CapnProto.Encode (
-  encode,
-) where
+-- | Encode an unpacked, single-segment Cap'n Proto message.
+module CapnProto.Encode (encode) where
 
 import CapnProto.Value qualified as C
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits ((.&.), (.|.), shiftL)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.ByteString.Internal qualified as BSI
-import Data.Int (Int16, Int32)
+import Data.ByteString.Unsafe qualified as BSU
 import Data.Text.Encoding qualified as TE
+import Data.Text.Internal qualified as Text
 import Data.Vector qualified as V
-import Data.Word (Word16, Word32, Word64, Word8)
-import Foreign.ForeignPtr (withForeignPtr)
-import Foreign.Marshal.Utils (copyBytes)
-import Foreign.Ptr (Ptr, plusPtr)
+import Data.Word (Word8, Word16, Word32, Word64)
+import Foreign.Marshal.Utils (copyBytes, fillBytes)
+import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (pokeByteOff)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import Wireform.Encode.Direct (directEncode)
 
 
+-- | Encode a root struct. A standalone scalar or pointer value is put in
+-- the corresponding section of a one-field root struct.
 encode :: C.Value -> ByteString
-encode !val =
-  let !segWords = valueWords val
-      !segBytes = segWords * 8
-      !totalBytes = 8 + segBytes
-  in directEncode
-       totalBytes
-       ( \p off -> do
-           off1 <- writeLE32 p off 0
-           off2 <- writeLE32 p off1 (fromIntegral segWords)
-           writeValue p off2 0 val
-       )
+encode value =
+  let !root = case value of
+        C.Struct {} -> value
+        C.Void -> C.Void
+        _ | isPointer value -> C.Struct V.empty (V.singleton value)
+          | otherwise -> C.Struct (V.singleton value) V.empty
+      !size = 16 + objectSize root
+  in directEncode size $ \ptr _ -> do
+       pokeByteOff ptr 0 (0 :: Word32)
+       pokeByteOff ptr 4 (fromIntegral (size `quot` 8 - 1) :: Word32)
+       putPointer ptr 8 16 root
 {-# NOINLINE encode #-}
 
 
-valueWords :: C.Value -> Int
-valueWords = \case
+isPointer :: C.Value -> Bool
+isPointer = \case
+  C.Struct {} -> True
+  C.List {} -> True
+  C.Text {} -> True
+  C.Data {} -> True
+  _ -> False
+
+
+objectSize :: C.Value -> Int
+objectSize = \case
   C.Void -> 0
-  C.Bool _ -> 1
-  C.Int8 _ -> 1
-  C.Int16 _ -> 1
-  C.Int32 _ -> 1
-  C.Int64 _ -> 1
-  C.UInt8 _ -> 1
-  C.UInt16 _ -> 1
-  C.UInt32 _ -> 1
-  C.UInt64 _ -> 1
-  C.Float32 _ -> 1
-  C.Float64 _ -> 1
-  C.Enum _ -> 1
-  C.Text t ->
-    let !bs = TE.encodeUtf8 t
-        !len = BS.length bs + 1
-        !dataWords = (len + 7) `div` 8
-    in 1 + dataWords
-  C.Data bs ->
-    let !len = BS.length bs
-        !dataWords = (len + 7) `div` 8
-    in 1 + dataWords
-  C.List vs ->
-    let !elemWords = V.foldl' (\acc v -> acc + valueWords v) 0 vs
-    in 1 + elemWords
-  C.Struct datas ptrs ->
-    let !dataWords = V.length datas
-        !ptrWords = V.length ptrs
-        !ptrContentWords = V.foldl' (\acc v -> acc + ptrContentSize v) 0 ptrs
-    in max 1 dataWords + ptrWords + ptrContentWords
+  C.Struct dat pointers ->
+    8 * (V.length dat + V.length pointers) + V.foldl' (\n v -> n + objectSize v) 0 pointers
+  C.Text (Text.Text _ _ bytes) -> alignWord (bytes + 1)
+  C.Data bytes -> alignWord (BS.length bytes)
+  C.List values -> case listLayout values of
+    DataList code -> alignWord (listDataBytes code (V.length values))
+    PointerList -> 8 * V.length values + V.foldl' (\n v -> n + objectSize v) 0 values
+    StructList dw pw ->
+      8 + 8 * ((dw + pw) * V.length values)
+        + V.foldl' (\n v -> n + structChildrenSize v) 0 values
+  _ -> error "CapnProto.Encode: scalar in pointer section"
+  where
+    structChildrenSize (C.Struct _ pointers) = V.foldl' (\n v -> n + objectSize v) 0 pointers
+    structChildrenSize _ = error "CapnProto.Encode: mixed struct list"
 
 
-ptrContentSize :: C.Value -> Int
-ptrContentSize = \case
-  C.Text t ->
-    let !bs = TE.encodeUtf8 t
-        !len = BS.length bs + 1
-    in (len + 7) `div` 8
-  C.Data bs ->
-    let !len = BS.length bs
-    in (len + 7) `div` 8
-  C.List vs ->
-    V.foldl' (\acc v -> acc + valueWords v) 0 vs
-  C.Struct datas ptrs ->
-    let !dw = V.length datas
-        !pw = V.length ptrs
-        !pc = V.foldl' (\acc v -> acc + ptrContentSize v) 0 ptrs
-    in dw + pw + pc
-  _ -> 0
+alignWord :: Int -> Int
+alignWord bytes = (bytes + 7) .&. (-8)
+{-# INLINE alignWord #-}
 
 
-writeLE32 :: Ptr Word8 -> Int -> Word32 -> IO Int
-writeLE32 p off w = do
-  pokeByteOff p off w
-  pure $! off + 4
-{-# INLINE writeLE32 #-}
+data ListLayout = DataList !Int | PointerList | StructList !Int !Int
 
 
-writeLE64 :: Ptr Word8 -> Int -> Word64 -> IO Int
-writeLE64 p off w = do
-  pokeByteOff p off w
-  pure $! off + 8
-{-# INLINE writeLE64 #-}
+listLayout :: V.Vector C.Value -> ListLayout
+listLayout values = case values V.!? 0 of
+  Nothing -> DataList 0
+  Just (C.Struct dat pointers) ->
+    V.foldl' extend (StructList (V.length dat) (V.length pointers)) values
+  Just value
+    | Just width <- dataListCode value
+    , V.all ((== Just width) . dataListCode) values -> DataList width
+    | V.all (\v -> isPointer v || v == C.Void) values -> PointerList
+    | otherwise -> error "CapnProto.Encode: list elements have incompatible layouts"
+  where
+    extend (StructList dw pw) (C.Struct dat pointers) =
+      StructList (max dw (V.length dat)) (max pw (V.length pointers))
+    extend _ _ = error "CapnProto.Encode: mixed struct list"
 
 
-writeRawBytes :: Ptr Word8 -> Int -> ByteString -> IO Int
-writeRawBytes !p !off (BSI.BS fp len) = do
-  withForeignPtr fp $ \src ->
-    copyBytes (p `plusPtr` off) src len
-  pure $! off + len
-{-# INLINE writeRawBytes #-}
+dataListCode :: C.Value -> Maybe Int
+dataListCode = \case
+  C.Void -> Just 0
+  C.Bool {} -> Just 1
+  C.Int8 {} -> Just 2
+  C.UInt8 {} -> Just 2
+  C.Int16 {} -> Just 3
+  C.UInt16 {} -> Just 3
+  C.Enum {} -> Just 3
+  C.Int32 {} -> Just 4
+  C.UInt32 {} -> Just 4
+  C.Float32 {} -> Just 4
+  C.Int64 {} -> Just 5
+  C.UInt64 {} -> Just 5
+  C.Float64 {} -> Just 5
+  _ -> Nothing
 
 
-padTo8 :: Ptr Word8 -> Int -> Int -> IO Int
-padTo8 p off dataLen = do
-  let !padded = ((dataLen + 7) `div` 8) * 8
-      !padBytes = padded - dataLen
-  mapM_ (\i -> pokeByteOff p (off + i) (0x00 :: Word8)) [0 .. padBytes - 1]
-  pure $! off + padBytes
-{-# INLINE padTo8 #-}
+listDataBytes :: Int -> Int -> Int
+listDataBytes code count = case code of
+  0 -> 0
+  1 -> (count + 7) `quot` 8
+  _ -> count `shiftL` (code - 2)
+{-# INLINE listDataBytes #-}
 
 
-writeValue :: Ptr Word8 -> Int -> Int -> C.Value -> IO Int
-writeValue p off _wordOff = \case
-  C.Void -> pure off
-  C.Bool b -> do
-    pokeByteOff p off (if b then 0x01 else 0x00 :: Word8)
-    padTo8 p (off + 1) 1
-  C.Int8 n -> do
-    pokeByteOff p off (fromIntegral n :: Word8)
-    padTo8 p (off + 1) 1
-  C.Int16 n -> do
-    writeLE16Val p off n
-    padTo8 p (off + 2) 2
-  C.Int32 n -> do
-    _ <- writeLE32 p off (fromIntegral n)
-    padTo8 p (off + 4) 4
-  C.Int64 n -> writeLE64 p off (fromIntegral n)
-  C.UInt8 n -> do
-    pokeByteOff p off n
-    padTo8 p (off + 1) 1
-  C.UInt16 n -> do
-    writeLE16Val p off (fromIntegral n :: Int16)
-    padTo8 p (off + 2) 2
-  C.UInt32 n -> do
-    _ <- writeLE32 p off n
-    padTo8 p (off + 4) 4
-  C.UInt64 n -> writeLE64 p off n
-  C.Float32 f -> do
-    _ <- writeLE32 p off (castFloatToWord32 f)
-    padTo8 p (off + 4) 4
-  C.Float64 d -> writeLE64 p off (castDoubleToWord64 d)
-  C.Enum n -> do
-    writeLE16Val p off (fromIntegral n :: Int16)
-    padTo8 p (off + 2) 2
-  C.Text t -> do
-    let !bs = TE.encodeUtf8 t
-        !bsLen = BS.length bs
-        !totalLen = bsLen + 1
-        !listPtr = makeListPtr 0 (fromIntegral totalLen) 2
-    off1 <- writeLE64 p off listPtr
-    off2 <- writeRawBytes p off1 bs
-    pokeByteOff p off2 (0x00 :: Word8)
-    padTo8 p (off2 + 1) totalLen
-  C.Data bs -> do
-    let !bsLen = BS.length bs
-        !listPtr = makeListPtr 0 (fromIntegral bsLen) 2
-    off1 <- writeLE64 p off listPtr
-    off2 <- writeRawBytes p off1 bs
-    padTo8 p off2 bsLen
-  C.List vs -> do
-    let !cnt = V.length vs
-        !listPtr = makeListPtr 0 (fromIntegral cnt) 0
-    off1 <- writeLE64 p off listPtr
-    V.foldM' (\o v -> writeValue p o 0 v) off1 vs
-  C.Struct datas ptrs -> do
-    let !dw = V.length datas
-    V.ifoldM' (\o _i v -> writeDataField p o v) off datas
-      >>= \offAfterData ->
-        let !offPtrSection = if dw == 0 then offAfterData + 8 else offAfterData
-        in do
-             when (dw == 0) $ do
-               _ <- writeLE64 p offAfterData 0
-               pure ()
-             V.ifoldM' (\o _i v -> writePtrField p o v) offPtrSection ptrs
+putPointer :: Ptr Word8 -> Int -> Int -> C.Value -> IO Int
+putPointer ptr slot target = \case
+  C.Void -> pokeByteOff ptr slot (0 :: Word64) >> pure target
+  C.Struct dat pointers -> do
+    let !dw = V.length dat
+        !pw = V.length pointers
+        !offset = if dw + pw == 0 then -1 else pointerOffset slot target
+    pokeByteOff ptr slot (structWord offset dw pw)
+    putStruct ptr target (target + 8 * (dw + pw)) dw pw dat pointers
+  C.Text text -> putBytes ptr slot target (TE.encodeUtf8 text) 1
+  C.Data bytes -> putBytes ptr slot target bytes 0
+  C.List values -> putList ptr slot target values
+  _ -> error "CapnProto.Encode: scalar in pointer section"
 
 
-writeDataField :: Ptr Word8 -> Int -> C.Value -> IO Int
-writeDataField p off = \case
-  C.Bool b -> do
-    pokeByteOff p off (if b then 0x01 else 0x00 :: Word8)
-    padTo8 p (off + 1) 1
-  C.Int8 n -> do
-    pokeByteOff p off (fromIntegral n :: Word8)
-    padTo8 p (off + 1) 1
-  C.Int16 n -> do
-    writeLE16Val p off n
-    padTo8 p (off + 2) 2
-  C.Int32 n -> do
-    _ <- writeLE32 p off (fromIntegral n)
-    padTo8 p (off + 4) 4
-  C.Int64 n -> writeLE64 p off (fromIntegral n)
-  C.UInt8 n -> do
-    pokeByteOff p off n
-    padTo8 p (off + 1) 1
-  C.UInt16 n -> do
-    writeLE16Val p off (fromIntegral n :: Int16)
-    padTo8 p (off + 2) 2
-  C.UInt32 n -> do
-    _ <- writeLE32 p off n
-    padTo8 p (off + 4) 4
-  C.UInt64 n -> writeLE64 p off n
-  C.Float32 f -> do
-    _ <- writeLE32 p off (castFloatToWord32 f)
-    padTo8 p (off + 4) 4
-  C.Float64 d -> writeLE64 p off (castDoubleToWord64 d)
-  C.Enum n -> do
-    writeLE16Val p off (fromIntegral n :: Int16)
-    padTo8 p (off + 2) 2
-  C.Void -> writeLE64 p off 0
-  _ -> writeLE64 p off 0
+putStruct :: Ptr Word8 -> Int -> Int -> Int -> Int -> V.Vector C.Value -> V.Vector C.Value -> IO Int
+putStruct ptr start next dw pw dat pointers = do
+  V.imapM_ (\i v -> pokeByteOff ptr (start + 8 * i) (dataWord v)) dat
+  fillBytes (ptr `plusPtr` (start + 8 * V.length dat)) 0 (8 * (dw - V.length dat))
+  let !pointerStart = start + 8 * dw
+  fillBytes (ptr `plusPtr` (pointerStart + 8 * V.length pointers)) 0 (8 * (pw - V.length pointers))
+  V.ifoldM' (\end i v -> putPointer ptr (pointerStart + 8 * i) end v) next pointers
 
 
-writePtrField :: Ptr Word8 -> Int -> C.Value -> IO Int
-writePtrField p off val = writeValue p off 0 val
+putBytes :: Ptr Word8 -> Int -> Int -> ByteString -> Int -> IO Int
+putBytes ptr slot target bytes suffix = do
+  let !len = BS.length bytes
+      !size = alignWord (len + suffix)
+  pokeByteOff ptr slot (listWord (pointerOffset slot target) 2 (len + suffix))
+  BSU.unsafeUseAsCString bytes $ \source -> copyBytes (ptr `plusPtr` target) (castPtr source) len
+  fillBytes (ptr `plusPtr` (target + len)) 0 (size - len)
+  pure (target + size)
 
 
-when :: Bool -> IO () -> IO ()
-when True a = a
-when False _ = pure ()
+putList :: Ptr Word8 -> Int -> Int -> V.Vector C.Value -> IO Int
+putList ptr slot target values =
+  let !count = V.length values
+      !offset = pointerOffset slot target
+  in case listLayout values of
+       DataList code -> do
+         let !size = alignWord (listDataBytes code count)
+         pokeByteOff ptr slot (listWord offset code count)
+         fillBytes (ptr `plusPtr` target) 0 size
+         case code of
+           0 -> pure ()
+           1 -> mapM_ (putBoolByte ptr target values) [0 .. (count + 7) `quot` 8 - 1]
+           2 -> V.imapM_ (\i v -> pokeByteOff ptr (target + i) (fromIntegral (dataWord v) :: Word8)) values
+           3 -> V.imapM_ (\i v -> pokeByteOff ptr (target + i * 2) (fromIntegral (dataWord v) :: Word16)) values
+           4 -> V.imapM_ (\i v -> pokeByteOff ptr (target + i * 4) (fromIntegral (dataWord v) :: Word32)) values
+           _ -> V.imapM_ (\i v -> pokeByteOff ptr (target + i * 8) (dataWord v)) values
+         pure (target + size)
+       PointerList -> do
+         pokeByteOff ptr slot (listWord offset 6 count)
+         V.ifoldM' (\end i v -> putPointer ptr (target + 8 * i) end v) (target + 8 * count) values
+       StructList dw pw -> do
+         let !wordsPerElement = dw + pw
+             !body = target + 8
+         pokeByteOff ptr slot (listWord offset 7 (count * wordsPerElement))
+         pokeByteOff ptr target (structWord count dw pw)
+         V.ifoldM'
+           (\end i -> \case
+              C.Struct dat pointers -> putStruct ptr (body + 8 * i * wordsPerElement) end dw pw dat pointers
+              _ -> error "CapnProto.Encode: mixed struct list")
+           (body + 8 * count * wordsPerElement)
+           values
 
 
-writeLE16Val :: Ptr Word8 -> Int -> Int16 -> IO ()
-writeLE16Val p off n = pokeByteOff p off (fromIntegral n :: Word16)
+putBoolByte :: Ptr Word8 -> Int -> V.Vector C.Value -> Int -> IO ()
+putBoolByte ptr start values i =
+  let from = 8 * i
+      set acc bit value = acc .|. (fromIntegral (dataWord value) `shiftL` bit)
+      !byte = V.ifoldl' set (0 :: Word8) (V.slice from (min 8 (V.length values - from)) values)
+  in pokeByteOff ptr (start + i) byte
 
 
-makeListPtr :: Int32 -> Word32 -> Word32 -> Word64
-makeListPtr ptrOffset numElements elemSize =
-  let !a = (fromIntegral ptrOffset :: Word64) .&. 0x3FFFFFFF
-      !b = fromIntegral elemSize :: Word64
-      !c = fromIntegral numElements :: Word64
-  in 0x01 .|. (a `shiftL` 2) .|. (b `shiftL` 32) .|. (c `shiftL` 35)
+pointerOffset :: Int -> Int -> Int
+pointerOffset slot target = (target - slot) `quot` 8 - 1
+{-# INLINE pointerOffset #-}
+
+
+structWord :: Int -> Int -> Int -> Word64
+structWord offset dw pw
+  | dw > 65535 || pw > 65535 = error "CapnProto.Encode: struct section exceeds 16-bit size"
+  | otherwise =
+      ((fromIntegral offset .&. 0x3fffffff) `shiftL` 2)
+        .|. (fromIntegral dw `shiftL` 32) .|. (fromIntegral pw `shiftL` 48)
+{-# INLINE structWord #-}
+
+
+listWord :: Int -> Int -> Int -> Word64
+listWord offset code count
+  | count > 0x1fffffff = error "CapnProto.Encode: list exceeds 29-bit size"
+  | otherwise =
+      1 .|. (fromIntegral offset `shiftL` 2)
+        .|. (fromIntegral code `shiftL` 32) .|. (fromIntegral count `shiftL` 35)
+{-# INLINE listWord #-}
+
+
+dataWord :: C.Value -> Word64
+dataWord = \case
+  C.Void -> 0
+  C.Bool b -> if b then 1 else 0
+  C.Int8 n -> fromIntegral n .&. 0xff
+  C.Int16 n -> fromIntegral n .&. 0xffff
+  C.Int32 n -> fromIntegral n .&. 0xffffffff
+  C.Int64 n -> fromIntegral n
+  C.UInt8 n -> fromIntegral n
+  C.UInt16 n -> fromIntegral n
+  C.UInt32 n -> fromIntegral n
+  C.UInt64 n -> n
+  C.Float32 n -> fromIntegral (castFloatToWord32 n)
+  C.Float64 n -> castDoubleToWord64 n
+  C.Enum n -> fromIntegral n
+  _ -> error "CapnProto.Encode: pointer in data section"
