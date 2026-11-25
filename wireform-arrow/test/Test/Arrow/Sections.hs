@@ -14,7 +14,7 @@ module Test.Arrow.Sections (tests) where
 
 import Arrow.Column (ColumnArray, PrimType (..), primColumn)
 import Arrow.Column qualified as C
-import Arrow.File (asBatches, readArrowStream, readIPCMessage)
+import Arrow.File (afBatches, afSchema, asBatches, readArrowFile, readArrowStream, readIPCMessage)
 import Arrow.FlatBufferIPC (ArrowBlock (..), FileIndex (..), readFileIndex)
 import Arrow.FlatBufferIPC qualified as IPC
 import Arrow.Stream (
@@ -47,6 +47,7 @@ import Data.Int (Int64)
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
+import Data.Word (Word8)
 import FlatBuffers.Reader qualified as FB
 import Hedgehog
 import System.Directory (getTemporaryDirectory, removeFile)
@@ -66,6 +67,8 @@ tests =
       , ("a corrupt section fails only when its turn comes", prop_corruptSectionFailsLate)
       , ("Rust 64-byte aligned files use their footer index", prop_rustAlignedFile)
       , ("Rust empty 64-byte aligned files keep their schema", prop_rustEmptyFile)
+      , ("Arrow 0.14.1 files can omit the footer version", prop_legacyFileFooter)
+      , ("an omitted footer version needs a matching legacy V4 schema", prop_legacyFileFooterRequiresV4)
       , ("footer blocks cannot address footer bytes", prop_blockCannotPointIntoFooter)
       , ("negative message body lengths fail every file reader", prop_negativeMessageBody)
       , ("PyArrow V4 and V5 unions decode through every container reader", prop_pyarrowUnionVersions)
@@ -102,6 +105,45 @@ prop_rustEmptyFile = withTests 1 $ property $ do
   fileReaderSchema reader === schema
   streamed <- evalEither (fileReaderToList reader)
   streamed === []
+
+
+-- The pinned Apache Arrow Archery 0.14.1 gold files have an absent footer
+-- version, a V4 schema message, and either no batches or three empty batches.
+-- https://github.com/apache/arrow-testing/tree/5a26d35785ff8761e56d79eebff971f6f737e18c/data/arrow-ipc-stream/integration/0.14.1
+prop_legacyFileFooter :: Property
+prop_legacyFileFooter = withTests 1 $ property $
+  forM_ [("no_batches", 0), ("zerolength", 3)] $ \(fixture, batchCount) -> do
+    annotate fixture
+    bytes <- evalIO (BS.readFile ("test/golden/acpp_0141_primitive_" ++ fixture ++ ".arrow"))
+    (message, _, _) <- evalEither (readIPCMessage bytes 8)
+    schema <- case message of
+      A.SchemaMessage sch -> pure sch
+      _ -> failure
+    V.length (A.arrowFields schema) === 30
+    raw <- evalEither (readArrowFile bytes)
+    afSchema raw === schema
+    V.length (afBatches raw) === batchCount
+    (eagerSchema, eager) <- evalEither (decodeArrowFile defaultReadOptions bytes)
+    eagerSchema === schema
+    length eager === batchCount
+    forM_ eager $ \batch -> V.map C.columnLength batch === V.replicate 30 0
+    reader <- evalEither (openFileReader defaultReadOptions bytes)
+    fileReaderSchema reader === schema
+    evalEither (fileReaderToList reader) >>= (=== eager)
+    evalIO (withTempFile bytes (drainFile defaultReadOptions)) >>= (=== Right eager)
+
+
+prop_legacyFileFooterRequiresV4 :: Property
+prop_legacyFileFooterRequiresV4 = withTests 1 $ property $ do
+  bytes <- evalIO (BS.readFile "test/golden/acpp_0141_primitive_no_batches.arrow")
+  v5 <- evalEither (replaceMetadataVersion 4 bytes 12)
+  let (beforeName, nameAndRest) = BS.breakSubstring "bool_nullable" bytes
+  assert (not (BS.null nameAndRest))
+  let mismatchedSchema = beforeName <> "x" <> BS.drop 1 nameAndRest
+  forM_ [v5, mismatchedSchema] $ \rejected -> do
+    assert (isLeft (readArrowFile rejected))
+    assert (isLeft (openFileReader defaultReadOptions rejected))
+    evalIO (withTempFile rejected (drainFile defaultReadOptions)) >>= assert . isLeft
 
 
 prop_blockCannotPointIntoFooter :: Property
@@ -223,21 +265,22 @@ prop_unknownMetadataVersion = withTests 1 $ property $ do
   footerLength <- evalEither (FB.peekI32 file (BS.length file - 10))
   let opts = defaultReadOptions
       footerOffset = BS.length file - 10 - fromIntegral footerLength
-      rejects result = case result of
-        Left err -> "unsupported metadata version 99" `isInfixOf` err
+      rejects version result = case result of
+        Left err -> ("unsupported metadata version " ++ show (version :: Int)) `isInfixOf` err
         Right _ -> False
   forM_ [0, dictOffset, batchOffset] $ \offset -> do
     corrupted <- evalEither (unknownFrameVersion stream offset)
-    assert (rejects (decodeArrowStream opts corrupted))
-    assert (rejects (openStreamReader opts corrupted >>= streamReaderToList))
-    evalIO (withTempFile corrupted (drainStream opts)) >>= assert . rejects
+    assert (rejects 99 (decodeArrowStream opts corrupted))
+    assert (rejects 99 (openStreamReader opts corrupted >>= streamReaderToList))
+    evalIO (withTempFile corrupted (drainStream opts)) >>= assert . rejects 99
   badDict <- evalEither (unknownFrameVersion file (fromIntegral (abOffset dictBlock)))
   badBatch <- evalEither (unknownFrameVersion file (fromIntegral (abOffset batchBlock)))
   badFooter <- evalEither (unknownVersion file footerOffset)
-  forM_ [badDict, badBatch, badFooter] $ \corrupted -> do
-    assert (rejects (decodeArrowFile opts corrupted))
-    assert (rejects (openFileReader opts corrupted >>= fileReaderToList))
-    evalIO (withTempFile corrupted (drainFile opts)) >>= assert . rejects
+  v1Footer <- evalEither (replaceMetadataVersion 0 file footerOffset)
+  forM_ [(99, badDict), (99, badBatch), (99, badFooter), (0, v1Footer)] $ \(version, corrupted) -> do
+    assert (rejects version (decodeArrowFile opts corrupted))
+    assert (rejects version (openFileReader opts corrupted >>= fileReaderToList))
+    evalIO (withTempFile corrupted (drainFile opts)) >>= assert . rejects version
 
 
 unknownFrameVersion :: ByteString -> Int -> Either String ByteString
@@ -247,13 +290,17 @@ unknownFrameVersion bytes offset = do
 
 
 unknownVersion :: ByteString -> Int -> Either String ByteString
-unknownVersion bytes offset = do
+unknownVersion = replaceMetadataVersion 99
+
+
+replaceMetadataVersion :: Word8 -> ByteString -> Int -> Either String ByteString
+replaceMetadataVersion version bytes offset = do
   let meta = BS.drop offset bytes
   root <- FB.peekU32 meta 0
   slots <- FB.resolveTable meta (fromIntegral root)
   slot <- maybe (Left "test fixture has no metadata version") Right (slots 0)
   let position = offset + slot
-  Right (BS.take position bytes <> BS.pack [99, 0] <> BS.drop (position + 2) bytes)
+  Right (BS.take position bytes <> BS.pack [version, 0] <> BS.drop (position + 2) bytes)
 
 
 prop_legacyUnionNulls :: Property

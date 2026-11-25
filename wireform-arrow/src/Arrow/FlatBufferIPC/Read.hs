@@ -30,6 +30,7 @@ module Arrow.FlatBufferIPC.Read
   , FileIndex (..)
   , readFileIndex
   , parseFileIndex
+  , parseFileIndexWithLegacySchema
     -- * Tensor / SparseTensor
   , decodeTensorMessage
   , decodeTensorFrame
@@ -37,11 +38,15 @@ module Arrow.FlatBufferIPC.Read
     -- * Single-message frames
   , decodeMessageFrame
   , readFrameHeader
+  , maxMessageMetadataBytes
   ) where
 
+import Data.Bits (shiftL)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.Int (Int64)
+import Data.Functor.Identity (runIdentity)
+import Data.Int (Int16, Int64)
+import Data.Maybe (isNothing)
 import Data.Word (Word8)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -89,7 +94,11 @@ readMetadataVersion bytes slot = do
   case version of
     3 -> Right MetadataV4
     4 -> Right MetadataV5
-    _ -> Left ("Arrow.FlatBufferIPC: unsupported metadata version " ++ show version)
+    _ -> Left (unsupportedMetadataVersion version)
+
+unsupportedMetadataVersion :: Int16 -> String
+unsupportedMetadataVersion version =
+  "Arrow.FlatBufferIPC: unsupported metadata version " ++ show version
 
 readMessageTable :: ByteString -> Either String (Int -> Maybe Pos)
 readMessageTable meta = do
@@ -682,6 +691,10 @@ decodeSchemaMessage :: ByteString -> Either String Schema
 decodeSchemaMessage meta = do
   s <- readMessageTable meta
   _ <- readMetadataVersion meta s
+  readSchemaMessage meta s
+
+readSchemaMessage :: ByteString -> (Int -> Maybe Pos) -> Either String Schema
+readSchemaMessage meta s = do
   ht <- readHeaderType meta s
   when' (ht /= 1) $
     Left ("Arrow.FlatBufferIPC: expected Schema header (1), got " ++ show ht)
@@ -937,16 +950,62 @@ readFileIndex bs = do
   when' (footerLen <= 0 || fromIntegral footerLen > n - 16) $
     Left "Arrow.FlatBufferIPC: invalid footer length in file trailer"
   let !footer = BS.take (fromIntegral footerLen) (BS.drop (n - 10 - fromIntegral footerLen) bs)
-  parseFileIndex (fromIntegral n) footer
+  runIdentity (parseFileIndexWithLegacySchema (\off len -> pure (BS.take len (BS.drop off bs))) (fromIntegral n) footer)
 
 
-{- | Parse a @Footer@ flatbuffer from its bytes alone, for readers
-that fetched only the footer region (seek-and-read streaming).
-@fileSize@ is the total file size the block ranges are validated
-against.
+{- | Parse a versioned @Footer@ flatbuffer from its bytes alone.
+@fileSize@ is the total file size the block ranges are validated against.
+Use 'parseFileIndexWithLegacySchema' when the embedded schema is available.
 -}
 parseFileIndex :: Int64 -> ByteString -> Either String FileIndex
-parseFileIndex fileSize footer = do
+parseFileIndex fileSize footer =
+  runIdentity (parseFileIndexUsing (\_ _ -> pure (Left (unsupportedMetadataVersion 0))) fileSize footer)
+
+
+{- | Parse the footer, using the supplied offset/length reader only if
+the footer omits the version. Arrow 0.14.1 wrote such footers with a
+matching V4 schema message in the pre-continuation framing at byte 8.
+-}
+parseFileIndexWithLegacySchema
+  :: Monad m
+  => (Int -> Int -> m ByteString)
+  -> Int64
+  -> ByteString
+  -> m (Either String FileIndex)
+parseFileIndexWithLegacySchema readAt = parseFileIndexUsing checkLegacySchema
+  where
+    checkLegacySchema dataEnd expected
+      | dataEnd < 12 = pure (Left "Arrow.FlatBufferIPC: missing legacy file schema")
+      | otherwise = do
+          prefix <- readAt 8 4
+          case peekI32 prefix 0 of
+            Right len
+              | len > 0
+              , fromIntegral len <= dataEnd - 12
+              , fromIntegral len <= maxMessageMetadataBytes -> do
+                  meta <- readAt 12 (fromIntegral len)
+                  pure $ do
+                    when' (BS.length meta /= fromIntegral len) $
+                      Left "Arrow.FlatBufferIPC: truncated legacy file schema"
+                    slots <- readMessageTable meta
+                    version <- readMetadataVersion meta slots
+                    case version of
+                      MetadataV4 -> Right ()
+                      MetadataV5 -> Left "Arrow.FlatBufferIPC: omitted footer version requires a V4 schema"
+                    schema <- readSchemaMessage meta slots
+                    bodyLen <- readBodyLength meta slots
+                    when' (bodyLen /= 0 || schema /= expected) $
+                      Left "Arrow.FlatBufferIPC: legacy schema does not match the file footer"
+            _ -> pure (Left "Arrow.FlatBufferIPC: invalid legacy file schema length")
+
+
+parseFileIndexUsing
+  :: Applicative m
+  => (Int64 -> Schema -> m (Either String ()))
+  -> Int64
+  -> ByteString
+  -> m (Either String FileIndex)
+parseFileIndexUsing checkOmittedVersion fileSize footer = either (pure . Left) id $ do
   when' (BS.length footer < 8) $
     Left "Arrow.FlatBufferIPC: footer too small"
   when' (fileSize < 18 || fromIntegral (BS.length footer) > fileSize - 18) $
@@ -954,19 +1013,24 @@ parseFileIndex fileSize footer = do
   let dataEnd = fileSize - 10 - fromIntegral (BS.length footer)
   rootPos <- fromIntegral <$> peekU32 footer 0
   s <- resolveTable footer rootPos
-  _ <- readMetadataVersion footer s
+  let omittedVersion = isNothing (s 0)
+  when' (not omittedVersion) (() <$ readMetadataVersion footer s)
   schField <- case s 1 of
     Nothing -> Left "Arrow.FlatBufferIPC: footer has no schema"
     Just b -> Right b
   sch <- followUOffset footer schField >>= readSchemaTable footer
   dictBlocks <- readFooterBlocks dataEnd footer (s 2)
   rbBlocks <- readFooterBlocks dataEnd footer (s 3)
-  Right
-    FileIndex
-      { fiSchema = sch
-      , fiDictBlocks = dictBlocks
-      , fiRecordBatches = rbBlocks
-      }
+  let index = FileIndex {fiSchema = sch, fiDictBlocks = dictBlocks, fiRecordBatches = rbBlocks}
+  pure $
+    if omittedVersion
+      then (index <$) <$> checkOmittedVersion dataEnd sch
+      else pure (Right index)
+
+
+-- | Largest IPC message metadata a handle reader will buffer.
+maxMessageMetadataBytes :: Int
+maxMessageMetadataBytes = 1 `shiftL` 28
 
 
 -- | The @[Block]@ struct vector at a footer slot, range-validated.

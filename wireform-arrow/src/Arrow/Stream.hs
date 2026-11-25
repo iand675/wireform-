@@ -118,11 +118,11 @@ import Arrow.FlatBufferIPC (
   FileIndex (..),
   StreamFrame (..),
   decodeMessageFrame,
-  parseFileIndex,
   readArrowFileFBWithDicts,
   readArrowStreamFBInterleaved,
   readFileIndex,
  )
+import Arrow.FlatBufferIPC.Read (maxMessageMetadataBytes, parseFileIndexWithLegacySchema)
 import Arrow.FlatBufferIPC.Write (
   Frame,
   batchFrame,
@@ -992,7 +992,9 @@ readFileIndexHandle h = do
                   footer <- BS.hGet h (fromIntegral footerLen)
                   if BS.length footer < fromIntegral footerLen
                     then pure (Left "Arrow.Stream: truncated file footer")
-                    else pure (parseFileIndex (fromIntegral size) footer)
+                    else parseFileIndexWithLegacySchema readAt (fromIntegral size) footer
+  where
+    readAt off len = hSeek h AbsoluteSeek (fromIntegral off) >> BS.hGet h len
 
 
 -- | Read one file section (message metadata + body) at its block.
@@ -1088,15 +1090,6 @@ hReadFrame h = do
                     if BS.length body < fromIntegral bodyLen
                       then pure (Left "Arrow.Stream: truncated stream message body")
                       else pure (Right (Just (msg, BS.take (fromIntegral bodyLen) body)))
-
-
-{- | Largest message metadata a handle-based reader will buffer. IPC
-metadata (schema / dictionary / record batch headers) is small even
-for very wide schemas; anything larger is a framing error or a lie,
-and buffering it is what a hostile input would want.
--}
-maxMessageMetadataBytes :: Int
-maxMessageMetadataBytes = 1 `shiftL` 28
 
 
 -- | Little-endian unsigned 32-bit int in the first 4 bytes.
